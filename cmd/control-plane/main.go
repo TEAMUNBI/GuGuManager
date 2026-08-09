@@ -48,10 +48,6 @@ func main() {
 		}
 	}()
 
-	api := httpapi.New(service, logger)
-	handler := spa(api, cfg.WebRoot, logger)
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
-
 	// 节点存活探测对实现了 ReconcileNodeLiveness 的适配器（Memory 与
 	// Postgres）每 5 秒对账一次：超过 30 秒无心跳的节点标记 offline，
 	// 并禁止继续向该节点下发任务。
@@ -65,21 +61,33 @@ func main() {
 
 	// production 额外启动 Agent 的 mTLS gRPC 网关（任务分发内嵌在
 	// Agent Connect 流的 claim loop 中，无需额外的分发协程）。
+	// agentServer 实现 httpapi.CommandDispatcher，控制台命令经 gRPC 帧下发到
+	// Agent；development 无 Agent 网关，dispatcher 为 nil 时命令仅落审计。
 	agentCtx, stopAgent := context.WithCancel(context.Background())
 	defer stopAgent()
+	var agentServer *agentrpc.Server
 	if cfg.Environment == config.Production {
 		pg, ok := service.(*store.Postgres)
 		if !ok {
 			logger.Error("agent gRPC requires a postgres-backed store", "type", fmt.Sprintf("%T", service))
 			os.Exit(1)
 		}
+		agentServer, err = buildAgentGRPCServer(cfg, pg, logger)
+		if err != nil {
+			logger.Error("initialize agent gRPC server", "error", err)
+			os.Exit(1)
+		}
 		go func() {
-			if serveErr := serveAgentGRPC(agentCtx, cfg, pg, logger); serveErr != nil {
+			if serveErr := agentServer.ListenAndServe(agentCtx, agentGRPCAddr(cfg), nil, nil); serveErr != nil {
 				logger.Error("agent gRPC server stopped", "error", serveErr)
 				os.Exit(1)
 			}
 		}()
 	}
+
+	api := httpapi.New(service, logger, httpapi.WithCommandDispatcher(agentServer))
+	handler := spa(api, cfg.WebRoot, logger)
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 
 	go func() {
 		logger.Info("control plane listening", "addr", cfg.HTTPAddr, "environment", cfg.Environment, "adapter", adapterName(service))
@@ -169,28 +177,24 @@ func buildProductionService(ctx context.Context, cfg config.Config, logger *slog
 	return pg, nil
 }
 
-// serveAgentGRPC 启动 Agent 的 mTLS gRPC 网关（仅 production）。
+// buildAgentGRPCServer 构造 Agent 的 mTLS gRPC 服务器（仅 production）。
 // CA 目录优先取 GUGU_AGENT_CA_DIR，否则从 GUGU_AGENT_CA_CERT_FILE 所在目录
 // 推断；注册令牌取 GUGU_AGENT_REGISTRATION_TOKEN，未设置时回退 bootstrap
-// token；监听地址取 GUGU_AGENT_GRPC_ADDR，默认 127.0.0.1:8443。
-func serveAgentGRPC(ctx context.Context, cfg config.Config, pg *store.Postgres, logger *slog.Logger) error {
+// token。返回的 server 同时实现 httpapi.CommandDispatcher，供控制台命令
+// 经 Connect 流下发到 Agent。
+func buildAgentGRPCServer(cfg config.Config, pg *store.Postgres, logger *slog.Logger) (*agentrpc.Server, error) {
 	caDir := strings.TrimSpace(os.Getenv("GUGU_AGENT_CA_DIR"))
 	if caDir == "" {
 		caDir = filepath.Dir(cfg.AgentCACertFile)
 	}
 	ca, err := agentca.NewCA(caDir)
 	if err != nil {
-		return fmt.Errorf("initialize agent ca: %w", err)
+		return nil, fmt.Errorf("initialize agent ca: %w", err)
 	}
 
 	registrationToken := strings.TrimSpace(os.Getenv("GUGU_AGENT_REGISTRATION_TOKEN"))
 	if registrationToken == "" {
 		registrationToken = readBootstrapToken(cfg)
-	}
-
-	addr := strings.TrimSpace(os.Getenv("GUGU_AGENT_GRPC_ADDR"))
-	if addr == "" {
-		addr = "127.0.0.1:8443"
 	}
 
 	// 面板位于 NAT/端口转发之后时，Agent 用公网 IP 校验证书；监听地址只是
@@ -202,11 +206,19 @@ func serveAgentGRPC(ctx context.Context, cfg config.Config, pg *store.Postgres, 
 		}
 	}
 
-	server := agentrpc.NewServer(ca, pg, logger,
+	return agentrpc.NewServer(ca, pg, logger,
 		agentrpc.WithRegistrationToken(registrationToken),
 		agentrpc.WithServerIPs(publicIPs),
-	)
-	return server.ListenAndServe(ctx, addr, nil, nil)
+	), nil
+}
+
+// agentGRPCAddr 返回 Agent gRPC 监听地址，默认 127.0.0.1:8443。
+func agentGRPCAddr(cfg config.Config) string {
+	addr := strings.TrimSpace(os.Getenv("GUGU_AGENT_GRPC_ADDR"))
+	if addr == "" {
+		addr = "127.0.0.1:8443"
+	}
+	return addr
 }
 
 // readBootstrapToken 读取 bootstrap token 文件内容并去除首尾空白；

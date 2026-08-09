@@ -1,4 +1,4 @@
-# 面板真实数据链路（控制台 + 指标 + 备份）实施计划
+﻿# 面板真实数据链路（控制台 + 指标 + 备份）实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -17,7 +17,7 @@
 - Generate: `api/proto/gugumanager/agent/v1/agent.pb.go`, `agent_grpc.pb.go`（由 buf 生成）
 - Test: 编译验证
 
-- [ ] **Step 1: 安装 buf**
+- [x] **Step 1: 安装 buf**
 
 Run（PowerShell，需要网络）:
 ```powershell
@@ -27,7 +27,7 @@ buf --version
 ```
 Expected: 输出 `1.53.0` 或更高。
 
-- [ ] **Step 2: 修改 agent.proto 增加 ConsoleCommand 帧**
+- [x] **Step 2: 修改 agent.proto 增加 ConsoleCommand 帧**
 
 在 `ConnectResponse` 的 `oneof payload` 末尾（`certificate_response = 5;` 之后）追加 `console_command = 6;`，并新增 message：
 
@@ -52,7 +52,7 @@ message ConsoleCommand {
 }
 ```
 
-- [ ] **Step 3: 重新生成 pb.go**
+- [x] **Step 3: 重新生成 pb.go**
 
 Run:
 ```powershell
@@ -62,7 +62,7 @@ buf generate
 ```
 Expected: 无输出错误；`agent.pb.go` 中出现 `ConnectResponse_ConsoleCommand` 类型与 `GetConsoleCommand()` 方法。
 
-- [ ] **Step 4: 编译验证**
+- [x] **Step 4: 编译验证**
 
 Run:
 ```powershell
@@ -70,7 +70,7 @@ Run:
 ```
 Expected: 编译成功（exit 0）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add api/proto/gugumanager/agent/v1/agent.proto api/proto/gugumanager/agent/v1/agent.pb.go api/proto/gugumanager/agent/v1/agent_grpc.pb.go buf.*
@@ -85,7 +85,7 @@ git commit -m "feat(proto): add console_command frame for control plane to agent
 - Modify: `internal/runtime/docker.go`
 - Test: `internal/runtime/docker_runtime_test.go`（若存在；无则新增辅助类型单测）
 
-- [ ] **Step 1: 写新增能力的最小测试（fake 驱动）**
+- [x] **Step 1: 写新增能力的最小测试（fake 驱动）**
 
 新建 `internal/runtime/docker_runtime_test.go`（若已存在则追加）：
 ```go
@@ -103,7 +103,7 @@ func TestContainerStatsZeroValue(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/runtime/ -run TestContainerStatsZeroValue -count=1`
 Expected: FAIL（`ContainerStats` 未定义）。
 
-- [ ] **Step 2: 实现新增类型与方法**
+- [x] **Step 2: 实现新增类型与方法**
 
 在 `internal/runtime/docker.go` 追加（import 增加 `bytes`、`encoding/json`、`github.com/docker/docker/api/types/container` 已存在）：
 
@@ -253,12 +253,12 @@ func (r *DockerRuntime) CopyArchiveFromContainer(ctx context.Context, containerI
 ```
 （`os` 需加入 import；`types` import 已有。）
 
-- [ ] **Step 3: 运行测试确认通过**
+- [x] **Step 3: 运行测试确认通过**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/runtime/ -count=1`
 Expected: PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add internal/runtime/docker.go internal/runtime/docker_runtime_test.go
@@ -276,7 +276,7 @@ git commit -m "feat(runtime): docker stats, exec, follow logs, env inspect, arch
 - Modify: `internal/store/memory.go`（接口方法补齐——Memory 无 RecordConsoleLines/ApplyServerMetrics 时需加空实现以通过编译，若 ControlPlane 接口不含则跳过）
 - Test: `internal/store/console_metrics_buffer_test.go`（Postgres 集成测试）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 新建 `internal/store/console_metrics_buffer_test.go`：
 ```go
@@ -343,7 +343,7 @@ func TestPostgresApplyServerMetricsAndMerge(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/store/ -run 'TestPostgresConsoleBuffer|TestPostgresApplyServerMetrics' -count=1`
 Expected: FAIL（`RecordConsoleLines`/`ApplyServerMetrics` 未定义）。
 
-- [ ] **Step 2: 实现缓冲与接口**
+- [x] **Step 2: 实现缓冲与接口**
 
 新建 `internal/store/console_metrics_buffer.go`：
 ```go
@@ -461,7 +461,7 @@ func (s *Postgres) appendMetricsToServer(server *domain.Server) {
 }
 ```
 
-- [ ] **Step 3: 在 Postgres struct 增加字段并在构造时初始化**
+- [x] **Step 3: 在 Postgres struct 增加字段并在构造时初始化**
 
 `internal/store/postgres_entities.go`（或 store 的 Postgres struct 定义文件）的 `Postgres` struct 增加：
 ```go
@@ -475,7 +475,7 @@ func (s *Postgres) appendMetricsToServer(server *domain.Server) {
 	s.metricStates = make(map[string]*metricState)
 ```
 
-- [ ] **Step 4: 改造 Console 与 sendConsoleCommand**
+- [x] **Step 4: 改造 Console 与 sendConsoleCommand**
 
 `internal/store/postgres_controlplane.go`：
 ```go
@@ -491,19 +491,19 @@ func (s *Postgres) Console(serverID string) ([]domain.ConsoleLine, error) {
 }
 ```
 
-- [ ] **Step 5: scanServer 合并指标**
+- [x] **Step 5: scanServer 合并指标**
 
 `internal/store/postgres_entities.go` 中 `scanServer` 返回 `server` 前调用：
 ```go
 	s.appendMetricsToServer(server)
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/store/ -run 'TestPostgresConsoleBuffer|TestPostgresApplyServerMetrics' -count=1`
 Expected: PASS。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add internal/store/console_metrics_buffer.go internal/store/postgres_controlplane.go internal/store/postgres_entities.go internal/store/console_metrics_buffer_test.go
@@ -520,7 +520,7 @@ git commit -m "feat(store): postgres console ring buffer and server metrics stat
 - Modify: `internal/store/postgres_tasks.go:141-204`（CompleteTask resultJSON）
 - Test: `internal/agentrpc/server_test.go`、`internal/store/postgres_controlplane_test.go`
 
-- [ ] **Step 1: 写失败测试（命令下发 + 帧落库）**
+- [x] **Step 1: 写失败测试（命令下发 + 帧落库）**
 
 在 `internal/agentrpc/server_test.go` 追加（复用现有 fake 基础设施，先看现有测试的 fake 结构后按模式补）：
 ```go
@@ -533,7 +533,7 @@ func TestSendConsoleCommandDispatchesFrame(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agentrpc/ -run TestSendConsoleCommandDispatchesFrame -count=1`
 Expected: FAIL。
 
-- [ ] **Step 2: Server 增加流注册表与下发方法**
+- [x] **Step 2: Server 增加流注册表与下发方法**
 
 `internal/agentrpc/server.go`：
 ```go
@@ -584,7 +584,7 @@ func (s *Server) SendConsoleCommand(nodeID, serverID, command string) error {
 	ApplyServerMetrics(ctx context.Context, metrics []domain.ServerMetrics) error
 ```
 
-- [ ] **Step 3: connect.go 注册/注销流并处理帧**
+- [x] **Step 3: connect.go 注册/注销流并处理帧**
 
 `internal/agentrpc/connect.go`：
 - 在 `Connect` 内、`send` 闭包定义后：`s.registerStream(&nodeStream{nodeID: nodeID, send: send})`；`defer s.unregisterStream(nodeID)`。
@@ -643,23 +643,23 @@ func (s *Server) handleMetricsBatch(ctx context.Context, nodeID string, batch *a
 }
 ```
 
-- [ ] **Step 4: handleTaskResult 传 resultJSON**
+- [x] **Step 4: handleTaskResult 传 resultJSON**
 
 `internal/agentrpc/connect.go`：
 ```go
 	if err := s.store.CompleteTask(ctx, result.GetOperationId(), nodeID, result.GetSucceeded(), errCode, result.GetResultJson()); err != nil {
 ```
 
-- [ ] **Step 5: Postgres.CompleteTask 接受 resultJSON（回写逻辑在 Task 8 补）**
+- [x] **Step 5: Postgres.CompleteTask 接受 resultJSON（回写逻辑在 Task 8 补）**
 
 `internal/store/postgres_tasks.go` 签名改为 `(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error`，内部先存 `var resultJSONBytes = resultJSON`（Task 8 使用）。现有调用点（`postgres_*_test.go` 多处 `CompleteTask(..., true, nil)`）追加 `nil` 参数。
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agentrpc/ ./internal/store/ -count=1`
 Expected: PASS（新增命令下发测试与既有测试全绿）。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add internal/agentrpc/server.go internal/agentrpc/connect.go internal/store/postgres_tasks.go internal/agentrpc/server_test.go internal/store/postgres_controlplane_test.go internal/store/postgres_entities_test.go
@@ -676,7 +676,7 @@ git commit -m "feat(agentrpc): console command dispatch, log/metrics frame inges
 - Modify: `internal/agent/config.go`（可选：采样间隔配置）
 - Test: `internal/agent/agent_test.go`、`internal/agent/docker_runtime_test.go`
 
-- [ ] **Step 1: 写失败测试（命令执行 fake 验证）**
+- [x] **Step 1: 写失败测试（命令执行 fake 验证）**
 
 在 `internal/agent/docker_runtime_test.go` 追加（复用现有 fake runtime 模式）：
 ```go
@@ -702,7 +702,7 @@ func TestExecuteConsoleCommandRunsExecInContainer(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agent/ -run TestExecuteConsoleCommandRunsExecInContainer -count=1`
 Expected: FAIL。
 
-- [ ] **Step 2: 扩展 containerRuntime 接口并实现 ExecuteConsoleCommand**
+- [x] **Step 2: 扩展 containerRuntime 接口并实现 ExecuteConsoleCommand**
 
 `internal/agent/docker_executor.go` 的 `containerRuntime` 接口增加：
 ```go
@@ -728,7 +728,7 @@ func (e *DockerExecutor) ExecuteConsoleCommand(ctx context.Context, serverID str
 }
 ```
 
-- [ ] **Step 3: agent 处理 ConsoleCommand 帧并回显输出**
+- [x] **Step 3: agent 处理 ConsoleCommand 帧并回显输出**
 
 `internal/agent/agent.go` 的 `recvLoop`（收到 `ConnectResponse` 的 switch）增加分支：
 ```go
@@ -781,7 +781,7 @@ func (a *agent) nextSequence(serverID string) int64 {
 ```
 （`encoding/json`、`sync` import；构造时初始化 map。）
 
-- [ ] **Step 4: 日志 tailer**
+- [x] **Step 4: 日志 tailer**
 
 `internal/agent/agent.go` 新增（在 `serveSession` 成功连接并收到 Welcome 后、进入 recvLoop 前启动）：
 ```go
@@ -871,7 +871,7 @@ func (r *DockerRuntime) ListRunningContainers(ctx context.Context, namePrefix st
 }
 ```
 
-- [ ] **Step 5: 指标采样器**
+- [x] **Step 5: 指标采样器**
 
 `internal/agent/agent.go` 新增：
 ```go
@@ -953,7 +953,7 @@ func parsePlayersFromRCON(output string) (online, max int) {
 }
 ```
 
-- [ ] **Step 6: 在 serveSession 中启动 tailers 与 sampler**
+- [x] **Step 6: 在 serveSession 中启动 tailers 与 sampler**
 
 在 `serveSession` 收到 Welcome、进入 recvLoop 前调用：
 ```go
@@ -961,12 +961,12 @@ func parsePlayersFromRCON(output string) (online, max int) {
 	a.startLogTailers(ctx, stream)
 ```
 
-- [ ] **Step 7: 运行测试**
+- [x] **Step 7: 运行测试**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agent/ ./internal/runtime/ -count=1`
 Expected: PASS。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add internal/agent/agent.go internal/agent/docker_executor.go internal/agent/metrics.go internal/agent/agent_test.go internal/agent/docker_runtime_test.go internal/runtime/docker.go
@@ -983,7 +983,7 @@ git commit -m "feat(agent): console command exec, log tailer, metric sampler wit
 - Modify: `internal/store/postgres_entities.go`（provision payload 辅助类型同文件的 backup payload 类型）
 - Test: `internal/store/postgres_controlplane_test.go`
 
-- [ ] **Step 1: 写失败测试（CreateBackup checkpoint 含 payload）**
+- [x] **Step 1: 写失败测试（CreateBackup checkpoint 含 payload）**
 
 在 `internal/store/postgres_controlplane_test.go` 追加（复用现有 backup 测试的建服/权限模式）：
 ```go
@@ -995,7 +995,7 @@ func TestCreateBackupWritesCheckpointPayload(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/store/ -run TestCreateBackupWritesCheckpointPayload -count=1`
 Expected: FAIL（checkpoint 为空）。
 
-- [ ] **Step 2: 实现 backup payload 类型与写入**
+- [x] **Step 2: 实现 backup payload 类型与写入**
 
 `internal/store/postgres_entities.go` 追加（放在 provision 辅助类型附近）：
 ```go
@@ -1012,7 +1012,7 @@ type backupTaskPayload struct {
 
 `RestoreBackup`/`DeleteBackup`：同样写 payload（含 backupID、storageObjectKey=备份行已存的 `storage_location`；若为空则 `backups/<backupID>.tar.gz`）。
 
-- [ ] **Step 3: claimedTaskToProto 归一化 backup**
+- [x] **Step 3: claimedTaskToProto 归一化 backup**
 
 `internal/agentrpc/connect.go` 的 `claimedTaskToProto` 增加分支（在 power 分支之后）：
 ```go
@@ -1028,12 +1028,12 @@ type backupTaskPayload struct {
 ```
 （`protojson` 已在 connect.go 引入或新增 import。）
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/store/ ./internal/agentrpc/ -count=1`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add internal/store/postgres_controlplane.go internal/store/postgres_entities.go internal/agentrpc/connect.go internal/store/postgres_controlplane_test.go
@@ -1049,9 +1049,8 @@ git commit -m "feat(store): backup/restore/delete task checkpoint payload and pr
 - Modify: `internal/runtime/docker.go`（备份用方法已在前置 Task 提供）
 - Test: `internal/agent/docker_runtime_test.go`
 
-- [ ] **Step 1: 写失败测试**
-
-`internal/agent/docker_runtime_test.go` 追加：
+- [x] **Step 1: 写失败测试**
+在 `internal/agent/docker_runtime_test.go` 追加：
 ```go
 func TestExecuteBackupTaskArchivesDataVolume(t *testing.T) {
 	dir := t.TempDir()
@@ -1079,7 +1078,7 @@ func TestExecuteBackupTaskArchivesDataVolume(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agent/ -run TestExecuteBackupTaskArchivesDataVolume -count=1`
 Expected: FAIL。
 
-- [ ] **Step 2: ExecuteTask 分发 backup + 实现 executeBackup**
+- [x] **Step 2: ExecuteTask 分发 backup + 实现 executeBackup**
 
 `internal/agent/docker_executor.go`：
 ```go
@@ -1207,17 +1206,15 @@ func fileChecksum(path string) (string, int64, error) {
 }
 ```
 
-- [ ] **Step 3: fake 测试驱动补齐 fake runtime 方法**
+- [x] **Step 3: fake 测试驱动补齐 fake runtime 方法**
 
 `internal/agent/docker_runtime_test.go` 的 fake runtime 需要实现新增接口方法（`ExecInContainer`、`CopyArchiveToContainer`、`CopyArchiveFromContainer`、`ListRunningContainers`、`FollowLogs`、`ContainerStats`、`InspectEnv`）。fake 用真实文件系统实现 tar/cp 语义（`os` 操作 + `archive/tar` 打包），保证断言成立。
 
-- [ ] **Step 4: 运行测试**
-
+- [x] **Step 4: 运行测试**
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agent/ -count=1`
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
-
+- [x] **Step 5: 提交**
 ```bash
 git add internal/agent/docker_executor.go internal/agent/backup.go internal/agent/docker_runtime_test.go
 git commit -m "feat(agent): docker exec tar backup/restore/delete execution"
@@ -1231,7 +1228,7 @@ git commit -m "feat(agent): docker exec tar backup/restore/delete execution"
 - Modify: `internal/store/postgres_tasks.go:141-204`
 - Test: `internal/store/postgres_controlplane_test.go`
 
-- [ ] **Step 1: 写失败测试（backup 任务完成后 backups 行 ready）**
+- [x] **Step 1: 写失败测试（backup 任务完成后 backups 行 ready）**
 
 在 `internal/store/postgres_controlplane_test.go` 追加：
 ```go
@@ -1244,7 +1241,7 @@ func TestCompleteBackupTaskMarksBackupReady(t *testing.T) {
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/store/ -run TestCompleteBackupTaskMarksBackupReady -count=1`
 Expected: FAIL。
 
-- [ ] **Step 2: 实现回写**
+- [x] **Step 2: 实现回写**
 
 `internal/store/postgres_tasks.go` 的 `CompleteTask`，在 provision 分支后追加：
 ```go
@@ -1307,12 +1304,12 @@ Expected: FAIL。
 ```
 （`encoding/json` 加入 import。）
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/store/ -count=1`
 Expected: PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add internal/store/postgres_tasks.go internal/store/postgres_controlplane_test.go
@@ -1326,12 +1323,12 @@ git commit -m "feat(store): complete backup/restore/delete tasks update backups 
 **Files:**
 - Modify: `internal/agent/docker_executor.go:120-128`
 
-- [ ] **Step 1: 写失败测试（RCON env 注入）**
+- [x] **Step 1: 写失败测试（RCON env 注入）**
 
 `internal/agent/docker_runtime_test.go`：provision 测试断言 `cfg.Env` 含 `ENABLE_RCON=true` 与 `RCON_PORT=25575`（现有 provision fake 测试的 CreateContainer 参数捕获后断言）。
 Run: 预期 FAIL（env 缺 RCON）。
 
-- [ ] **Step 2: 实现注入**
+- [x] **Step 2: 实现注入**
 
 `internal/agent/docker_executor.go` 的 `executeProvision` 中初始化 Env 后追加：
 ```go
@@ -1354,12 +1351,12 @@ func randomHex(n int) string {
 ```
 （`crypto/rand`、`encoding/hex`、`fmt`、`time` import。）
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 Run: `& 'C:\Users\andi\sdk\go1.26.5\bin\go.exe' test ./internal/agent/ -count=1`
 Expected: PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add internal/agent/docker_executor.go internal/agent/metrics.go internal/agent/docker_runtime_test.go
@@ -1374,17 +1371,17 @@ git commit -m "feat(agent): enable RCON with random password on provision"
 - Modify: `web/src/pages/ServerWorkspace.tsx`（consoleCopy.transportValue、overviewCopy 的 developmentSnapshot 相关文案）
 - Modify: `web/src/lib/mock.ts`（console/metrics 形状保持；如需命令回显同步）
 
-- [ ] **Step 1: 改文案**
+- [x] **Step 1: 改文案**
 
 `web/src/pages/ServerWorkspace.tsx`：
 - `consoleCopy` 各语言 `transportValue`：`"轮询 / 开发环境"` → `"实时（Agent 日志流）"`（en: `"Realtime (agent log stream)"`；ja/ko 对应翻译）。
 - `overviewCopy` 各语言 `developmentSnapshot`：`"开发环境快照"` → `"实时采集 · 每 5 秒"`（en: `"Live · sampled every 5s"`；ja/ko 对应翻译）。
 
-- [ ] **Step 2: 同步 mock**
+- [x] **Step 2: 同步 mock**
 
 `web/src/lib/mock.ts`：确认 `console`/`metrics` mock 数据字段与 `types.ts` 的 `ConsoleLine`/`ServerMetrics` 一致（若有新字段则补；无新字段则不改形状）。
 
-- [ ] **Step 3: 运行前端检查**
+- [x] **Step 3: 运行前端检查**
 
 Run:
 ```powershell
@@ -1394,7 +1391,7 @@ npm test -- --run
 ```
 Expected: typecheck 通过、测试全绿。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add web/src/pages/ServerWorkspace.tsx web/src/lib/mock.ts
@@ -1407,7 +1404,7 @@ git commit -m "feat(web): realtime console/metrics copy, sync mock"
 
 **Files:** 无新增。
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 Run（设置本地测试库环境）:
 ```powershell
@@ -1417,7 +1414,7 @@ $env:GUGU_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/gugu_id
 ```
 Expected: 除已知 migrations SSL 偶发外全部 PASS；vet 干净。
 
-- [ ] **Step 2: 交叉编译**
+- [x] **Step 2: 交叉编译**
 
 Run:
 ```powershell
@@ -1427,7 +1424,7 @@ $env:CGO_ENABLED='0'; $env:GOOS='linux'; $env:GOARCH='amd64'
 ```
 Expected: 两个二进制生成。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A
@@ -1447,6 +1444,8 @@ scp `var/e2e/dist/control-plane` 与 `var/e2e/dist/agent` 到服务器；`instal
 - [ ] **Step 2: 控制台验证**
 
 浏览器打开 paper-05 工作区控制台：容器 stdout 日志滚动出现；输入命令（如 `list`）→ 输出回显（玩家在线数或错误信息）。
+
+> 验收发现并修复的接线缺口：原 `Postgres.SendConsoleCommand` 仅校验+审计，HTTP `POST /console/commands` 不真正下发。修复：`internal/httpapi/handler.go` 定义 `CommandDispatcher` 接口与 `WithCommandDispatcher` option，`consoleCommand` handler 在 store 校验+审计通过后查服务器 NodeID 并调用 `dispatcher.SendConsoleCommand`；`cmd/control-plane/main.go` 将 `serveAgentGRPC` 拆为 `buildAgentGRPCServer`（返回 `*agentrpc.Server`）+ `agentGRPCAddr`，并把 server 作为 dispatcher 注入 `httpapi.New`。节点离线返回 503 `NODE_OFFLINE`。新增 handler_test.go 测试 `TestConsoleCommandDispatchesToAgent`/`TestConsoleCommandNodeOfflineReportsError`。
 
 - [ ] **Step 3: 指标验证**
 

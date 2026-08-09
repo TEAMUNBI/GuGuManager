@@ -576,7 +576,9 @@ func (a *agent) startLogTailer(ctx context.Context, stream agentv1.AgentGatewayS
 			batch = batch[:0]
 		}
 		for scanner.Scan() {
-			batch = append(batch, scanner.Text())
+			// docker 日志可能包含非法 UTF-8（ANSI 控制序列、乱码字节），
+			// gRPC proto string 字段要求合法 UTF-8，发送前统一替换。
+			batch = append(batch, strings.ToValidUTF8(scanner.Text(), "\uFFFD"))
 			if len(batch) >= 64 {
 				flush()
 			}

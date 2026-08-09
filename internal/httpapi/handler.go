@@ -81,9 +81,24 @@ type ControlPlane interface {
 	Heartbeat(nodeName string, agentVersion string) error
 }
 
+// CommandDispatcher 向节点 Connect 流下发控制台命令帧。
+// 生产环境由 agentrpc.Server 实现；开发环境可注入 nil（仅校验+审计）。
+type CommandDispatcher interface {
+	SendConsoleCommand(nodeID, serverID, command string) error
+}
+
+// Option 配置 Handler。
+type Option func(*Handler)
+
+// WithCommandDispatcher 注入命令下发器，使控制台命令经 gRPC 帧到达 Agent。
+func WithCommandDispatcher(d CommandDispatcher) Option {
+	return func(h *Handler) { h.dispatcher = d }
+}
+
 type Handler struct {
 	service          ControlPlane
 	logger           *slog.Logger
+	dispatcher       CommandDispatcher
 	loginLimiter     *identity.AttemptLimiter
 	sensitiveLimiter *identity.AttemptLimiter
 }
@@ -97,7 +112,7 @@ type contextKey string
 
 const principalKey contextKey = "principal"
 
-func New(service ControlPlane, logger *slog.Logger) http.Handler {
+func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler {
 	h := &Handler{
 		service: service,
 		logger:  logger,
@@ -107,6 +122,9 @@ func New(service ControlPlane, logger *slog.Logger) http.Handler {
 		sensitiveLimiter: identity.NewAttemptLimiter(identity.AttemptLimit{
 			Maximum: 5, Window: 5 * time.Minute, BlockFor: 15 * time.Minute,
 		}, time.Now),
+	}
+	for _, opt := range opts {
+		opt(h)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
@@ -860,9 +878,27 @@ func (h *Handler) consoleCommand(w http.ResponseWriter, r *http.Request) {
 		h.writeJSONDecodeError(w, r, err, "控制台命令格式无效")
 		return
 	}
-	if err := h.service.SendConsoleCommand(r.PathValue("serverID"), request.Command, principalFrom(r).Session.User); err != nil {
+	serverID := r.PathValue("serverID")
+	// store 层负责校验、权限与审计；校验通过后真实帧由 dispatcher 下发。
+	if err := h.service.SendConsoleCommand(serverID, request.Command, principalFrom(r).Session.User); err != nil {
 		h.writeError(w, traceID(r), err)
 		return
+	}
+	if h.dispatcher != nil {
+		server, err := h.service.Server(serverID)
+		if err != nil {
+			h.writeError(w, traceID(r), err)
+			return
+		}
+		if server.NodeID == "" {
+			h.writeError(w, traceID(r), domain.NewProblem("OPERATION_CONFLICT", "服务器未绑定节点", false))
+			return
+		}
+		if err := h.dispatcher.SendConsoleCommand(server.NodeID, serverID, request.Command); err != nil {
+			h.logger.Warn("dispatch console command", "server", serverID, "node", server.NodeID, "error", err)
+			h.writeError(w, traceID(r), domain.NewProblem("NODE_OFFLINE", "节点离线，命令未下发", false))
+			return
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 }

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1479,5 +1480,65 @@ func decodeResponse(t *testing.T, response *http.Response, target any) {
 	defer response.Body.Close()
 	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// recordingDispatcher 记录经 HTTP 控制台命令下发的帧参数。
+type recordingDispatcher struct {
+	nodeID   string
+	serverID string
+	command  string
+	err      error
+}
+
+func (d *recordingDispatcher) SendConsoleCommand(nodeID, serverID, command string) error {
+	d.nodeID, d.serverID, d.command = nodeID, serverID, command
+	return d.err
+}
+
+func TestConsoleCommandDispatchesToAgent(t *testing.T) {
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	dispatcher := &recordingDispatcher{}
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCommandDispatcher(dispatcher))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, session := authenticatedClient(t, testServer.URL)
+
+	response := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console/commands", `{"command":"list"}`, map[string]string{"X-CSRF-Token": session.CSRFToken})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("console command status = %d, want 202", response.StatusCode)
+	}
+	if dispatcher.nodeID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("dispatcher nodeID = %q, want nimbus-east-01 node", dispatcher.nodeID)
+	}
+	if dispatcher.serverID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" || dispatcher.command != "list" {
+		t.Fatalf("dispatcher got serverID=%q command=%q, want serverID=aaaaaaaa... command=list", dispatcher.serverID, dispatcher.command)
+	}
+}
+
+func TestConsoleCommandNodeOfflineReportsError(t *testing.T) {
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	dispatcher := &recordingDispatcher{err: errors.New("node has no active connect stream")}
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCommandDispatcher(dispatcher))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, session := authenticatedClient(t, testServer.URL)
+
+	response := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console/commands", `{"command":"list"}`, map[string]string{"X-CSRF-Token": session.CSRFToken})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("offline node status = %d, want 503", response.StatusCode)
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	decodeResponse(t, response, &payload)
+	if payload.Error.Code != "NODE_OFFLINE" {
+		t.Fatalf("error code = %q, want NODE_OFFLINE", payload.Error.Code)
 	}
 }
