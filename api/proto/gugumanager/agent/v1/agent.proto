@@ -33,7 +33,16 @@ message ConnectResponse {
     RotateCertificate rotate_certificate = 3;
     Drain drain = 4;
     CertificateResponse certificate_response = 5;
+    ConsoleCommand console_command = 6;
   }
+}
+
+// 控制台下发的单条命令。Agent 收到后执行 docker exec <container> <command>，
+// 输出作为 stdout 流经 LogBatch 回显。
+message ConsoleCommand {
+  string request_id = 1;
+  string server_id = 2;
+  string command = 3;
 }
 
 message Hello {
