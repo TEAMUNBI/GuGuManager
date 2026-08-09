@@ -137,8 +137,9 @@ func (s *Postgres) ClaimTask(ctx context.Context, nodeID string) (*ClaimedTask, 
 }
 
 // CompleteTask moves a leased task to its terminal state (succeeded/failed)
-// and records the outcome as an audit event.
-func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string) error {
+// and records the outcome as an audit event. resultJSON carries the agent's
+// machine-readable result (e.g. backup checksum) for task-type specific writes.
+func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

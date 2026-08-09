@@ -13,11 +13,13 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
 	"github.com/gugumanager/gugumanager/internal/agentca"
 	"github.com/gugumanager/gugumanager/internal/domain"
+	"github.com/gugumanager/gugumanager/internal/id"
 	"github.com/gugumanager/gugumanager/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -42,10 +44,12 @@ type TaskStore interface {
 	NodeByID(ctx context.Context, nodeID string) (domain.Node, error)
 	EnqueueTask(ctx context.Context, serverID, nodeID, taskType string, generation int64, actorID string, idemKey string, requestDigest []byte) (string, error)
 	ClaimTask(ctx context.Context, nodeID string) (*store.ClaimedTask, error)
-	CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string) error
+	CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error
 	RecordAgentHeartbeat(ctx context.Context, nodeID string, hb domain.Heartbeat) error
 	ApplyServerObserved(ctx context.Context, obs domain.ServerObserved) error
 	RecordAudit(ctx context.Context, event domain.AuditEvent) error
+	RecordConsoleLines(ctx context.Context, serverID string, lines []domain.ConsoleLine) error
+	ApplyServerMetrics(ctx context.Context, metrics []domain.ServerMetrics) error
 }
 
 // Option 配置 Server。
@@ -73,16 +77,26 @@ func WithServerIPs(ips []net.IP) Option {
 	}
 }
 
+// nodeStream 是节点当前 Connect 连接的发送句柄。注册进 Server.streams，
+// 供 SendConsoleCommand 在流上直接下发命令帧。
+type nodeStream struct {
+	nodeID string
+	send   func(*agentv1.ConnectResponse) error
+}
+
 // Server 是 AgentGatewayService 的实现。
 type Server struct {
 	agentv1.UnimplementedAgentGatewayServiceServer
 
-	ca               *agentca.CA
-	store            TaskStore
-	log              *slog.Logger
+	ca                *agentca.CA
+	store             TaskStore
+	log               *slog.Logger
 	registrationToken string
-	claimPeriod      time.Duration
-	extraServerIPs   []net.IP
+	claimPeriod       time.Duration
+	extraServerIPs    []net.IP
+
+	streamMu sync.Mutex
+	streams  map[string]*nodeStream
 }
 
 // NewServer 构造 Agent gRPC 服务器。
@@ -92,11 +106,39 @@ func NewServer(ca *agentca.CA, store TaskStore, logger *slog.Logger, opts ...Opt
 		store:       store,
 		log:         logger,
 		claimPeriod: defaultClaimPeriod,
+		streams:     make(map[string]*nodeStream),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// registerStream 记录节点当前连接，供控制面命令下发定位。
+func (s *Server) registerStream(stream *nodeStream) {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	s.streams[stream.nodeID] = stream
+}
+
+// unregisterStream 在 Connect 退出时移除节点连接。
+func (s *Server) unregisterStream(nodeID string) {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	delete(s.streams, nodeID)
+}
+
+// SendConsoleCommand 向节点流下发控制台命令帧；节点无活动连接时报错。
+func (s *Server) SendConsoleCommand(nodeID, serverID, command string) error {
+	s.streamMu.Lock()
+	stream := s.streams[nodeID]
+	s.streamMu.Unlock()
+	if stream == nil {
+		return fmt.Errorf("node %s has no active connect stream", nodeID)
+	}
+	return stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_ConsoleCommand{
+		ConsoleCommand: &agentv1.ConsoleCommand{RequestId: id.New(), ServerId: serverID, Command: command},
+	}})
 }
 
 // Enroll 校验注册令牌、注册节点，并为其签发 24h 的 client auth 证书。

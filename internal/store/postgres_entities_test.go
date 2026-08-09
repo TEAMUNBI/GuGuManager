@@ -205,7 +205,7 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 		t.Fatalf("provision payload mismatch: %s", claimed.PayloadJSON)
 	}
 
-	if err := s.CompleteTask(context.Background(), claimed.OperationID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), claimed.OperationID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 

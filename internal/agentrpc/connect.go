@@ -41,6 +41,8 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 		defer sendMu.Unlock()
 		return stream.Send(resp)
 	}
+	s.registerStream(&nodeStream{nodeID: nodeID, send: send})
+	defer s.unregisterStream(nodeID)
 
 	if err := send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Welcome{Welcome: &agentv1.Welcome{
 		ProtocolVersion:          protocolVersion,
@@ -81,9 +83,9 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 		case *agentv1.ConnectRequest_RunningTaskHeartbeat:
 			s.log.Debug("running task heartbeat", "node", nodeID, "operation", p.RunningTaskHeartbeat.GetOperationId())
 		case *agentv1.ConnectRequest_LogBatch:
-			s.log.Debug("log batch", "node", nodeID, "server", p.LogBatch.GetServerId(), "lines", len(p.LogBatch.GetLines()))
+			s.handleLogBatch(ctx, nodeID, p.LogBatch)
 		case *agentv1.ConnectRequest_MetricsBatch:
-			s.log.Debug("metrics batch", "node", nodeID, "servers", len(p.MetricsBatch.GetServers()))
+			s.handleMetricsBatch(ctx, nodeID, p.MetricsBatch)
 		default:
 			s.log.Warn("unknown connect frame", "node", nodeID)
 		}
@@ -137,8 +139,62 @@ func (s *Server) handleTaskResult(ctx context.Context, nodeID string, result *ag
 	if code := result.GetErrorCode(); code != "" {
 		errCode = &code
 	}
-	if err := s.store.CompleteTask(ctx, result.GetOperationId(), nodeID, result.GetSucceeded(), errCode); err != nil {
+	if err := s.store.CompleteTask(ctx, result.GetOperationId(), nodeID, result.GetSucceeded(), errCode, result.GetResultJson()); err != nil {
 		s.log.Warn("complete task", "node", nodeID, "operation", result.GetOperationId(), "error", err)
+	}
+}
+
+// handleLogBatch 把 Agent 上报的日志行写入服务器控制台缓冲。
+func (s *Server) handleLogBatch(ctx context.Context, nodeID string, batch *agentv1.LogBatch) {
+	if batch == nil {
+		return
+	}
+	lines := make([]domain.ConsoleLine, 0, len(batch.GetLines()))
+	seq := int64(batch.GetFirstSequence())
+	for i, message := range batch.GetLines() {
+		lines = append(lines, domain.ConsoleLine{
+			Sequence:  seq + int64(i),
+			Timestamp: time.Now().UTC(),
+			Stream:    "stdout",
+			Message:   message,
+		})
+	}
+	if err := s.store.RecordConsoleLines(ctx, batch.GetServerId(), lines); err != nil {
+		s.log.Warn("record console lines", "node", nodeID, "server", batch.GetServerId(), "error", err)
+	}
+}
+
+// handleMetricsBatch 把 Agent 上报的服务器指标写入指标状态。
+func (s *Server) handleMetricsBatch(ctx context.Context, nodeID string, batch *agentv1.MetricsBatch) {
+	if batch == nil {
+		return
+	}
+	observedAt := time.Now().UTC()
+	if ts := batch.GetObservedAt(); ts != nil {
+		observedAt = ts.AsTime()
+	}
+	metrics := make([]domain.ServerMetrics, 0, len(batch.GetServers()))
+	for _, m := range batch.GetServers() {
+		if m == nil {
+			continue
+		}
+		metrics = append(metrics, domain.ServerMetrics{
+			ServerID:           m.GetServerId(),
+			ObservedGeneration: int64(m.GetObservedGeneration()),
+			CPUPercent:         m.GetCpuPercent(),
+			MemoryBytes:        int64(m.GetMemoryBytes()),
+			MemoryLimitBytes:   int64(m.GetMemoryLimitBytes()),
+			DiskBytes:          int64(m.GetDiskBytes()),
+			DiskLimitBytes:     int64(m.GetDiskLimitBytes()),
+			NetworkRxBytes:     int64(m.GetNetworkRxBytes()),
+			NetworkTxBytes:     int64(m.GetNetworkTxBytes()),
+			PlayersOnline:      int(m.GetPlayersOnline()),
+			PlayersMax:         int(m.GetPlayersMax()),
+			ObservedAt:         observedAt,
+		})
+	}
+	if err := s.store.ApplyServerMetrics(ctx, metrics); err != nil {
+		s.log.Warn("apply server metrics", "node", nodeID, "error", err)
 	}
 }
 

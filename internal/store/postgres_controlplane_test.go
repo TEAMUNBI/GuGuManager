@@ -43,7 +43,7 @@ func controlPlaneFixture(t *testing.T, s *Postgres) (domain.User, string, string
 	}
 	// Simulate the agent completing the provision task so later operations are
 	// not blocked by the exclusive provision task (mirrors Memory semantics).
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete provision: %v", err)
 	}
 	if _, err := s.db.Exec(`UPDATE servers SET lifecycle_state = 'ready' WHERE id = $1`, op.ServerID); err != nil {
@@ -190,7 +190,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("create allocation operation = %+v, want reconcile/generation %d", op, generation+1)
 	}
 	generation = op.Generation
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete reconcile task: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("set primary generation = %d, want %d", setOp.Generation, generation+1)
 	}
 	generation = setOp.Generation
-	if err := s.CompleteTask(context.Background(), setOp.ID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), setOp.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete primary reconcile task: %v", err)
 	}
 	allocs, _ = s.Allocations(serverID)
@@ -254,7 +254,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("delete allocation generation = %d, want %d", delOp.Generation, generation+1)
 	}
 	generation = delOp.Generation
-	if err := s.CompleteTask(context.Background(), delOp.ID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), delOp.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete delete reconcile task: %v", err)
 	}
 	allocs, _ = s.Allocations(serverID)
@@ -291,7 +291,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("update startup generation = %d, want %d", updOp.Generation, generation+1)
 	}
 	generation = updOp.Generation
-	if err := s.CompleteTask(context.Background(), updOp.ID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), updOp.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete startup reconcile task: %v", err)
 	}
 	startup, err = s.Startup(serverID)
@@ -384,7 +384,7 @@ func TestPostgresControlPlaneBackupsConsoleHeartbeat(t *testing.T) {
 	backupID := backups[0].ID
 	// Simulate the agent finishing the backup task so the restore path is not
 	// blocked by the exclusive backup task.
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil); err != nil {
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete backup task: %v", err)
 	}
 

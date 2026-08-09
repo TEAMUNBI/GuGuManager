@@ -40,6 +40,8 @@ type fakeStore struct {
 	completed  []taskCompleted
 	queued     []*store.ClaimedTask
 	audits     []domain.AuditEvent
+	consoleLines []domain.ConsoleLine
+	metrics      []domain.ServerMetrics
 }
 
 type taskCompleted struct {
@@ -47,6 +49,7 @@ type taskCompleted struct {
 	NodeID      string
 	Succeeded   bool
 	ErrorCode   *string
+	ResultJSON  []byte
 }
 
 func newFakeStore() *fakeStore {
@@ -103,10 +106,10 @@ func (f *fakeStore) ClaimTask(ctx context.Context, nodeID string) (*store.Claime
 	return nil, nil
 }
 
-func (f *fakeStore) CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string) error {
+func (f *fakeStore) CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.completed = append(f.completed, taskCompleted{OperationID: operationID, NodeID: nodeID, Succeeded: succeeded, ErrorCode: errCode})
+	f.completed = append(f.completed, taskCompleted{OperationID: operationID, NodeID: nodeID, Succeeded: succeeded, ErrorCode: errCode, ResultJSON: resultJSON})
 	return nil
 }
 
@@ -129,6 +132,20 @@ func (f *fakeStore) RecordAudit(ctx context.Context, event domain.AuditEvent) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.audits = append(f.audits, event)
+	return nil
+}
+
+func (f *fakeStore) RecordConsoleLines(ctx context.Context, serverID string, lines []domain.ConsoleLine) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.consoleLines = append(f.consoleLines, lines...)
+	return nil
+}
+
+func (f *fakeStore) ApplyServerMetrics(ctx context.Context, metrics []domain.ServerMetrics) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.metrics = append(f.metrics, metrics...)
 	return nil
 }
 
@@ -554,4 +571,40 @@ func TestListenAndServeAutoCert(t *testing.T) {
 
 func timestamppbNow() *timestamppb.Timestamp {
 	return timestamppb.New(time.Now())
+}
+
+func TestSendConsoleCommandDispatchesFrame(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	srv := NewServer(ca, fs, discardLogger())
+
+	var mu sync.Mutex
+	var got *agentv1.ConnectResponse
+	srv.registerStream(&nodeStream{
+		nodeID: "node-1",
+		send: func(resp *agentv1.ConnectResponse) error {
+			mu.Lock()
+			defer mu.Unlock()
+			got = resp
+			return nil
+		},
+	})
+	if err := srv.SendConsoleCommand("node-1", "server-1", "list"); err != nil {
+		t.Fatalf("send console command: %v", err)
+	}
+	mu.Lock()
+	cmd := got.GetConsoleCommand()
+	mu.Unlock()
+	if cmd == nil {
+		t.Fatalf("expected console command frame, got %T", got.Payload)
+	}
+	if cmd.GetCommand() != "list" || cmd.GetServerId() != "server-1" || cmd.GetRequestId() == "" {
+		t.Errorf("console command frame fields wrong: %+v", cmd)
+	}
+	if err := srv.SendConsoleCommand("no-such-node", "server-1", "list"); err == nil {
+		t.Fatal("expected error for offline node")
+	}
 }
