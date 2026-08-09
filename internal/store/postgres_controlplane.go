@@ -527,25 +527,30 @@ func generationFence(row serverRow, expectedGeneration int64) error {
 	return problem
 }
 
-// enqueueTaskTx inserts a queued server_tasks row inside tx. It returns
-// ("", nil) when the idempotency pair already exists so the caller can roll
-// back and replay via lookupIdempotentTask.
-func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, serverID, nodeID, taskType string, generation int64, actorID, idemKey string, requestDigest []byte) (string, error) {
+// enqueueTaskTx inserts a queued server_tasks row inside tx. checkpoint is the
+// task payload materialized for the agent (provision/backup payload JSON);
+// empty means no checkpoint. It returns ("", nil) when the idempotency pair
+// already exists so the caller can roll back and replay via lookupIdempotentTask.
+func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, serverID, nodeID, taskType string, generation int64, actorID, idemKey string, requestDigest []byte, checkpoint string) (string, error) {
 	var actorIDValue any
 	if actorID != "" {
 		actorIDValue = actorID
+	}
+	var checkpointValue any
+	if checkpoint != "" {
+		checkpointValue = checkpoint
 	}
 	var inserted string
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO server_tasks (
 			id, server_id, node_id, task_type, status, generation, actor_id,
-			idempotency_scope, idempotency_key, request_digest, attempt, max_attempts, created_at, updated_at
+			idempotency_scope, idempotency_key, request_digest, checkpoint, attempt, max_attempts, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, 0, 3, now(), now())
+		VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, 0, 3, now(), now())
 		ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
 		RETURNING id::text
 	`, taskID, serverID, nodeID, taskType, generation, actorIDValue,
-		taskIdempotencyScope(taskType, actorID, idemKey), idemKey, requestDigest).Scan(&inserted)
+		taskIdempotencyScope(taskType, actorID, idemKey), idemKey, requestDigest, checkpointValue).Scan(&inserted)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -555,9 +560,9 @@ func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, server
 	return inserted, nil
 }
 
-// commitWriteTask enqueues the task, records the audit row, commits, and
-// returns the accepted operation. A task conflict rolls back and replays the
-// recorded idempotent operation.
+// commitWriteTask enqueues the task (optionally with a materialized checkpoint
+// payload), records the audit row, commits, and returns the accepted operation.
+// A task conflict rolls back and replays the recorded idempotent operation.
 func (s *Postgres) commitWriteTask(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -570,8 +575,9 @@ func (s *Postgres) commitWriteTask(
 	actor domain.User,
 	auditAction string,
 	now time.Time,
+	checkpoint string,
 ) (domain.Operation, error) {
-	inserted, err := s.enqueueTaskTx(ctx, tx, operationID, serverID, nodeID, taskType, generation, actorID, idemKey, digest[:])
+	inserted, err := s.enqueueTaskTx(ctx, tx, operationID, serverID, nodeID, taskType, generation, actorID, idemKey, digest[:], checkpoint)
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法创建任务", true)
 	}
@@ -698,7 +704,7 @@ func (s *Postgres) RequestPower(serverID string, action domain.PowerAction, idem
 
 	operationID := id.New()
 	operation, err := s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "server.power."+taskType, now)
+		nextGeneration, actor.ID, currentActor, "server.power."+taskType, now, "")
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -886,7 +892,7 @@ func (s *Postgres) CreateAllocation(
 
 	operationID := id.New()
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "network.allocation.create", now)
+		nextGeneration, actor.ID, currentActor, "network.allocation.create", now, "")
 }
 
 // SetPrimaryAllocation switches which active allocation is primary and
@@ -980,7 +986,7 @@ func (s *Postgres) SetPrimaryAllocation(
 
 	operationID := id.New()
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "network.allocation.primary", now)
+		nextGeneration, actor.ID, currentActor, "network.allocation.primary", now, "")
 }
 
 // DeleteAllocation releases an allocation (soft delete) and enqueues a
@@ -1086,7 +1092,7 @@ func (s *Postgres) DeleteAllocation(
 
 	operationID := id.New()
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "network.allocation.delete", now)
+		nextGeneration, actor.ID, currentActor, "network.allocation.delete", now, "")
 }
 
 // Startup returns the Startup declaration resolved from the fixed bundle plus
@@ -1298,7 +1304,7 @@ func (s *Postgres) UpdateStartup(
 
 	operationID := id.New()
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "server.startup.update", now)
+		nextGeneration, actor.ID, currentActor, "server.startup.update", now, "")
 }
 
 // normalizeStartupUpdates validates the update map against the declared
@@ -1680,17 +1686,28 @@ func (s *Postgres) CreateBackup(serverID string, idempotencyKey string, actor do
 	}
 
 	now := time.Now().UTC()
+	backupID := id.New()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO backups (id, server_id, creator_id, name, status, format_version, game_bundle_digest, created_at)
 		VALUES ($1, $2, $3, $4, 'creating', 'v1', $5, $6)
-	`, id.New(), serverID, actor.ID, "manual-"+now.Format("20060102-150405"), row.GameBundleDigest, now); err != nil {
+	`, backupID, serverID, actor.ID, "manual-"+now.Format("20060102-150405"), row.GameBundleDigest, now); err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法记录备份元数据", true)
+	}
+
+	// 把备份任务负载写入 checkpoint，Agent claim 后以其执行 docker exec tar。
+	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
+		BackupID:         backupID,
+		FormatVersion:    "v1",
+		StorageObjectKey: "backups/" + backupID + ".tar.gz",
+	})
+	if marshalErr != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
 	}
 
 	operationID := id.New()
 	// Backups do not advance the server generation; they snapshot current state.
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		row.Generation, actor.ID, currentActor, "backup.create", now)
+		row.Generation, actor.ID, currentActor, "backup.create", now, string(checkpoint))
 }
 
 // RestoreBackup validates the backup integrity and server state, advances the
@@ -1733,12 +1750,12 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法恢复备份", true)
 	}
 
-	var backupStatus, contentDigest string
+	var backupStatus, contentDigest, storageLocation string
 	err = tx.QueryRowContext(ctx, `
-		SELECT status, COALESCE(content_digest, '')
+		SELECT status, COALESCE(content_digest, ''), COALESCE(storage_location, '')
 		FROM backups WHERE id = $1 AND server_id = $2
 		FOR UPDATE
-	`, backupID, serverID).Scan(&backupStatus, &contentDigest)
+	`, backupID, serverID).Scan(&backupStatus, &contentDigest, &storageLocation)
 	if err == sql.ErrNoRows || backupStatus == "deleted" {
 		return domain.Operation{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
 	}
@@ -1776,8 +1793,25 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 	}
 
 	operationID := id.New()
+	// 恢复任务负载：storageObjectKey 指向备份归档在节点上的相对路径。
+	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
+		BackupID:         backupID,
+		StorageObjectKey: backupObjectKey(backupID, storageLocation),
+	})
+	if marshalErr != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
+	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "backup.restore", now)
+		nextGeneration, actor.ID, currentActor, "backup.restore", now, string(checkpoint))
+}
+
+// backupObjectKey 返回备份归档在节点备份目录下的相对路径；storageLocation
+// 已写入时沿用，否则按 <backupID>.tar.gz 推导。
+func backupObjectKey(backupID, storageLocation string) string {
+	if storageLocation != "" {
+		return storageLocation
+	}
+	return "backups/" + backupID + ".tar.gz"
 }
 
 // DeleteBackup marks a ready backup deleting and enqueues a backup-delete task.
@@ -1816,11 +1850,11 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
 	}
 
-	var backupStatus string
+	var backupStatus, storageLocation string
 	err = tx.QueryRowContext(ctx, `
-		SELECT status FROM backups WHERE id = $1 AND server_id = $2
+		SELECT status, COALESCE(storage_location, '') FROM backups WHERE id = $1 AND server_id = $2
 		FOR UPDATE
-	`, backupID, serverID).Scan(&backupStatus)
+	`, backupID, serverID).Scan(&backupStatus, &storageLocation)
 	if err == sql.ErrNoRows || backupStatus == "deleted" {
 		return domain.Operation{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
 	}
@@ -1844,8 +1878,17 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 	}
 
 	operationID := id.New()
+	// 删除任务负载：告知 Agent 归档相对路径并请求删除远端对象。
+	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
+		BackupID:           backupID,
+		StorageObjectKey:   backupObjectKey(backupID, storageLocation),
+		DeleteRemoteObject: true,
+	})
+	if marshalErr != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
+	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		row.Generation, actor.ID, currentActor, "backup.delete", now)
+		row.Generation, actor.ID, currentActor, "backup.delete", now, string(checkpoint))
 }
 
 // backupChecksumValid mirrors the in-memory adapter: a checksum is only valid

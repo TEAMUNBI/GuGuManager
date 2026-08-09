@@ -11,6 +11,7 @@ import (
 	"github.com/gugumanager/gugumanager/internal/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -338,6 +339,32 @@ func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
 				GracefulTimeoutSeconds: 30,
 			},
 		}
+		return proto
+	}
+	if task.TaskType == "backup" || task.TaskType == "restore" || task.TaskType == "backup-delete" {
+		proto.Type = "backup"
+		payload := &agentv1.BackupTaskPayload{}
+		switch task.TaskType {
+		case "backup":
+			create := &agentv1.CreateBackupPayload{}
+			if len(task.PayloadJSON) > 0 {
+				_ = protojson.Unmarshal(task.PayloadJSON, create)
+			}
+			payload.Action = &agentv1.BackupTaskPayload_Create{Create: create}
+		case "restore":
+			restore := &agentv1.RestoreBackupPayload{}
+			if len(task.PayloadJSON) > 0 {
+				_ = protojson.Unmarshal(task.PayloadJSON, restore)
+			}
+			payload.Action = &agentv1.BackupTaskPayload_Restore{Restore: restore}
+		case "backup-delete":
+			del := &agentv1.DeleteBackupPayload{}
+			if len(task.PayloadJSON) > 0 {
+				_ = protojson.Unmarshal(task.PayloadJSON, del)
+			}
+			payload.Action = &agentv1.BackupTaskPayload_Delete{Delete: del}
+		}
+		proto.Payload = &agentv1.Task_Backup{Backup: payload}
 	}
 	return proto
 }

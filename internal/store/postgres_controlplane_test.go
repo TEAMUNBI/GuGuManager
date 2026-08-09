@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -436,5 +437,35 @@ func TestPostgresControlPlaneBackupsConsoleHeartbeat(t *testing.T) {
 	}
 	if err := s.Heartbeat("cp-node", "agent-v2"); err != nil {
 		t.Fatalf("heartbeat: %v", err)
+	}
+}
+
+func TestCreateBackupWritesCheckpointPayload(t *testing.T) {
+	s := testPostgres(t)
+	admin, _, serverID := controlPlaneFixture(t, s)
+
+	op, err := s.CreateBackup(serverID, "idem-cp-checkpoint-0001", admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	var checkpoint string
+	if err := s.db.QueryRow(`SELECT COALESCE(checkpoint::text, '') FROM server_tasks WHERE id = $1`, op.ID).Scan(&checkpoint); err != nil {
+		t.Fatalf("query checkpoint: %v", err)
+	}
+	if checkpoint == "" {
+		t.Fatal("expected non-empty checkpoint for backup task")
+	}
+	var payload struct {
+		BackupID         string `json:"backupId"`
+		StorageObjectKey string `json:"storageObjectKey"`
+	}
+	if err := json.Unmarshal([]byte(checkpoint), &payload); err != nil {
+		t.Fatalf("decode checkpoint: %v", err)
+	}
+	if payload.BackupID == "" {
+		t.Error("expected backupId in checkpoint")
+	}
+	if want := "backups/" + payload.BackupID + ".tar.gz"; payload.StorageObjectKey != want {
+		t.Errorf("storageObjectKey = %q, want %q", payload.StorageObjectKey, want)
 	}
 }

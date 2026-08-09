@@ -675,3 +675,16 @@ func provisionProtocolName(protocol string) string {
 	}
 	return "NETWORK_PROTOCOL_TCP"
 }
+
+// backupTaskPayload 是下发给 Agent 的备份任务负载（JSON 形状与
+// agentv1.BackupTaskPayload 的 protojson 字段名对齐）。CreateBackup/
+// RestoreBackup/DeleteBackup 落库到 server_tasks.checkpoint，ClaimTask
+// 将其作为 PayloadJSON 下发给 Agent 执行 docker exec tar。
+type backupTaskPayload struct {
+	BackupID               string `json:"backupId"`
+	FormatVersion          string `json:"formatVersion,omitempty"`
+	StorageObjectKey       string `json:"storageObjectKey,omitempty"`
+	ExpectedManifestDigest string `json:"expectedManifestDigest,omitempty"`
+	ExpectedContentDigest  string `json:"expectedContentDigest,omitempty"`
+	DeleteRemoteObject     bool   `json:"deleteRemoteObject,omitempty"`
+}

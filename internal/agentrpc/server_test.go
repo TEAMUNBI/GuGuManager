@@ -608,3 +608,40 @@ func TestSendConsoleCommandDispatchesFrame(t *testing.T) {
 		t.Fatal("expected error for offline node")
 	}
 }
+
+func TestClaimedTaskToProtoBackup(t *testing.T) {
+	payload := `{"backupId":"b-1","storageObjectKey":"backups/b-1.tar.gz"}`
+	base := &store.ClaimedTask{
+		OperationID: "op-1", ServerID: "srv-1", NodeID: "node-1",
+		Generation: 1, Attempt: 1, TaskType: "backup", PayloadJSON: []byte(payload),
+	}
+
+	create := claimedTaskToProto(base)
+	if create.GetType() != "backup" {
+		t.Fatalf("backup task type = %q, want backup", create.GetType())
+	}
+	if create.GetBackup() == nil {
+		t.Fatalf("expected backup payload arm, got %T", create.GetPayload())
+	}
+	if got := create.GetBackup().GetCreate(); got == nil {
+		t.Fatalf("expected create arm, got %T", create.GetBackup().GetAction())
+	} else if got.GetBackupId() != "b-1" || got.GetStorageObjectKey() != "backups/b-1.tar.gz" {
+		t.Errorf("create payload wrong: %+v", got)
+	}
+
+	restore := claimedTaskToProto(&store.ClaimedTask{OperationID: "op-2", ServerID: "srv-1", NodeID: "node-1", TaskType: "restore", Generation: 1, Attempt: 1, PayloadJSON: []byte(payload)})
+	if restore.GetType() != "backup" || restore.GetBackup().GetRestore() == nil {
+		t.Fatalf("expected normalized backup/restore, got type=%q payload=%T", restore.GetType(), restore.GetPayload())
+	}
+	if got := restore.GetBackup().GetRestore(); got.GetBackupId() != "b-1" {
+		t.Errorf("restore payload wrong: %+v", got)
+	}
+
+	del := claimedTaskToProto(&store.ClaimedTask{OperationID: "op-3", ServerID: "srv-1", NodeID: "node-1", TaskType: "backup-delete", Generation: 1, Attempt: 1, PayloadJSON: []byte(`{"backupId":"b-1","storageObjectKey":"backups/b-1.tar.gz","deleteRemoteObject":true}`)})
+	if del.GetType() != "backup" || del.GetBackup().GetDelete() == nil {
+		t.Fatalf("expected normalized backup/delete, got type=%q payload=%T", del.GetType(), del.GetPayload())
+	}
+	if got := del.GetBackup().GetDelete(); !got.GetDeleteRemoteObject() {
+		t.Errorf("delete payload should request remote object removal: %+v", got)
+	}
+}
