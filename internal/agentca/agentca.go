@@ -57,27 +57,47 @@ func (c *CA) RootCAPEM() ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.cert.Raw}), nil
 }
 
-// IssueAgentCertificate 生成 RSA 2048 叶密钥与 CN=nodeID 的 PKCS#10 CSR，
-// 用根私钥签发 client auth 叶证书并返回其 PEM。叶私钥不持久化。
+// IssueAgentCertificate 生成 RSA 2048 叶密钥并签发 CN=nodeID 的 client auth 叶证书，
+// 返回其 PEM。叶私钥不持久化、不返回（Agent 侧如需建立 mTLS 请使用
+// IssueAgentCertificateWithKey 或自行提供 CSR）。
 func (c *CA) IssueAgentCertificate(nodeID string, ttl time.Duration) ([]byte, error) {
+	certPEM, _, err := c.IssueAgentCertificateWithKey(nodeID, ttl)
+	return certPEM, err
+}
+
+// IssueAgentCertificateWithKey 生成 RSA 2048 叶密钥并用根私钥签发 CN=nodeID 的
+// client auth 叶证书，同时返回证书与私钥 PEM，供 Agent 建立 mTLS 连接使用。
+func (c *CA) IssueAgentCertificateWithKey(nodeID string, ttl time.Duration) ([]byte, []byte, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return nil, fmt.Errorf("generate leaf key: %w", err)
+		return nil, nil, fmt.Errorf("generate leaf key: %w", err)
 	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: nodeID},
-	}, key)
+	certPEM, err := c.signLeaf(pkix.Name{CommonName: nodeID}, x509.ExtKeyUsageClientAuth, ttl, &key.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("create csr: %w", err)
+		return nil, nil, err
 	}
-	csr, err := x509.ParseCertificateRequest(csrDER)
-	if err != nil {
-		return nil, fmt.Errorf("parse csr: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("csr signature: %w", err)
-	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return certPEM, keyPEM, nil
+}
 
+// IssueServerCertificate 生成 RSA 2048 密钥并签发 CN="control-plane" 的 server
+// auth 证书，返回证书与私钥 PEM，供 Control Plane 的 gRPC TLS 监听使用。
+func (c *CA) IssueServerCertificate(ttl time.Duration) ([]byte, []byte, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate server key: %w", err)
+	}
+	certPEM, err := c.signLeaf(pkix.Name{CommonName: "control-plane"}, x509.ExtKeyUsageServerAuth, ttl, &key.PublicKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return certPEM, keyPEM, nil
+}
+
+// signLeaf 用根私钥签发一张由本 CA 签发的叶证书。
+// 证书同时携带 CN 与对应的 DNS SAN，满足现代 x509 校验（Go 1.26 拒绝仅有 CN 的证书）。
+func (c *CA) signLeaf(subject pkix.Name, extKeyUsage x509.ExtKeyUsage, ttl time.Duration, pub any) ([]byte, error) {
 	serial, err := randomSerial()
 	if err != nil {
 		return nil, err
@@ -85,12 +105,13 @@ func (c *CA) IssueAgentCertificate(nodeID string, ttl time.Duration) ([]byte, er
 	now := time.Now()
 	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      csr.Subject,
+		Subject:      subject,
+		DNSNames:     []string{subject.CommonName},
 		NotBefore:    now.Add(-5 * time.Minute),
 		NotAfter:     now.Add(ttl),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}, c.cert, csr.PublicKey, c.key)
+		ExtKeyUsage:  []x509.ExtKeyUsage{extKeyUsage},
+	}, c.cert, pub, c.key)
 	if err != nil {
 		return nil, fmt.Errorf("sign certificate: %w", err)
 	}

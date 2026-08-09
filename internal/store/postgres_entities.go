@@ -470,6 +470,38 @@ func (s *Postgres) UpdateServerObserved(ctx context.Context, obs domain.ServerOb
 	return nil
 }
 
+// ApplyServerObserved 是 Agent 上报路径使用的别名，复用 UpdateServerObserved。
+func (s *Postgres) ApplyServerObserved(ctx context.Context, obs domain.ServerObserved) error {
+	return s.UpdateServerObserved(ctx, obs)
+}
+
+// RecordAgentHeartbeat 记录节点心跳：刷新 last_heartbeat_at 并用上报值覆盖
+// 资源与版本字段（占位值在首次 Enroll 时写入，真实值由此落地），offline 节点
+// 收到心跳后恢复 available。维护模式不受影响。
+func (s *Postgres) RecordAgentHeartbeat(ctx context.Context, nodeID string, hb domain.Heartbeat) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	observedAt := hb.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET last_heartbeat_at = $2,
+		    memory_bytes = CASE WHEN $3::bigint > 0 THEN $3::bigint ELSE memory_bytes END,
+		    disk_bytes = CASE WHEN $4::bigint > 0 THEN $4::bigint ELSE disk_bytes END,
+		    agent_version = CASE WHEN $5 <> '' THEN $5 ELSE agent_version END,
+		    condition = CASE WHEN condition = 'offline' THEN 'available' ELSE condition END,
+		    updated_at = now()
+		WHERE id = $1 AND revoked_at IS NULL
+	`, nodeID, observedAt, hb.MemoryTotalBytes, hb.DiskTotalBytes, hb.AgentVersion)
+	if err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法记录节点心跳", true)
+	}
+	return nil
+}
+
 // RecordAudit persists an audit event emitted by the agent control plane.
 func (s *Postgres) RecordAudit(ctx context.Context, event domain.AuditEvent) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

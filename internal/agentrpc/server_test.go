@@ -1,0 +1,532 @@
+package agentrpc
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
+	"github.com/gugumanager/gugumanager/internal/agentca"
+	"github.com/gugumanager/gugumanager/internal/domain"
+	"github.com/gugumanager/gugumanager/internal/store"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+// fakeStore 是 TaskStore 接口的内存实现，用于集成测试。
+type fakeStore struct {
+	mu         sync.Mutex
+	nodes      map[string]domain.Node
+	nextNode   int
+	heartbeats []domain.Heartbeat
+	observed   []domain.ServerObserved
+	completed  []taskCompleted
+	queued     []*store.ClaimedTask
+	audits     []domain.AuditEvent
+}
+
+type taskCompleted struct {
+	OperationID string
+	NodeID      string
+	Succeeded   bool
+	ErrorCode   *string
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{nodes: map[string]domain.Node{}}
+}
+
+func (f *fakeStore) RegisterNode(ctx context.Context, node domain.Node) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextNode++
+	nodeID := fmt.Sprintf("node-%d", f.nextNode)
+	node.ID = nodeID
+	f.nodes[nodeID] = node
+	return nodeID, nil
+}
+
+func (f *fakeStore) NodeByID(ctx context.Context, nodeID string) (domain.Node, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	node, ok := f.nodes[nodeID]
+	if !ok {
+		return domain.Node{}, domain.NewProblem("NOT_FOUND", "节点不存在", false)
+	}
+	return node, nil
+}
+
+func (f *fakeStore) EnqueueTask(ctx context.Context, serverID, nodeID, taskType string, generation int64, actorID string, idemKey string, requestDigest []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextNode++
+	operationID := fmt.Sprintf("task-%d", f.nextNode)
+	f.queued = append(f.queued, &store.ClaimedTask{
+		OperationID: operationID,
+		ServerID:    serverID,
+		NodeID:      nodeID,
+		Generation:  generation,
+		TaskType:    taskType,
+		Attempt:     1,
+		PayloadJSON: requestDigest,
+	})
+	return operationID, nil
+}
+
+func (f *fakeStore) ClaimTask(ctx context.Context, nodeID string) (*store.ClaimedTask, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, task := range f.queued {
+		if task.NodeID != nodeID {
+			continue
+		}
+		f.queued = append(f.queued[:i], f.queued[i+1:]...)
+		return task, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completed = append(f.completed, taskCompleted{OperationID: operationID, NodeID: nodeID, Succeeded: succeeded, ErrorCode: errCode})
+	return nil
+}
+
+func (f *fakeStore) RecordAgentHeartbeat(ctx context.Context, nodeID string, hb domain.Heartbeat) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	hb.NodeID = nodeID
+	f.heartbeats = append(f.heartbeats, hb)
+	return nil
+}
+
+func (f *fakeStore) ApplyServerObserved(ctx context.Context, obs domain.ServerObserved) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.observed = append(f.observed, obs)
+	return nil
+}
+
+func (f *fakeStore) RecordAudit(ctx context.Context, event domain.AuditEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.audits = append(f.audits, event)
+	return nil
+}
+
+func (f *fakeStore) heartbeatCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.heartbeats)
+}
+
+func (f *fakeStore) lastHeartbeat() domain.Heartbeat {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.heartbeats) == 0 {
+		return domain.Heartbeat{}
+	}
+	return f.heartbeats[len(f.heartbeats)-1]
+}
+
+func (f *fakeStore) observedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.observed)
+}
+
+func (f *fakeStore) completedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.completed)
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func mustKeyPair(t *testing.T, certPEM, keyPEM []byte) tls.Certificate {
+	t.Helper()
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("x509 key pair: %v", err)
+	}
+	return pair
+}
+
+func caRootPool(t *testing.T, ca *agentca.CA) *x509.CertPool {
+	t.Helper()
+	rootPEM, err := ca.RootCAPEM()
+	if err != nil {
+		t.Fatalf("root ca pem: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(rootPEM) {
+		t.Fatalf("append root ca to pool failed")
+	}
+	return pool
+}
+
+// newTestServer 启动一个带 mTLS 的 bufconn gRPC server 并返回 client 连接。
+// client 使用 CN=nodeID 的 CA 签发证书建立连接。
+func newTestServer(t *testing.T, ca *agentca.CA, store TaskStore, token string, nodeID string) (*Server, *grpc.ClientConn) {
+	t.Helper()
+	srv := NewServer(ca, store, discardLogger(), WithRegistrationToken(token))
+
+	serverCert, serverKey, err := ca.IssueServerCertificate(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("issue server cert: %v", err)
+	}
+	lis := bufconn.Listen(1 << 20)
+	gs := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{mustKeyPair(t, serverCert, serverKey)},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caRootPool(t, ca),
+		MinVersion:   tls.VersionTLS12,
+	})))
+	srv.register(gs)
+	go func() {
+		_ = gs.Serve(lis)
+	}()
+	t.Cleanup(gs.Stop)
+
+	clientCert, clientKey, err := ca.IssueAgentCertificateWithKey(nodeID, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("issue client cert: %v", err)
+	}
+	dialer := func(ctx context.Context, _ string) (net.Conn, error) {
+		return lis.Dial()
+	}
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{mustKeyPair(t, clientCert, clientKey)},
+			RootCAs:      caRootPool(t, ca),
+			ServerName:   "control-plane",
+			MinVersion:   tls.VersionTLS12,
+		})),
+	)
+	if err != nil {
+		t.Fatalf("dial bufconn: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return srv, conn
+}
+
+func TestEnrollAndConnect(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	const nodeID = "test-node-1"
+	srv, conn := newTestServer(t, ca, fs, "reg-token", nodeID)
+	_ = srv
+
+	client := agentv1.NewAgentGatewayServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rootPEM, err := ca.RootCAPEM()
+	if err != nil {
+		t.Fatalf("root ca pem: %v", err)
+	}
+
+	// 1. Enroll：正确 token → 返回 node id + 可校验的证书链 + 根证书
+	resp, err := client.Enroll(ctx, &agentv1.EnrollRequest{
+		RegistrationToken: "reg-token",
+		NodeName:          "node-1",
+		AgentVersion:      "0.1.0",
+		Capabilities: []*agentv1.Capability{
+			{Name: "runtime.docker", Version: "1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if resp.NodeId == "" {
+		t.Fatal("expected non-empty node id")
+	}
+	if len(resp.CertificateChain) == 0 {
+		t.Fatal("expected certificate chain")
+	}
+	if err := ca.VerifyPeerCertificate(resp.CertificateChain, resp.NodeId); err != nil {
+		t.Fatalf("enrolled certificate not valid for node %q: %v", resp.NodeId, err)
+	}
+	if !bytes.Equal(resp.CaCertificate, rootPEM) {
+		t.Fatal("ca certificate mismatch")
+	}
+	if resp.ExpiresAt == nil || resp.ExpiresAt.AsTime().Before(time.Now()) {
+		t.Fatal("expected future expiry")
+	}
+
+	// 2. Enroll：错误 token → PermissionDenied
+	_, err = client.Enroll(ctx, &agentv1.EnrollRequest{RegistrationToken: "wrong", NodeName: "node-x"})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", err)
+	}
+
+	// 3. Connect：Hello → Welcome
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Hello{Hello: &agentv1.Hello{
+		NodeId:       nodeID,
+		AgentVersion: "0.1.0",
+	}}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv welcome: %v", err)
+	}
+	welcome := first.GetWelcome()
+	if welcome == nil {
+		t.Fatalf("expected welcome, got %T", first.Payload)
+	}
+	if welcome.ProtocolVersion != "v1" {
+		t.Errorf("protocol version = %q, want v1", welcome.ProtocolVersion)
+	}
+	if welcome.HeartbeatIntervalSeconds != 10 {
+		t.Errorf("heartbeat interval = %d, want 10", welcome.HeartbeatIntervalSeconds)
+	}
+	if welcome.MaxInFlightTasks != 3 {
+		t.Errorf("max in flight = %d, want 3", welcome.MaxInFlightTasks)
+	}
+
+	// 4. Heartbeat → fakeStore 记录
+	err = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{
+		ObservedAt:           timestamppbNow(),
+		MemoryTotalBytes:     8192,
+		MemoryAvailableBytes: 4096,
+		DiskTotalBytes:       100,
+		DiskAvailableBytes:   50,
+		CpuLoad:              0.25,
+		AgentVersion:         "0.1.0",
+	}}})
+	if err != nil {
+		t.Fatalf("send heartbeat: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for fs.heartbeatCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fs.heartbeatCount() != 1 {
+		t.Fatalf("heartbeats recorded = %d, want 1", fs.heartbeatCount())
+	}
+	hb := fs.lastHeartbeat()
+	if hb.NodeID != nodeID {
+		t.Errorf("heartbeat node = %q, want %q", hb.NodeID, nodeID)
+	}
+	if hb.MemoryTotalBytes != 8192 || hb.DiskTotalBytes != 100 {
+		t.Errorf("heartbeat resources not mapped: %+v", hb)
+	}
+
+	// 5. ServerObserved → fakeStore 记录
+	err = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: &agentv1.ServerObserved{
+		ServerId:           "server-1",
+		ObservedGeneration: 2,
+		ObservedPower:      agentv1.ObservedPower_OBSERVED_POWER_RUNNING,
+		HealthCondition:    agentv1.HealthCondition_HEALTH_CONDITION_HEALTHY,
+		RuntimeId:          "cont-1",
+		ObservedAt:         timestamppbNow(),
+	}}})
+	if err != nil {
+		t.Fatalf("send server observed: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for fs.observedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fs.observedCount() != 1 {
+		t.Fatalf("observed snapshots = %d, want 1", fs.observedCount())
+	}
+	obs := fs.observed[0]
+	if obs.ServerID != "server-1" || obs.ObservedPower != "running" || obs.HealthCondition != "healthy" {
+		t.Errorf("observed not mapped correctly: %+v", obs)
+	}
+
+	// 6. TaskResult → fakeStore 记录
+	err = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: &agentv1.TaskResult{
+		OperationId: "task-1",
+		Succeeded:   true,
+		Attempt:     1,
+	}}})
+	if err != nil {
+		t.Fatalf("send task result: %v", err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for fs.completedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fs.completedCount() != 1 {
+		t.Fatalf("completed tasks = %d, want 1", fs.completedCount())
+	}
+	if !fs.completed[0].Succeeded {
+		t.Errorf("expected succeeded task completion")
+	}
+
+	// 7. 预置任务 → 服务端 claim 并通过流下发 Task
+	enqueuedID, err := fs.EnqueueTask(ctx, "server-1", nodeID, "provision", 1, "actor-1", "test-idempotency-key-1", []byte(`{"game":"factorio"}`))
+	if err != nil {
+		t.Fatalf("enqueue task: %v", err)
+	}
+	var dispatched *agentv1.Task
+	deadline = time.Now().Add(8 * time.Second)
+	for dispatched == nil && time.Now().Before(deadline) {
+		msg, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("recv task: %v", recvErr)
+		}
+		dispatched = msg.GetTask()
+	}
+	if dispatched == nil {
+		t.Fatal("timed out waiting for dispatched task")
+	}
+	if dispatched.OperationId != enqueuedID {
+		t.Errorf("dispatched operation = %q, want %q", dispatched.OperationId, enqueuedID)
+	}
+	if dispatched.Type != "provision" || dispatched.ServerId != "server-1" || dispatched.Attempt != 1 {
+		t.Errorf("dispatched task fields wrong: %+v", dispatched)
+	}
+	if !bytes.Equal(dispatched.GetPayloadJson(), []byte(`{"game":"factorio"}`)) {
+		t.Errorf("dispatched payload = %q", dispatched.GetPayloadJson())
+	}
+}
+
+func TestConnectRejectsMismatchedNode(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	_, conn := newTestServer(t, ca, fs, "reg-token", "cert-node")
+
+	client := agentv1.NewAgentGatewayServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// Hello 声称的 node id 与证书 CN（cert-node）不一致
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Hello{Hello: &agentv1.Hello{
+		NodeId: "other-node",
+	}}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	_, err = stream.Recv()
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied for node mismatch, got %v", err)
+	}
+}
+
+func TestConnectRequiresHelloFirst(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	_, conn := newTestServer(t, ca, fs, "reg-token", "hello-node")
+
+	client := agentv1.NewAgentGatewayServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// 首帧不是 Hello：直接发 Heartbeat
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{}}}); err != nil {
+		t.Fatalf("send first frame: %v", err)
+	}
+	_, err = stream.Recv()
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition for non-hello first frame, got %v", err)
+	}
+}
+
+func TestListenAndServeAutoCert(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	srv := NewServer(ca, fs, discardLogger(), WithRegistrationToken("reg-token"))
+
+	// 预留一个可用端口
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe(ctx, addr, nil, nil) }()
+
+	// 客户端用 CA 签发证书 + 自动签发的 server 证书（CN=control-plane）建立 mTLS
+	clientCert, clientKey, err := ca.IssueAgentCertificateWithKey("listen-client", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("issue client cert: %v", err)
+	}
+	ctx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+	conn, err := grpc.DialContext(ctx2, addr,
+		grpc.WithBlock(),
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{mustKeyPair(t, clientCert, clientKey)},
+			RootCAs:      caRootPool(t, ca),
+			ServerName:   "control-plane",
+			MinVersion:   tls.VersionTLS12,
+		})),
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	resp, err := agentv1.NewAgentGatewayServiceClient(conn).Enroll(ctx2, &agentv1.EnrollRequest{
+		RegistrationToken: "reg-token",
+		NodeName:          "listen-node",
+	})
+	if err != nil {
+		t.Fatalf("enroll over listenandserve: %v", err)
+	}
+	if resp.NodeId == "" {
+		t.Fatal("expected node id from listenandserve enroll")
+	}
+
+	cancel()
+	select {
+	case serveErr := <-errCh:
+		if serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
+			t.Fatalf("listenandserve returned: %v", serveErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("listenandserve did not stop after cancel")
+	}
+}
+
+func timestamppbNow() *timestamppb.Timestamp {
+	return timestamppb.New(time.Now())
+}

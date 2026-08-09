@@ -279,3 +279,30 @@ type ServerObserved struct {
 	Detail             string
 	ObservedAt         time.Time
 }
+
+// NodeCapability 描述节点支持的一项能力及其版本。
+type NodeCapability struct {
+	Name    string
+	Version string
+}
+
+// RunningOperation 是 Agent 正在执行的操作快照。
+type RunningOperation struct {
+	OperationID string
+	Checkpoint  string
+	Attempt     int
+	ServerID    string
+}
+
+// Heartbeat 是 Agent 周期性上报的节点资源与运行状态。
+type Heartbeat struct {
+	NodeID               string
+	MemoryTotalBytes     int64
+	MemoryAvailableBytes int64
+	DiskTotalBytes       int64
+	DiskAvailableBytes   int64
+	CPULoad              float64
+	AgentVersion         string
+	ObservedAt           time.Time
+	RunningOperations    []RunningOperation
+}
