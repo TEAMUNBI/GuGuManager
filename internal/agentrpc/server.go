@@ -65,6 +65,14 @@ func WithClaimPeriod(period time.Duration) Option {
 	}
 }
 
+// WithServerIPs 追加服务器证书的 IP SAN。面板位于 NAT/端口转发之后时，
+// Agent 用公网 IP 校验证书，而监听地址只是内网 IP，必须显式补充公网 IP。
+func WithServerIPs(ips []net.IP) Option {
+	return func(s *Server) {
+		s.extraServerIPs = append(s.extraServerIPs, ips...)
+	}
+}
+
 // Server 是 AgentGatewayService 的实现。
 type Server struct {
 	agentv1.UnimplementedAgentGatewayServiceServer
@@ -74,6 +82,7 @@ type Server struct {
 	log              *slog.Logger
 	registrationToken string
 	claimPeriod      time.Duration
+	extraServerIPs   []net.IP
 }
 
 // NewServer 构造 Agent gRPC 服务器。
@@ -204,8 +213,11 @@ func (s *Server) newGRPCServer(tlsConfig *tls.Config) *grpc.Server {
 func (s *Server) tlsConfig(addr string, certPEM, keyPEM []byte) (*tls.Config, error) {
 	if len(certPEM) == 0 {
 		var err error
-		// 服务器证书携带监听地址的 IP SAN，使 Agent 用 IP 而非仅 DNS 名校验证书。
-		certPEM, keyPEM, err = s.ca.IssueServerCertificateWithSAN(serverCertTTL, listenerIPs(addr))
+		// 服务器证书携带监听地址的 IP SAN，使 Agent 用 IP 而非仅 DNS 名校验证书；
+		// WithServerIPs 补充的公网 IP（NAT/端口转发场景）一并加入。
+		sanIPs := listenerIPs(addr)
+		sanIPs = append(sanIPs, s.extraServerIPs...)
+		certPEM, keyPEM, err = s.ca.IssueServerCertificateWithSAN(serverCertTTL, sanIPs)
 		if err != nil {
 			return nil, fmt.Errorf("issue server certificate: %w", err)
 		}

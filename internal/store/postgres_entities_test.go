@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
@@ -182,9 +183,39 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 		claimed.Generation != 1 || claimed.Attempt < 1 {
 		t.Fatalf("claimed task mismatch: %+v (operation %s)", claimed, op.ID)
 	}
+	// The provision payload must be materialized at CreateServer time and
+	// carried to the agent via PayloadJSON; an empty payload fails every
+	// provision on the agent with PROVISION_FAILED.
+	if len(claimed.PayloadJSON) == 0 {
+		t.Fatal("claimed provision task carries no payload")
+	}
+	var payload struct {
+		GameDefinitionID string `json:"gameDefinitionId"`
+		Allocations      []struct {
+			AllocationID string `json:"allocationId"`
+			HostPort     uint32 `json:"hostPort"`
+			ContainerPort uint32 `json:"containerPort"`
+		} `json:"allocations"`
+	}
+	if err := json.Unmarshal(claimed.PayloadJSON, &payload); err != nil {
+		t.Fatalf("decode provision payload: %v", err)
+	}
+	if payload.GameDefinitionID != "pg-task-game" || len(payload.Allocations) != 1 ||
+		payload.Allocations[0].HostPort == 0 || payload.Allocations[0].ContainerPort == 0 {
+		t.Fatalf("provision payload mismatch: %s", claimed.PayloadJSON)
+	}
 
 	if err := s.CompleteTask(context.Background(), claimed.OperationID, nodeID, true, nil); err != nil {
 		t.Fatalf("complete task: %v", err)
+	}
+
+	// 成功的 provision 必须把服务器推进到 ready，否则无法接收电源操作。
+	after, err := s.Server(claimed.ServerID)
+	if err != nil {
+		t.Fatalf("server after provision: %v", err)
+	}
+	if after.LifecycleState != "ready" {
+		t.Fatalf("server lifecycle after provision = %q, want ready", after.LifecycleState)
 	}
 
 	again, err := s.ClaimTask(context.Background(), nodeID)

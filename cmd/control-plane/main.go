@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -51,14 +52,15 @@ func main() {
 	handler := spa(api, cfg.WebRoot, logger)
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 
-	// 节点存活探测只对内存适配器实现；Postgres 适配器目前没有
-	// ReconcileNodeLiveness，production 下不启动该协程。
+	// 节点存活探测对实现了 ReconcileNodeLiveness 的适配器（Memory 与
+	// Postgres）每 5 秒对账一次：超过 30 秒无心跳的节点标记 offline，
+	// 并禁止继续向该节点下发任务。
 	livenessCtx, stopLiveness := context.WithCancel(context.Background())
 	defer stopLiveness()
-	if development, ok := service.(*store.Memory); ok {
-		go reconcileNodeLiveness(livenessCtx, development)
+	if reconciler, ok := service.(interface{ ReconcileNodeLiveness(time.Time) }); ok {
+		go reconcileNodeLiveness(livenessCtx, reconciler)
 	} else {
-		logger.Info("node liveness reconciliation disabled", "reason", "postgres store has no ReconcileNodeLiveness yet")
+		logger.Info("node liveness reconciliation disabled", "reason", "store adapter has no ReconcileNodeLiveness")
 	}
 
 	// production 额外启动 Agent 的 mTLS gRPC 网关（任务分发内嵌在
@@ -191,7 +193,19 @@ func serveAgentGRPC(ctx context.Context, cfg config.Config, pg *store.Postgres, 
 		addr = "127.0.0.1:8443"
 	}
 
-	server := agentrpc.NewServer(ca, pg, logger, agentrpc.WithRegistrationToken(registrationToken))
+	// 面板位于 NAT/端口转发之后时，Agent 用公网 IP 校验证书；监听地址只是
+	// 内网 IP，需通过 GUGU_AGENT_GRPC_PUBLIC_IPS 显式补充公网 IP SAN。
+	var publicIPs []net.IP
+	for _, raw := range strings.Split(strings.TrimSpace(os.Getenv("GUGU_AGENT_GRPC_PUBLIC_IPS")), ",") {
+		if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil {
+			publicIPs = append(publicIPs, ip)
+		}
+	}
+
+	server := agentrpc.NewServer(ca, pg, logger,
+		agentrpc.WithRegistrationToken(registrationToken),
+		agentrpc.WithServerIPs(publicIPs),
+	)
 	return server.ListenAndServe(ctx, addr, nil, nil)
 }
 
@@ -208,8 +222,13 @@ func readBootstrapToken(cfg config.Config) string {
 	return strings.TrimSpace(string(content))
 }
 
-// migrationsDir 定位仓库根下的 migrations 目录，不依赖进程工作目录。
+// migrationsDir 定位仓库根下的 migrations 目录。
+// 优先读取 GUGU_MIGRATIONS_DIR 环境变量（生产部署时迁移文件随二进制分发，
+// 源码路径在交叉编译/发布后不存在）；否则基于当前源码文件推导，不依赖进程工作目录。
 func migrationsDir() string {
+	if override := strings.TrimSpace(os.Getenv("GUGU_MIGRATIONS_DIR")); override != "" {
+		return override
+	}
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		return "migrations"
@@ -246,7 +265,7 @@ func newLogger(output io.Writer, level string, format string) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(output, options))
 }
 
-func reconcileNodeLiveness(ctx context.Context, development *store.Memory) {
+func reconcileNodeLiveness(ctx context.Context, reconciler interface{ ReconcileNodeLiveness(time.Time) }) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -254,7 +273,7 @@ func reconcileNodeLiveness(ctx context.Context, development *store.Memory) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			development.ReconcileNodeLiveness(now.UTC())
+			reconciler.ReconcileNodeLiveness(now.UTC())
 		}
 	}
 }

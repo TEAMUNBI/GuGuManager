@@ -148,12 +148,12 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	}
 	defer tx.Rollback()
 
-	var serverID string
+	var serverID, taskType string
 	err = tx.QueryRowContext(ctx, `
-		SELECT server_id::text FROM server_tasks
+		SELECT server_id::text, task_type FROM server_tasks
 		WHERE id = $1 AND node_id = $2
 		FOR UPDATE
-	`, operationID, nodeID).Scan(&serverID)
+	`, operationID, nodeID).Scan(&serverID, &taskType)
 	if err == sql.ErrNoRows {
 		return domain.NewProblem("NOT_FOUND", "任务不存在", false)
 	}
@@ -175,6 +175,18 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	`, status, errCode, now, operationID, nodeID)
 	if err != nil {
 		return domain.NewProblem("INTERNAL_ERROR", "无法完成任务", true)
+	}
+
+	// 成功的 provision 把服务器生命周期推进到 ready，之后才能接收电源操作；
+	// 失败的 provision 保持 provisioning 供上层重试/处置。
+	if succeeded && taskType == "provision" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE servers
+			SET lifecycle_state = 'ready', updated_at = now()
+			WHERE id = $1 AND deleted_at IS NULL
+		`, serverID); err != nil {
+			return domain.NewProblem("INTERNAL_ERROR", "无法更新服务器生命周期", true)
+		}
 	}
 
 	_, err = tx.ExecContext(ctx, `

@@ -262,15 +262,43 @@ func healthConditionString(h agentv1.HealthCondition) string {
 }
 
 // claimedTaskToProto 把 store 领取到的任务转换为下发用的 proto Task。
-// 简化：payload 走 PayloadJson（deprecated 但可用），IdempotencyKey/Deadline
-// 当前 server_tasks 未下发，置空。
+// 电源类任务在 server_tasks 中类型为 start/stop/restart/kill，Agent 执行器
+// 只按 provision/power 分发，因此下发前归一化为 Type="power" 并填充 Power
+// 字段（含动作与优雅停机超时）。其余任务透传 task_type 与 PayloadJson。
 func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
-	return &agentv1.Task{
+	proto := &agentv1.Task{
 		OperationId: task.OperationID,
 		ServerId:    task.ServerID,
 		Generation:  uint64(task.Generation),
 		Type:        task.TaskType,
 		Attempt:     uint32(task.Attempt),
 		Payload:     &agentv1.Task_PayloadJson{PayloadJson: task.PayloadJSON},
+	}
+	if action, ok := powerActionForTaskType(task.TaskType); ok {
+		proto.Type = "power"
+		proto.Payload = &agentv1.Task_Power{
+			Power: &agentv1.PowerTaskPayload{
+				Action:                 action,
+				GracefulTimeoutSeconds: 30,
+			},
+		}
+	}
+	return proto
+}
+
+// powerActionForTaskType 把 server_tasks 中的电源操作类型映射为下发给
+// Agent 的 PowerAction；非电源类型返回 ok=false。
+func powerActionForTaskType(taskType string) (agentv1.PowerAction, bool) {
+	switch taskType {
+	case "start":
+		return agentv1.PowerAction_POWER_ACTION_START, true
+	case "stop":
+		return agentv1.PowerAction_POWER_ACTION_STOP, true
+	case "restart":
+		return agentv1.PowerAction_POWER_ACTION_RESTART, true
+	case "kill":
+		return agentv1.PowerAction_POWER_ACTION_KILL, true
+	default:
+		return agentv1.PowerAction_POWER_ACTION_UNSPECIFIED, false
 	}
 }

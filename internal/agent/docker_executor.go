@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
@@ -97,10 +99,12 @@ func (e *DockerExecutor) executeProvision(ctx context.Context, task *agentv1.Tas
 	if payload == nil && len(task.GetPayloadJson()) > 0 {
 		payload = &agentv1.ProvisionTaskPayload{}
 		if err := protojson.Unmarshal(task.GetPayloadJson(), payload); err != nil {
+			slog.Warn("provision: decode payload", "server_id", task.GetServerId(), "error", err, "payload", string(task.GetPayloadJson()))
 			return &ExecutionOutcome{Succeeded: false, ErrorCode: "PROVISION_FAILED"}, nil
 		}
 	}
 	if payload == nil {
+		slog.Warn("provision: empty payload", "server_id", task.GetServerId())
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "PROVISION_FAILED"}, nil
 	}
 
@@ -141,10 +145,18 @@ func (e *DockerExecutor) executeProvision(ctx context.Context, task *agentv1.Tas
 
 	rt, err := e.runtime()
 	if err != nil {
+		slog.Warn("provision: runtime unavailable", "server_id", task.GetServerId(), "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
+	}
+	// Docker 不再为不存在的 bind 源目录自动建目录：先创建数据卷根目录，
+	// 否则 CreateContainer 以 "bind source path does not exist" 失败。
+	if err := os.MkdirAll(cfg.VolumePath, 0o755); err != nil {
+		slog.Warn("provision: create data directory", "server_id", task.GetServerId(), "volume", cfg.VolumePath, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "PROVISION_FAILED", Retryable: true}, nil
 	}
 	containerID, err := rt.CreateContainer(ctx, cfg)
 	if err != nil {
+		slog.Warn("provision: create container failed", "server_id", task.GetServerId(), "image", cfg.Image, "name", cfg.Name, "volume", cfg.VolumePath, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "PROVISION_FAILED", Retryable: true}, nil
 	}
 	result, err := json.Marshal(map[string]string{"containerId": containerID})

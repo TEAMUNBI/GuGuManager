@@ -246,10 +246,26 @@ func parseCA(certPEM, keyPEM []byte) (*CA, error) {
 		return nil, errors.New("ca certificate missing CA constraint")
 	}
 	keyBlock, _ := pem.Decode(keyPEM)
-	if keyBlock == nil || keyBlock.Type != "RSA PRIVATE KEY" {
-		return nil, errors.New("no RSA PRIVATE KEY block in ca key")
+	if keyBlock == nil {
+		return nil, errors.New("no private key block in ca key")
 	}
-	key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	var key *rsa.PrivateKey
+	switch keyBlock.Type {
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	case "PRIVATE KEY":
+		parsed, pkcs8Err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+		if pkcs8Err != nil {
+			return nil, fmt.Errorf("parse ca key: %w", pkcs8Err)
+		}
+		rsaKey, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, errors.New("ca key is not an RSA key")
+		}
+		key = rsaKey
+	default:
+		return nil, fmt.Errorf("unsupported ca key PEM block %q", keyBlock.Type)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("parse ca key: %w", err)
 	}

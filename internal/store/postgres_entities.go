@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -385,10 +386,12 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法创建服务器", true)
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	var allocationID string
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, server_id, is_primary, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, true, $7)
-	`, id.New(), input.NodeID, bindIP, port, protocol, serverID, now)
+		RETURNING id::text
+	`, id.New(), input.NodeID, bindIP, port, protocol, serverID, now).Scan(&allocationID)
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法分配游戏端口", true)
 	}
@@ -398,6 +401,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	// adapter. Bundles unknown to the fixed catalog keep the legacy behavior:
 	// no startup_values row is written and Startup() reports them as
 	// PACKAGE_INCOMPATIBLE.
+	var startupValues map[string]any
 	if game, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil {
 		serverForStartup := domain.Server{
 			ID: serverID, GameID: input.GameDefinitionID, GameBundleDigest: input.GameBundleDigest,
@@ -416,6 +420,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 			}
 			break
 		}
+		startupValues = values
 		encoded, marshalErr := json.Marshal(values)
 		if marshalErr != nil {
 			return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法保存启动变量", true)
@@ -430,6 +435,20 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		}
 	}
 
+	// The agent claims queued tasks via checkpoint::text as its payload, so
+	// the provision payload must be materialized here. Previously it was left
+	// empty and every provision failed on the agent with PROVISION_FAILED.
+	payloadJSON, marshalErr := json.Marshal(provisionTaskPayload{
+		GameDefinitionID:   input.GameDefinitionID,
+		ResourceLimits:     provisionResourceLimits{MemoryBytes: uint64(memoryBytes), DiskBytes: uint64(diskBytes)},
+		Allocations:        []provisionTaskAllocation{{AllocationID: allocationID, BindIP: bindIP, HostPort: uint32(port), ContainerPort: uint32(port), Protocol: provisionProtocolName(protocol)}},
+		Variables:          stringifiedStartupValues(startupValues),
+		StartAfterProvision: false,
+	})
+	if marshalErr != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
+	}
+
 	// The task id doubles as the operation id returned to the control plane.
 	// The UNIQUE (idempotency_scope, idempotency_key) constraint backs the
 	// replay path for concurrent duplicates.
@@ -437,12 +456,12 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO server_tasks (
 			id, server_id, node_id, task_type, status, generation, actor_id,
-			idempotency_scope, idempotency_key, request_digest, attempt, max_attempts, created_at, updated_at
+			idempotency_scope, idempotency_key, request_digest, checkpoint, attempt, max_attempts, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, 'provision', 'queued', $4, $5, $6, $7, $8, 0, 3, $9, $9)
+		VALUES ($1, $2, $3, 'provision', 'queued', $4, $5, $6, $7, $8, $9, 0, 3, $10, $10)
 		ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
 		RETURNING id::text
-	`, operationID, serverID, input.NodeID, 1, actor.ID, scope, idempotencyKey, digest[:], now).Scan(&taskID)
+	`, operationID, serverID, input.NodeID, 1, actor.ID, scope, idempotencyKey, digest[:], string(payloadJSON), now).Scan(&taskID)
 	if err == sql.ErrNoRows {
 		// A concurrent request already recorded this key: roll back our
 		// writes and return the recorded operation.
@@ -594,4 +613,63 @@ func (s *Postgres) nextAvailablePort(ctx context.Context, nodeID string, protoco
 		}
 	}
 	return 0, false
+}
+
+// provisionTaskPayload 是下发给 Agent 的 provision 任务负载（JSON 形状与
+// agentv1.ProvisionTaskPayload 的 protojson 字段名对齐，Agent 端 protojson
+// 反序列化后执行 Docker provision）。该负载在 CreateServer 时落库到
+// server_tasks.checkpoint，ClaimTask 将其作为 PayloadJSON 下发给 Agent。
+type provisionTaskPayload struct {
+	GameDefinitionID    string                     `json:"gameDefinitionId"`
+	ResourceLimits      provisionResourceLimits    `json:"resourceLimits,omitempty"`
+	Allocations         []provisionTaskAllocation  `json:"allocations,omitempty"`
+	Variables           map[string]string          `json:"variables,omitempty"`
+	StartAfterProvision bool                       `json:"startAfterProvision"`
+}
+
+type provisionResourceLimits struct {
+	MemoryBytes uint64 `json:"memoryBytes,omitempty"`
+	DiskBytes   uint64 `json:"diskBytes,omitempty"`
+	CPUMillicores uint32 `json:"cpuMillicores,omitempty"`
+	PIDs        uint32 `json:"pids,omitempty"`
+}
+
+type provisionTaskAllocation struct {
+	AllocationID  string `json:"allocationId"`
+	BindIP        string `json:"bindIp"`
+	HostPort      uint32 `json:"hostPort"`
+	ContainerPort uint32 `json:"containerPort"`
+	Protocol      string `json:"protocol"`
+}
+
+// stringifiedStartupValues 把启动变量值转为 proto map<string,string> 所需的
+// 字符串值（bool 与数字统一字符串化）。
+func stringifiedStartupValues(values map[string]any) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		switch typed := value.(type) {
+		case string:
+			result[key] = typed
+		case bool:
+			result[key] = strconv.FormatBool(typed)
+		case int64:
+			result[key] = strconv.FormatInt(typed, 10)
+		case int:
+			result[key] = strconv.Itoa(typed)
+		default:
+			result[key] = fmt.Sprint(value)
+		}
+	}
+	return result
+}
+
+// provisionProtocolName 把 store 内部的 tcp/udp 协议名映射为 proto 枚举名。
+func provisionProtocolName(protocol string) string {
+	if protocol == "udp" {
+		return "NETWORK_PROTOCOL_UDP"
+	}
+	return "NETWORK_PROTOCOL_TCP"
 }
