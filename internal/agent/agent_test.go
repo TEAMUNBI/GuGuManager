@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -292,6 +293,18 @@ func (f *fakeExecutor) ExecuteTask(ctx context.Context, task *agentv1.Task) (*Ex
 	f.calls++
 	f.tasks = append(f.tasks, task)
 	return &ExecutionOutcome{Succeeded: true}, nil
+}
+
+func (f *fakeExecutor) ExecuteConsoleCommand(ctx context.Context, serverID, command string) (*ExecutionOutcome, error) {
+	return &ExecutionOutcome{Succeeded: true, ResultJSON: []byte(`{"output":"fake echo"}`)}, nil
+}
+
+func (f *fakeExecutor) Runtime() (containerRuntime, error) {
+	return nil, errors.New("fake executor has no runtime")
+}
+
+func (f *fakeExecutor) ListRunningServers(ctx context.Context) ([]string, error) {
+	return nil, nil
 }
 
 func (f *fakeExecutor) callCount() int {

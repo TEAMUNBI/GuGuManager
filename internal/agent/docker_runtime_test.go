@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,10 +33,83 @@ type fakeDocker struct {
 	createID   string
 	createErr  error
 	actionErr  error
+
+	execOut   string
+	execErr   error
+	execArgv  [][]string
+	stats     runtime.ContainerStats
+	statsErr  error
+	env       map[string]string
+	envErr    error
+	containers []string
+	listErr    error
+	logReader  io.ReadCloser
+	copiesTo   []archiveOp
+	copiesFrom []archiveOp
+}
+
+type archiveOp struct {
+	ContainerID string
+	HostPath    string
+	ContainerPath string
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{createID: "cont-abc", status: runtime.ContainerStatus{ID: "cont-abc", State: "running", Status: "running", Running: true, Healthy: true}}
+	return &fakeDocker{
+		createID: "cont-abc",
+		status:   runtime.ContainerStatus{ID: "cont-abc", State: "running", Status: "running", Running: true, Healthy: true},
+		env:      map[string]string{"EULA": "TRUE"},
+	}
+}
+
+func (f *fakeDocker) ExecInContainer(ctx context.Context, containerID string, argv []string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execArgv = append(f.execArgv, argv)
+	return f.execOut, f.execErr
+}
+
+func (f *fakeDocker) ContainerStats(ctx context.Context, containerID string) (runtime.ContainerStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stats, f.statsErr
+}
+
+func (f *fakeDocker) FollowLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logReader, nil
+}
+
+func (f *fakeDocker) InspectEnv(ctx context.Context, containerID string) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.env, f.envErr
+}
+
+func (f *fakeDocker) ListRunningContainers(ctx context.Context, namePrefix string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.containers...), f.listErr
+}
+
+func (f *fakeDocker) CopyArchiveToContainer(ctx context.Context, containerID, hostPath, containerPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.copiesTo = append(f.copiesTo, archiveOp{ContainerID: containerID, HostPath: hostPath, ContainerPath: containerPath})
+	return nil
+}
+
+func (f *fakeDocker) CopyArchiveFromContainer(ctx context.Context, containerID, containerPath, hostPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.copiesFrom = append(f.copiesFrom, archiveOp{ContainerID: containerID, ContainerPath: containerPath, HostPath: hostPath})
+	// fake 在宿主机目标路径生成一份归档，供后续断言与恢复路径使用。
+	if hostPath != "" {
+		_ = os.MkdirAll(filepath.Dir(hostPath), 0o755)
+		_ = os.WriteFile(hostPath, []byte("fake-archive"), 0o644)
+	}
+	return nil
 }
 
 func (f *fakeDocker) CreateContainer(ctx context.Context, cfg runtime.ContainerConfig) (string, error) {
@@ -476,6 +552,66 @@ func TestDockerExecutorDefaultRuntimeLazy(t *testing.T) {
 	}
 	if exec.rt != nil {
 		t.Error("runtime should be lazily initialized, not at construction")
+	}
+}
+
+func TestExecuteConsoleCommandRunsExecInContainer(t *testing.T) {
+	fd := newFakeDocker()
+	fd.execOut = "There are 2 of a max of 20 players online"
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+
+	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
+	if err != nil {
+		t.Fatalf("execute console command: %v", err)
+	}
+	if !outcome.Succeeded {
+		t.Fatalf("expected success, got %s", outcome.ErrorCode)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(outcome.ResultJSON, &payload); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !strings.Contains(payload.Output, "2 of a max of 20") {
+		t.Errorf("output = %q, want rcon player list echo", payload.Output)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.execArgv) != 1 {
+		t.Fatalf("exec calls = %d, want 1", len(fd.execArgv))
+	}
+	if got := strings.Join(fd.execArgv[0], " "); got != "sh -c list" {
+		t.Errorf("exec argv = %q, want 'sh -c list'", got)
+	}
+}
+
+func TestExecuteConsoleCommandRuntimeUnavailable(t *testing.T) {
+	exec := &DockerExecutor{
+		dataRoot: t.TempDir(),
+		newRuntime: func() (containerRuntime, error) {
+			return nil, errors.New("no docker daemon")
+		},
+	}
+	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
+	if err != nil {
+		t.Fatalf("execute console command: %v", err)
+	}
+	if outcome.Succeeded || outcome.ErrorCode != "RUNTIME_UNAVAILABLE" || !outcome.Retryable {
+		t.Errorf("outcome = %+v, want RUNTIME_UNAVAILABLE retryable", outcome)
+	}
+}
+
+func TestExecuteConsoleCommandExecError(t *testing.T) {
+	fd := newFakeDocker()
+	fd.execErr = errors.New("exec failed")
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
+	if err != nil {
+		t.Fatalf("execute console command: %v", err)
+	}
+	if outcome.Succeeded || outcome.ErrorCode != "COMMAND_FAILED" || outcome.Retryable {
+		t.Errorf("outcome = %+v, want COMMAND_FAILED non-retryable", outcome)
 	}
 }
 

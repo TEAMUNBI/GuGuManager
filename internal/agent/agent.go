@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
@@ -43,9 +46,13 @@ type runOptions struct {
 	executor   TaskExecutor                                    // nil 时用 DockerExecutor
 }
 
-// TaskExecutor 执行 Control Plane 下发的任务。
+// TaskExecutor 执行 Control Plane 下发的任务，并提供容器级控制台命令
+// 执行与运行中服务器枚举（供日志 tailer 与指标采样器使用）。
 type TaskExecutor interface {
 	ExecuteTask(ctx context.Context, task *agentv1.Task) (*ExecutionOutcome, error)
+	ExecuteConsoleCommand(ctx context.Context, serverID, command string) (*ExecutionOutcome, error)
+	Runtime() (containerRuntime, error)
+	ListRunningServers(ctx context.Context) ([]string, error)
 }
 
 // agent 持有一次进程生命周期内的连接状态。
@@ -59,6 +66,10 @@ type agent struct {
 	// 证书轮换：RotateCertificate 下行后暂存的新私钥，等待 CertificateResponse。
 	rotationKey *rsa.PrivateKey
 	rotationID  string
+
+	// 日志序号：为每台服务器维护单调递增的序列，供 LogBatch 回显排序。
+	seqMu     sync.Mutex
+	sequences map[string]int64
 }
 
 // Run 运行 Agent 主循环（断开后自动重连、证书复用），直到 ctx 取消。
@@ -116,7 +127,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger, opts runOptions) 
 
 // serveSession 完成一次"凭据 → Enroll（如需）→ Connect 会话"的完整生命周期。
 func serveSession(ctx context.Context, cfg Config, logger *slog.Logger, opts runOptions) error {
-	a := &agent{cfg: cfg, logger: logger, executor: opts.executor}
+	a := &agent{cfg: cfg, logger: logger, executor: opts.executor, sequences: make(map[string]int64)}
 	if a.executor == nil {
 		exec, err := NewDockerExecutor(cfg.DataRoot)
 		if err != nil {
@@ -311,6 +322,10 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	}
 	a.logger.Info("agent connected", "node_id", a.nodeID, "protocol", welcome.GetProtocolVersion())
 
+	// 日志流式上报与指标采样：连接建立后即启动，会话结束随 ctx 取消。
+	go a.startMetricSampler(ctx, stream)
+	a.startLogTailers(ctx, stream)
+
 	interval := time.Duration(welcome.GetHeartbeatIntervalSeconds()) * time.Second
 	if interval <= 0 {
 		interval = defaultHeartbeatInterval
@@ -332,6 +347,8 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 			if err := a.handleTask(ctx, stream, p.Task); err != nil {
 				return err
 			}
+		case *agentv1.ConnectResponse_ConsoleCommand:
+			a.handleConsoleCommand(ctx, stream, p.ConsoleCommand)
 		case *agentv1.ConnectResponse_RotateCertificate:
 			if err := a.rotateCertificate(ctx, stream); err != nil {
 				return fmt.Errorf("rotate certificate: %w", err)
@@ -479,4 +496,153 @@ func (a *agent) currentSerial() string {
 		return ""
 	}
 	return cert.SerialNumber.String()
+}
+
+// handleConsoleCommand 执行控制台命令，并把命令与输出作为 stdout 行经 LogBatch 回显，
+// 让控制面日志缓冲出现一条「命令 + 结果」的记录。
+func (a *agent) handleConsoleCommand(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, cmd *agentv1.ConsoleCommand) {
+	if cmd == nil {
+		return
+	}
+	outcome, err := a.executor.ExecuteConsoleCommand(ctx, cmd.GetServerId(), cmd.GetCommand())
+	if err != nil || outcome == nil {
+		outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "EXECUTION_ERROR", Retryable: false}
+	}
+	var echo string
+	if outcome.Succeeded {
+		var payload struct {
+			Output string `json:"output"`
+		}
+		if json.Unmarshal(outcome.ResultJSON, &payload) == nil {
+			echo = payload.Output
+		}
+	}
+	if echo == "" {
+		echo = outcome.ErrorCode
+	}
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
+		ServerId: cmd.GetServerId(), FirstSequence: uint64(a.nextSequence(cmd.GetServerId())), Lines: []string{"> " + cmd.GetCommand(), echo},
+	}}}); err != nil {
+		a.logger.Warn("send console echo", "error", err)
+	}
+}
+
+// nextSequence 为每台服务器分配一对单调递增的日志序号（返回首个序号）。
+func (a *agent) nextSequence(serverID string) int64 {
+	a.seqMu.Lock()
+	defer a.seqMu.Unlock()
+	seq := a.sequences[serverID] + 1
+	a.sequences[serverID] = seq + 1
+	return seq
+}
+
+// startLogTailers 为每台运行中的服务器容器启动日志流式 tailer。
+func (a *agent) startLogTailers(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient) {
+	servers, err := a.executor.ListRunningServers(ctx)
+	if err != nil {
+		a.logger.Debug("list running servers for log tailers", "error", err)
+		return
+	}
+	for _, serverID := range servers {
+		a.startLogTailer(ctx, stream, serverID)
+	}
+}
+
+// startLogTailer 在独立 goroutine 中跟随容器日志，按行分组成批上报。
+func (a *agent) startLogTailer(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, serverID string) {
+	go func() {
+		rt, err := a.executor.Runtime()
+		if err != nil {
+			return
+		}
+		reader, err := rt.FollowLogs(ctx, fmt.Sprintf("gugu-server-%s", serverID))
+		if err != nil {
+			a.logger.Debug("follow container logs", "server", serverID, "error", err)
+			return
+		}
+		defer reader.Close()
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		var batch []string
+		seq := a.nextSequence(serverID)
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			_ = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
+				ServerId: serverID, FirstSequence: uint64(seq), Lines: batch,
+			}}})
+			seq += int64(len(batch))
+			batch = batch[:0]
+		}
+		for scanner.Scan() {
+			batch = append(batch, scanner.Text())
+			if len(batch) >= 64 {
+				flush()
+			}
+		}
+		flush()
+	}()
+}
+
+// startMetricSampler 每 5 秒采集运行中容器的资源与玩家数并上报。
+func (a *agent) startMetricSampler(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			servers, err := a.executor.ListRunningServers(ctx)
+			if err != nil {
+				continue
+			}
+			batch := &agentv1.MetricsBatch{ObservedAt: timestamppb.Now()}
+			for _, serverID := range servers {
+				metrics := a.collectServerMetrics(ctx, serverID)
+				if metrics != nil {
+					batch.Servers = append(batch.Servers, metrics)
+				}
+			}
+			if len(batch.Servers) > 0 {
+				_ = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_MetricsBatch{MetricsBatch: batch}})
+			}
+		}
+	}
+}
+
+// collectServerMetrics 采集单台服务器指标：docker stats + RCON 玩家数。
+func (a *agent) collectServerMetrics(ctx context.Context, serverID string) *agentv1.ServerMetrics {
+	rt, err := a.executor.Runtime()
+	if err != nil {
+		return nil
+	}
+	containerName := fmt.Sprintf("gugu-server-%s", serverID)
+	stats, err := rt.ContainerStats(ctx, containerName)
+	if err != nil {
+		a.logger.Debug("collect container stats", "server", serverID, "error", err)
+		return nil
+	}
+	env, err := rt.InspectEnv(ctx, containerName)
+	if err != nil {
+		a.logger.Debug("inspect container env", "server", serverID, "error", err)
+		return nil
+	}
+	m := &agentv1.ServerMetrics{
+		ServerId:          serverID,
+		CpuPercent:        stats.CPUPercent,
+		MemoryBytes:       stats.MemoryBytes,
+		MemoryLimitBytes:  stats.MemoryLimitBytes,
+		NetworkRxBytes:    stats.NetworkRxBytes,
+		NetworkTxBytes:    stats.NetworkTxBytes,
+	}
+	if password := env["RCON_PASSWORD"]; password != "" {
+		if output, execErr := rt.ExecInContainer(ctx, containerName, []string{"rcon-cli", "-H", "127.0.0.1", "-P", "25575", "-p", password, "list"}); execErr == nil {
+			online, max := parsePlayersFromRCON(output)
+			m.PlayersOnline = uint32(online)
+			m.PlayersMax = uint32(max)
+		}
+	}
+	return m
 }

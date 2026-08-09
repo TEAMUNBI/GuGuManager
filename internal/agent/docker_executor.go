@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -33,6 +34,13 @@ type containerRuntime interface {
 	RestartContainer(ctx context.Context, containerID string, timeoutSec int) error
 	RemoveContainer(ctx context.Context, containerID string, force bool) error
 	InspectContainer(ctx context.Context, containerID string) (runtime.ContainerStatus, error)
+	ExecInContainer(ctx context.Context, containerID string, argv []string) (string, error)
+	ContainerStats(ctx context.Context, containerID string) (runtime.ContainerStats, error)
+	FollowLogs(ctx context.Context, containerID string) (io.ReadCloser, error)
+	InspectEnv(ctx context.Context, containerID string) (map[string]string, error)
+	ListRunningContainers(ctx context.Context, namePrefix string) ([]string, error)
+	CopyArchiveToContainer(ctx context.Context, containerID, hostPath, containerPath string) error
+	CopyArchiveFromContainer(ctx context.Context, containerID, containerPath, hostPath string) error
 }
 
 // gameImageMap 把 Control Plane 的 GameDefinitionId 映射到本机 Docker 镜像。
@@ -77,7 +85,7 @@ func (e *DockerExecutor) runtime() (containerRuntime, error) {
 	return e.newRuntime()
 }
 
-// ExecuteTask 按 task.Type 分发任务（provision / power），返回执行结果。
+// ExecuteTask 按 task.Type 分发任务（provision / power / backup），返回执行结果。
 // 返回的 error 仅表示执行器自身故障；任务失败以 ExecutionOutcome 表达。
 func (e *DockerExecutor) ExecuteTask(ctx context.Context, task *agentv1.Task) (*ExecutionOutcome, error) {
 	switch task.GetType() {
@@ -92,6 +100,37 @@ func (e *DockerExecutor) ExecuteTask(ctx context.Context, task *agentv1.Task) (*
 			Retryable: false,
 		}, nil
 	}
+}
+
+// ExecuteConsoleCommand 在服务器容器内执行控制台命令，输出回传控制面。
+func (e *DockerExecutor) ExecuteConsoleCommand(ctx context.Context, serverID string, command string) (*ExecutionOutcome, error) {
+	rt, err := e.runtime()
+	if err != nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
+	}
+	output, err := rt.ExecInContainer(ctx, fmt.Sprintf("gugu-server-%s", serverID), []string{"sh", "-c", command})
+	if err != nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "COMMAND_FAILED", Retryable: false}, nil
+	}
+	result, err := json.Marshal(map[string]string{"output": output})
+	if err != nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "COMMAND_FAILED", Retryable: false}, nil
+	}
+	return &ExecutionOutcome{Succeeded: true, ResultJSON: result}, nil
+}
+
+// Runtime 返回当前容器运行时，供日志 tailer 与指标采样器使用。
+func (e *DockerExecutor) Runtime() (containerRuntime, error) {
+	return e.runtime()
+}
+
+// ListRunningServers 返回所有 gugu-server-* 运行中容器的 serverID。
+func (e *DockerExecutor) ListRunningServers(ctx context.Context) ([]string, error) {
+	rt, err := e.runtime()
+	if err != nil {
+		return nil, err
+	}
+	return rt.ListRunningContainers(ctx, "gugu-server-")
 }
 
 func (e *DockerExecutor) executeProvision(ctx context.Context, task *agentv1.Task) (*ExecutionOutcome, error) {
