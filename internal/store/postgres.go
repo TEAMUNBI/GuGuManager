@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	serverfiles "github.com/gugumanager/gugumanager/internal/files"
 	_ "github.com/lib/pq"
 )
 
@@ -21,6 +22,7 @@ type Postgres struct {
 	bootstrapTokenDigest [32]byte
 	fileRoot             string
 	fileMutationGates    sync.Map
+	fileSystems          map[string]*serverfiles.ServerFS
 }
 
 // NewPostgres creates a new PostgreSQL-backed store.
@@ -50,6 +52,7 @@ func NewPostgres(ctx context.Context, dsn string, environment string, agentToken
 		environment: environment,
 		agentToken:  agentTokenBytes,
 		fileRoot:    fileRoot,
+		fileSystems: map[string]*serverfiles.ServerFS{},
 	}
 
 	return store, nil

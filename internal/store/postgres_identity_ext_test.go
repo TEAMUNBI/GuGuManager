@@ -42,8 +42,8 @@ func resetTestDatabase(t *testing.T, s *Postgres) {
 	t.Helper()
 	if _, err := s.db.Exec(`
 		TRUNCATE server_members, servers, nodes, game_bundles, game_definitions,
-		         allocations, server_tasks, backups, sessions, password_reset_tokens,
-		         audit_events, user_roles, users CASCADE`); err != nil {
+		         allocations, server_tasks, backups, startup_values, sessions,
+		         password_reset_tokens, audit_events, user_roles, users CASCADE`); err != nil {
 		t.Fatalf("reset test database: %v", err)
 	}
 }

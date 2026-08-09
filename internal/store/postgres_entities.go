@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net"
 	"strconv"
@@ -196,7 +197,7 @@ const serverSelect = `
 		SELECT host(bind_ip) AS bind_ip, port
 		FROM allocations
 		WHERE server_id = s.id AND released_at IS NULL
-		ORDER BY created_at ASC
+		ORDER BY is_primary DESC, created_at ASC
 		LIMIT 1
 	) a ON true`
 
@@ -319,13 +320,13 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 
 	// The game definition must be approved and the requested bundle digest
 	// must resolve to a published bundle of that definition.
-	var gameName, reviewStatus, bundleID, bundleGameVersion string
+	var gameName, reviewStatus, bundleID, bundleGameVersion, bundleDefinitionVersion string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT gd.name, gd.review_status, gb.id::text, gb.game_version
+		SELECT gd.name, gd.review_status, gb.id::text, gb.game_version, gb.definition_version
 		FROM game_definitions gd
 		JOIN game_bundles gb ON gb.game_definition_id = gd.id
 		WHERE gd.id = $1 AND gb.digest = $2
-	`, input.GameDefinitionID, input.GameBundleDigest).Scan(&gameName, &reviewStatus, &bundleID, &bundleGameVersion)
+	`, input.GameDefinitionID, input.GameBundleDigest).Scan(&gameName, &reviewStatus, &bundleID, &bundleGameVersion, &bundleDefinitionVersion)
 	if err == sql.ErrNoRows {
 		return domain.Operation{}, domain.NewProblem("VALIDATION_FAILED", "节点或游戏包不存在", false)
 	}
@@ -385,11 +386,48 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, server_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, server_id, is_primary, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, true, $7)
 	`, id.New(), input.NodeID, bindIP, port, protocol, serverID, now)
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法分配游戏端口", true)
+	}
+
+	// Materialize the Startup declaration defaults so required variables are
+	// configured before the first start/restart, matching the in-memory
+	// adapter. Bundles unknown to the fixed catalog keep the legacy behavior:
+	// no startup_values row is written and Startup() reports them as
+	// PACKAGE_INCOMPATIBLE.
+	if game, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil {
+		serverForStartup := domain.Server{
+			ID: serverID, GameID: input.GameDefinitionID, GameBundleDigest: input.GameBundleDigest,
+			GameDefinitionVersion: bundleDefinitionVersion, NodeID: input.NodeID, Generation: 1,
+		}
+		startup, values, startupErr := startupFromFixedBundle(serverForStartup, game, nil)
+		if startupErr != nil {
+			return domain.Operation{}, startupErr
+		}
+		for _, variable := range startup.Variables {
+			if variable.Key != "memory_mb" {
+				continue
+			}
+			if err := applyStartupOverrides(startup.Variables, values, map[string]any{"memory_mb": int64(input.MemoryMB)}); err != nil {
+				return domain.Operation{}, err
+			}
+			break
+		}
+		encoded, marshalErr := json.Marshal(values)
+		if marshalErr != nil {
+			return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法保存启动变量", true)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO startup_values (server_id, values, updated_at)
+			VALUES ($1, $2::jsonb, now())
+			ON CONFLICT (server_id) DO UPDATE
+			SET values = EXCLUDED.values, updated_at = now()
+		`, serverID, string(encoded)); err != nil {
+			return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法保存启动变量", true)
+		}
 	}
 
 	// The task id doubles as the operation id returned to the control plane.

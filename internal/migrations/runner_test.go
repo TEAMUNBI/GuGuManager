@@ -73,8 +73,8 @@ func TestRunMigrationsUpDown(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if applied != 4 {
-		t.Fatalf("schema_migrations rows = %d, want 4", applied)
+	if applied != 5 {
+		t.Fatalf("schema_migrations rows = %d, want 5", applied)
 	}
 
 	// Idempotency: a repeated up must be a no-op without error.
