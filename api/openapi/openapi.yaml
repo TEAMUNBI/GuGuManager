@@ -1,0 +1,1606 @@
+openapi: 3.1.0
+info:
+  title: GuGuManager Control Plane API
+  version: 0.1.0
+  description: Development vertical-slice contract. Production-only guarantees are marked in the design chapters.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: /api/v1
+tags:
+  - name: Setup
+    description: One-time administrator bootstrap guarded by a deployment token.
+  - name: Auth
+    description: Session, CSRF-protected authentication, and one-time local password reset.
+  - name: Users
+    description: Platform-administrator user and server-membership management.
+  - name: Overview
+    description: Fleet-level development metrics and recent activity.
+  - name: Servers
+    description: Server lifecycle, power, console, files, backups, and operations.
+  - name: Nodes
+    description: Registered node snapshots and capacity.
+  - name: Catalog
+    description: Approved GameDefinition and Bundle catalog entries.
+  - name: Audit
+    description: Append-only development audit events.
+  - name: Agent
+    description: Development-only agent heartbeat authenticated by the development agent token.
+paths:
+  /setup/status:
+    get:
+      tags: [Setup]
+      operationId: getSetupStatus
+      summary: Read whether first-administrator setup is still required
+      security: []
+      responses:
+        '200':
+          description: Setup state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SetupStatusResponse'}
+  /setup/admin:
+    post:
+      tags: [Setup]
+      operationId: setupAdministrator
+      summary: Atomically create the first platform administrator
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SetupAdminRequest'}
+      responses:
+        '201':
+          description: First administrator created and setup permanently closed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Establish a session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Session established
+          headers:
+            Set-Cookie:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '422': {$ref: '#/components/responses/Error'}
+  /auth/session:
+    get:
+      tags: [Auth]
+      operationId: getSession
+      summary: Read the current session
+      responses:
+        '200':
+          description: Current session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401': {$ref: '#/components/responses/Error'}
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Revoke the current session
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Session revoked}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /auth/password-reset:
+    post:
+      tags: [Auth]
+      operationId: resetLocalPassword
+      summary: Consume a one-time password reset token and revoke old sessions
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PasswordResetRequest'}
+      responses:
+        '204': {description: Password replaced and all prior sessions revoked}
+        '401': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      summary: List local users
+      responses:
+        '200':
+          description: Local users
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Users]
+      operationId: createUser
+      summary: Create a local user
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateUserRequest'}
+      responses:
+        '201':
+          description: Local user created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [Users]
+      operationId: getUser
+      summary: Read a local user
+      responses:
+        '200':
+          description: Local user
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Users]
+      operationId: updateUser
+      summary: Update display name, status, or global roles
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateUserRequest'}
+      responses:
+        '200':
+          description: Updated local user
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /users/{userId}/password-reset-tokens:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [Users]
+      operationId: issuePasswordResetToken
+      summary: Issue a short-lived one-time local password reset token
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '201':
+          description: One-time plaintext token; only its digest is retained
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PasswordResetTokenResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /overview:
+    get:
+      tags: [Overview]
+      operationId: getOverview
+      summary: Read the fleet overview
+      responses:
+        '200':
+          description: Fleet overview
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Overview'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /servers:
+    get:
+      tags: [Servers]
+      operationId: listServers
+      summary: List visible servers
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: query
+          in: query
+          schema: {type: string, maxLength: 100}
+      responses:
+        '200':
+          description: Servers visible to the current actor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerListResponse'
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Servers]
+      operationId: createServer
+      summary: Create a server
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServerRequest'
+      responses:
+        '202':
+          description: Provision operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResponse'
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: getServer
+      summary: Read server details
+      responses:
+        '200':
+          description: Server detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Server'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/permissions:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: getEffectiveServerPermissions
+      summary: Read the current actor's effective server permissions
+      responses:
+        '200':
+          description: Effective permissions for the current actor
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServerPermissionsResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [Users]
+      operationId: getServerMembership
+      summary: Read a server membership
+      responses:
+        '200':
+          description: Server membership
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServerMembershipResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Users]
+      operationId: putServerMembership
+      summary: Grant or replace server-scoped permissions
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PutServerMembershipRequest'}
+      responses:
+        '200':
+          description: Server membership granted or replaced
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServerMembershipResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Users]
+      operationId: deleteServerMembership
+      summary: Revoke server access immediately
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Server membership revoked}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/power:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Servers]
+      operationId: requestPower
+      summary: Request a power transition
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [start, stop, restart, kill]
+      responses:
+        '202':
+          description: Power operation accepted or reused
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResponse'
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/allocations:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: listServerAllocations
+      summary: List network allocations assigned to a server
+      responses:
+        '200':
+          description: Server network allocations with exactly one primary allocation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    minItems: 1
+                    items: {$ref: '#/components/schemas/Allocation'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Servers]
+      operationId: createServerAllocation
+      summary: Assign a unique node endpoint and reconcile the server
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAllocationRequest'}
+      responses:
+        '202':
+          description: Allocation reconciliation accepted or idempotently reused
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/allocations/{allocationId}:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - $ref: '#/components/parameters/AllocationId'
+    patch:
+      tags: [Servers]
+      operationId: promoteServerAllocation
+      summary: Atomically promote an allocation to primary and reconcile the server
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PromoteAllocationRequest'}
+      responses:
+        '202':
+          description: Primary-allocation reconciliation accepted or idempotently reused
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Servers]
+      operationId: deleteServerAllocation
+      summary: Release a non-primary allocation and reconcile the server
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      responses:
+        '202':
+          description: Allocation release reconciliation accepted or idempotently reused
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/startup:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: getServerStartup
+      summary: Read the resolved command and declared startup variables
+      responses:
+        '200':
+          description: Startup configuration; secret variables expose only hasValue state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Startup'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Servers]
+      operationId: updateServerStartup
+      summary: Validate startup variables and reconcile the server
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateStartupRequest'}
+      responses:
+        '202':
+          description: Startup reconciliation accepted or idempotently reused
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/console:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: getConsoleSnapshot
+      summary: Read a console snapshot
+      responses:
+        '200':
+          description: Development console snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/ConsoleLine'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/console/commands:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Servers]
+      operationId: sendConsoleCommand
+      summary: Send a console command
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [command]
+              properties:
+                command: {type: string, minLength: 1, maxLength: 512}
+      responses:
+        '202': {description: Command accepted}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/files:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: listFiles
+      summary: List server files
+      parameters:
+        - name: path
+          in: query
+          schema: {type: string, default: ''}
+      responses:
+        '200':
+          description: Directory entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/FileEntry'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Servers]
+      operationId: deleteServerFile
+      summary: Delete a file or directory inside the server root
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - name: path
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 1024}
+        - name: recursive
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        '204': {description: Entry deleted}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/files/content:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: readServerFile
+      summary: Read a bounded regular file
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 1024}
+      responses:
+        '200':
+          description: File content encoded as UTF-8 or unpadded base64
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/FileContent'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Servers]
+      operationId: writeServerFile
+      summary: Atomically create or replace a bounded regular file
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [path, content]
+              properties:
+                path: {type: string, minLength: 1, maxLength: 1024}
+                content: {type: string, maxLength: 11184811}
+                encoding: {type: string, enum: [utf-8, base64], default: utf-8}
+      responses:
+        '204': {description: File written atomically}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/files/directories:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Servers]
+      operationId: createServerDirectory
+      summary: Create one directory below an existing safe parent
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [path]
+              properties:
+                path: {type: string, minLength: 1, maxLength: 1024}
+      responses:
+        '201': {description: Directory created}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/files/moves:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Servers]
+      operationId: moveServerFile
+      summary: Move or rename a file or directory
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [source, destination, replace]
+              properties:
+                source: {type: string, minLength: 1, maxLength: 1024}
+                destination: {type: string, minLength: 1, maxLength: 1024}
+                replace: {type: boolean}
+      responses:
+        '204': {description: Entry moved}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/backups:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Servers]
+      operationId: listBackups
+      summary: List server backups
+      responses:
+        '200':
+          description: Backups
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/Backup'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Servers]
+      operationId: createBackup
+      summary: Create a server backup
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Backup operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResponse'
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/backups/{backupId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - $ref: '#/components/parameters/BackupId'
+    post:
+      tags: [Servers]
+      operationId: restoreServerBackup
+      summary: Restore a verified backup while the server is stopped
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Restore operation accepted and exclusive restore lock acquired
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/backups/{backupId}:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - $ref: '#/components/parameters/BackupId'
+    delete:
+      tags: [Servers]
+      operationId: deleteServerBackup
+      summary: Delete a backup through an asynchronous operation
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Backup deletion operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /nodes:
+    get:
+      tags: [Nodes]
+      operationId: listNodes
+      summary: List registered nodes
+      responses:
+        '200':
+          description: Nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/Node'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /game-definitions:
+    get:
+      tags: [Catalog]
+      operationId: listGameDefinitions
+      summary: List game definitions
+      responses:
+        '200':
+          description: Approved game bundles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/GameDefinition'}
+        '401': {$ref: '#/components/responses/Error'}
+  /operations:
+    get:
+      tags: [Servers]
+      operationId: listOperations
+      summary: List operations visible through current server read grants
+      parameters:
+        - name: cursor
+          in: query
+          schema: {type: string, minLength: 1}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+      responses:
+        '200':
+          description: Operations ordered by immutable creation time and ID
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /operations/{operationId}:
+    get:
+      tags: [Servers]
+      operationId: getOperation
+      summary: Read an operation
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema: {$ref: '#/components/schemas/Uuid'}
+      responses:
+        '200':
+          description: Operation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /audit-events:
+    get:
+      tags: [Audit]
+      operationId: listAuditEvents
+      summary: List audit events
+      responses:
+        '200':
+          description: Append-only audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/AuditEvent'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /dev/agent/heartbeat:
+    post:
+      tags: [Agent]
+      operationId: developmentAgentHeartbeat
+      summary: Mark a development node as available
+      description: Development adapter endpoint. Production Agent transport will use mTLS and gRPC instead of this bearer-token HTTP route.
+      security:
+        - agentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [nodeName, agentVersion]
+              properties:
+                nodeName: {type: string}
+                agentVersion: {type: string}
+      responses:
+        '204': {description: Node heartbeat recorded}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: gugu_session
+    agentToken:
+      type: http
+      scheme: bearer
+      bearerFormat: development agent token
+  parameters:
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    BackupId:
+      name: backupId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    AllocationId:
+      name: allocationId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    Cursor:
+      name: cursor
+      in: query
+      schema: {type: string}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 16, maxLength: 128, pattern: '^[\x20-\x7E]+$'}
+    IfMatchGeneration:
+      name: If-Match
+      in: header
+      required: true
+      description: Numeric server generation read before submitting the mutation.
+      schema: {type: integer, minimum: 1}
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: {type: string, minLength: 32, maxLength: 256}
+  responses:
+    Error:
+      description: Structured API error
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    RateLimited:
+      description: Login attempts are temporarily blocked for an account or source IP
+      headers:
+        Retry-After:
+          required: true
+          schema: {type: integer, minimum: 1}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    SetupStatusResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [required]
+          properties:
+            required: {type: boolean}
+            bootstrapExpiresAt: {type: string, format: date-time}
+    SetupAdminRequest:
+      type: object
+      additionalProperties: false
+      required: [bootstrapToken, email, displayName, password]
+      properties:
+        bootstrapToken: {type: string, minLength: 32, maxLength: 256}
+        email: {type: string, format: email, maxLength: 254}
+        displayName: {type: string, minLength: 1, maxLength: 64}
+        password: {type: string, minLength: 8, maxLength: 1024}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: {type: string, format: email, maxLength: 254}
+        password: {type: string, minLength: 8, maxLength: 1024}
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, email, displayName, roles, status, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        email: {type: string, format: email}
+        displayName: {type: string, minLength: 1, maxLength: 64}
+        roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string}
+        status: {type: string, enum: [active, disabled]}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    UserResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/User'}
+    UserListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/User'}
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [email, displayName, password, roles]
+      properties:
+        email: {type: string, format: email, maxLength: 254}
+        displayName: {type: string, minLength: 1, maxLength: 64}
+        password: {type: string, minLength: 8, maxLength: 1024}
+        roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string, enum: [platform_admin, server_owner]}
+    UpdateUserRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        displayName: {type: string, minLength: 1, maxLength: 64}
+        status: {type: string, enum: [active, disabled]}
+        roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string, enum: [platform_admin, server_owner]}
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [token, password]
+      properties:
+        token: {type: string, minLength: 32, maxLength: 256}
+        password: {type: string, minLength: 8, maxLength: 1024}
+    PasswordResetToken:
+      type: object
+      additionalProperties: false
+      required: [token, expiresAt]
+      properties:
+        token:
+          type: string
+          minLength: 32
+          maxLength: 256
+          description: Plaintext is returned exactly once; persistence retains only a SHA-256 digest.
+        expiresAt: {type: string, format: date-time}
+    PasswordResetTokenResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/PasswordResetToken'}
+    ServerPermission:
+      type: string
+      enum:
+        - servers.read
+        - servers.power
+        - servers.console
+        - servers.files.read
+        - servers.files.write
+        - servers.backups.read
+        - servers.backups.create
+        - servers.backups.restore
+        - servers.backups.delete
+        - servers.network.read
+        - servers.network.write
+        - servers.startup.read
+        - servers.startup.write
+    PutServerMembershipRequest:
+      type: object
+      additionalProperties: false
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          contains: {const: servers.read}
+          items: {$ref: '#/components/schemas/ServerPermission'}
+    ServerMembership:
+      type: object
+      additionalProperties: false
+      required: [serverId, userId, permissions, createdAt, updatedAt]
+      properties:
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        userId: {$ref: '#/components/schemas/Uuid'}
+        permissions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          contains: {const: servers.read}
+          items: {$ref: '#/components/schemas/ServerPermission'}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    ServerMembershipResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/ServerMembership'}
+    ServerPermissions:
+      type: object
+      additionalProperties: false
+      required: [serverId, permissions]
+      properties:
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        permissions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          contains: {const: servers.read}
+          items: {$ref: '#/components/schemas/ServerPermission'}
+    ServerPermissionsResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/ServerPermissions'}
+    SessionResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [user, csrfToken, environment]
+          properties:
+            user: {$ref: '#/components/schemas/User'}
+            csrfToken: {type: string}
+            environment: {type: string, enum: [development, production]}
+    ResourceMetrics:
+      type: object
+      required: [cpuPercent, memoryBytes, memoryLimitBytes, diskBytes, diskLimitBytes]
+      properties:
+        cpuPercent: {type: number, minimum: 0}
+        memoryBytes: {type: integer, minimum: 0}
+        memoryLimitBytes: {type: integer, minimum: 0}
+        diskBytes: {type: integer, minimum: 0}
+        diskLimitBytes: {type: integer, minimum: 0}
+        networkRxBytes: {type: integer, minimum: 0}
+        networkTxBytes: {type: integer, minimum: 0}
+        playersOnline: {type: integer, minimum: 0}
+        playersMax: {type: integer, minimum: 0}
+    MetricPoint:
+      type: object
+      required: [timestamp, cpuPercent, memoryBytes]
+      properties:
+        timestamp: {type: string, format: date-time}
+        cpuPercent: {type: number, minimum: 0}
+        memoryBytes: {type: integer, minimum: 0}
+    Server:
+      type: object
+      required: [id, name, description, gameId, gameBundleDigest, gameDefinitionVersion, gameName, gameVersion, nodeId, nodeName, lifecycleState, desiredPower, observedPower, nodeCondition, healthCondition, generation, observedGeneration, observedAt, allocation, ownerName, metrics, metricHistory, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        description: {type: string}
+        gameId: {type: string}
+        gameBundleDigest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+          description: Immutable sha256 identity of the published Bundle; it is not the game release version or a component image digest.
+        gameDefinitionVersion:
+          type: string
+          description: SemVer of the immutable GameDefinition selected at creation time.
+        gameName: {type: string}
+        gameVersion:
+          type: string
+          description: Opaque upstream game release identifier resolved from spec.release.version.
+        nodeId: {$ref: '#/components/schemas/Uuid'}
+        nodeName: {type: string}
+        lifecycleState: {type: string, enum: [provisioning, ready, deleting, deleted]}
+        desiredPower: {type: string, enum: [running, stopped]}
+        observedPower: {type: string, enum: [unknown, stopped, starting, running, stopping]}
+        nodeCondition: {type: string, enum: [available, offline, maintenance]}
+        healthCondition: {type: string, enum: [unknown, healthy, unhealthy]}
+        generation: {type: integer, minimum: 1}
+        observedGeneration: {type: integer, minimum: 0}
+        observedAt: {type: string, format: date-time}
+        allocation: {type: string}
+        ownerName: {type: string}
+        metrics: {$ref: '#/components/schemas/ResourceMetrics'}
+        metricHistory:
+          type: array
+          items: {$ref: '#/components/schemas/MetricPoint'}
+        updatedAt: {type: string, format: date-time}
+    ServerListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Server'}
+        page:
+          type: object
+          required: [nextCursor]
+          properties:
+            nextCursor: {type: [string, 'null']}
+    CreateServerRequest:
+      type: object
+      additionalProperties: false
+      required: [name, gameDefinitionId, gameBundleDigest, nodeId, memoryMb, diskGb]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        gameDefinitionId: {type: string}
+        gameBundleDigest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+          description: Immutable sha256 identity of the selected published Bundle; the server resolves its definition and upstream game versions from the catalog record.
+        nodeId: {$ref: '#/components/schemas/Uuid'}
+        memoryMb: {type: integer, minimum: 512, maximum: 131072}
+        diskGb: {type: integer, minimum: 1, maximum: 2048}
+    Allocation:
+      type: object
+      required: [id, serverId, nodeId, bindIp, port, protocol, primary, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        nodeId: {$ref: '#/components/schemas/Uuid'}
+        bindIp:
+          type: string
+          description: Canonical IPv4 or IPv6 bind address. Unspecified wildcard addresses (0.0.0.0 and ::) are rejected.
+        port: {type: integer, minimum: 1, maximum: 65535}
+        protocol: {type: string, enum: [tcp, udp]}
+        primary:
+          type: boolean
+          description: Exactly one allocation per server is primary.
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    CreateAllocationRequest:
+      type: object
+      additionalProperties: false
+      required: [bindIp, port, protocol, primary]
+      properties:
+        bindIp: {type: string, minLength: 2, maxLength: 45}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        protocol: {type: string, enum: [tcp, udp]}
+        primary: {type: boolean}
+    PromoteAllocationRequest:
+      type: object
+      additionalProperties: false
+      required: [primary]
+      properties:
+        primary: {type: boolean, const: true}
+    StartupCommand:
+      type: object
+      required: [executable, args]
+      properties:
+        executable: {type: string, minLength: 1}
+        args:
+          type: array
+          items: {type: string}
+    StartupScalar:
+      description: A Startup value. Integer values use the JavaScript safe integer domain.
+      oneOf:
+        - type: string
+        - type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+        - type: boolean
+    StartupVariable:
+      type: object
+      additionalProperties: false
+      required: [key, type, secret, required, hasValue]
+      description: Secret variables expose only declaration metadata and hasValue; value, default, constValue, and enumValues are omitted.
+      properties:
+        key: {type: string, minLength: 1}
+        type:
+          type: string
+          enum: [string, integer, boolean]
+          description: Integer variables use the JavaScript safe integer domain (-9007199254740991 through 9007199254740991).
+        secret: {type: boolean}
+        required: {type: boolean}
+        default:
+          allOf:
+            - {$ref: '#/components/schemas/StartupScalar'}
+          description: Declared default for a non-secret variable.
+        value:
+          allOf:
+            - {$ref: '#/components/schemas/StartupScalar'}
+          description: Configured non-secret value. This member is never returned for a secret variable.
+        hasValue: {type: boolean}
+        minimum: {type: integer, minimum: -9007199254740991, maximum: 9007199254740991}
+        maximum: {type: integer, minimum: -9007199254740991, maximum: 9007199254740991}
+        minLength: {type: integer, minimum: 0, maximum: 9007199254740991}
+        maxLength: {type: integer, minimum: 0, maximum: 9007199254740991}
+        enumValues:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+          description: Declared candidates for a non-secret string variable.
+        constValue:
+          allOf:
+            - {$ref: '#/components/schemas/StartupScalar'}
+          description: Required constant value for a non-secret variable when declared by the game definition.
+      allOf:
+        - if:
+            properties:
+              secret: {const: true}
+            required: [secret]
+          then:
+            not:
+              anyOf:
+                - required: [default]
+                  properties:
+                    default: {}
+                - required: [value]
+                  properties:
+                    value: {}
+                - required: [constValue]
+                  properties:
+                    constValue: {}
+                - required: [enumValues]
+                  properties:
+                    enumValues: {}
+    Startup:
+      type: object
+      required: [serverId, generation, command, variables]
+      properties:
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        generation: {type: integer, minimum: 1}
+        command: {$ref: '#/components/schemas/StartupCommand'}
+        variables:
+          type: array
+          items: {$ref: '#/components/schemas/StartupVariable'}
+    UpdateStartupRequest:
+      type: object
+      additionalProperties: false
+      required: [variables]
+      properties:
+        variables:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            oneOf:
+              - {$ref: '#/components/schemas/StartupScalar'}
+              - type: 'null'
+          description: Declared variable updates. Null clears an optional value, including a secret. Integer values are limited to the JavaScript safe integer domain.
+    OperationError:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code: {type: string, minLength: 1}
+        message: {type: string, minLength: 1}
+        retryable: {type: boolean}
+    Operation:
+      type: object
+      required: [id, serverId, nodeId, type, status, progress, generation, attempt, maxAttempts, leaseOwner, leaseExpiresAt, checkpoint, error, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        nodeId: {$ref: '#/components/schemas/Uuid'}
+        type: {type: string, enum: [provision, start, stop, restart, kill, backup, restore, backup-delete, delete, reconcile]}
+        status: {type: string, enum: [queued, leased, dispatched, running, succeeded, failed, canceled]}
+        progress: {type: integer, minimum: 0, maximum: 100}
+        generation: {type: integer, minimum: 1}
+        attempt: {type: integer, minimum: 1}
+        maxAttempts: {type: integer, minimum: 1}
+        leaseOwner: {type: [string, 'null'], minLength: 1}
+        leaseExpiresAt: {type: [string, 'null'], format: date-time}
+        checkpoint: {type: string, minLength: 1}
+        error:
+          oneOf:
+            - {$ref: '#/components/schemas/OperationError'}
+            - type: 'null'
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    OperationResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Operation'}
+    OperationListResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Operation'}
+        page:
+          type: object
+          required: [nextCursor]
+          properties:
+            nextCursor: {type: [string, 'null']}
+    Node:
+      type: object
+      required: [id, name, condition, version, region, address, lastHeartbeatAt, cpuCores, memoryBytes, diskBytes, allocatedMemoryBytes, allocatedDiskBytes, runningServers, totalServers, capabilities]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        condition: {type: string, enum: [available, offline, maintenance]}
+        version: {type: string}
+        region: {type: string}
+        address: {type: string}
+        lastHeartbeatAt: {type: string, format: date-time}
+        cpuCores: {type: integer}
+        memoryBytes: {type: integer}
+        diskBytes: {type: integer}
+        allocatedMemoryBytes: {type: integer}
+        allocatedDiskBytes: {type: integer}
+        runningServers: {type: integer, minimum: 0}
+        totalServers: {type: integer, minimum: 0}
+        capabilities:
+          type: array
+          items: {type: string}
+    GameDefinition:
+      type: object
+      required: [id, bundleDigest, name, summary, version, gameVersion, status, capabilities, platforms, servers, icon, defaultMemoryMb, defaultDiskGb]
+      properties:
+        id: {type: string}
+        bundleDigest:
+          type: string
+          pattern: '^sha256:[a-f0-9]{64}$'
+          description: Immutable sha256 identity of the published Bundle; it is not the upstream game release version or a component image digest.
+        name: {type: string}
+        summary: {type: string}
+        version:
+          type: string
+          description: SemVer of this GameDefinition, not the upstream game release.
+        gameVersion:
+          type: string
+          description: Opaque upstream game release identifier resolved from spec.release.version.
+        status: {type: string, enum: [approved, pending, rejected]}
+        capabilities:
+          type: array
+          items: {type: string}
+        platforms:
+          type: array
+          items: {type: string}
+        servers: {type: integer, minimum: 0}
+        icon: {type: string}
+        defaultMemoryMb: {type: integer, minimum: 512}
+        defaultDiskGb: {type: integer, minimum: 1}
+    ConsoleLine:
+      type: object
+      required: [sequence, timestamp, stream, message]
+      properties:
+        sequence: {type: integer, minimum: 1}
+        timestamp: {type: string, format: date-time}
+        stream: {type: string, enum: [system, stdout, stderr, command]}
+        message: {type: string}
+    FileEntry:
+      type: object
+      required: [name, path, kind, sizeBytes, modifiedAt]
+      properties:
+        name: {type: string}
+        path: {type: string}
+        kind: {type: string, enum: [file, directory]}
+        sizeBytes: {type: integer, minimum: 0}
+        modifiedAt: {type: string, format: date-time}
+    FileContent:
+      type: object
+      required: [path, content, encoding, sizeBytes, modifiedAt]
+      properties:
+        path: {type: string}
+        content: {type: string}
+        encoding: {type: string, enum: [utf-8, base64]}
+        sizeBytes: {type: integer, minimum: 0, maximum: 8388608}
+        modifiedAt: {type: string, format: date-time}
+    Backup:
+      type: object
+      required: [id, name, status, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        status: {type: string, enum: [creating, ready, failed, restoring, deleting]}
+        sizeBytes: {type: [integer, 'null'], minimum: 0}
+        checksum: {type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$'}
+        createdAt: {type: string, format: date-time}
+    AuditEvent:
+      type: object
+      required: [id, actorName, action, targetType, targetName, result, operationId, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        actorName: {type: string}
+        action: {type: string}
+        targetType: {type: string}
+        targetName: {type: string}
+        result: {type: string, enum: [accepted, success, failure]}
+        operationId: {type: [string, 'null'], format: uuid}
+        createdAt: {type: string, format: date-time}
+    Overview:
+      type: object
+      required: [environment, serverCount, runningServerCount, onlineNodeCount, totalNodeCount, queuedOperationCount, cpuPercent, memoryUsedBytes, memoryTotalBytes, recentActivity]
+      properties:
+        environment: {type: string, enum: [development, production]}
+        serverCount: {type: integer}
+        runningServerCount: {type: integer}
+        onlineNodeCount: {type: integer}
+        totalNodeCount: {type: integer}
+        queuedOperationCount: {type: integer}
+        cpuPercent: {type: number}
+        memoryUsedBytes: {type: integer}
+        memoryTotalBytes: {type: integer}
+        recentActivity:
+          type: array
+          items: {$ref: '#/components/schemas/AuditEvent'}
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable, traceId, details]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            retryable: {type: boolean}
+            operationId: {type: [string, 'null'], format: uuid}
+            traceId: {$ref: '#/components/schemas/Uuid'}
+            details: {type: object, additionalProperties: true}
+security:
+  - cookieAuth: []

@@ -1,0 +1,20 @@
+BEGIN;
+
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS backups;
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS server_tasks;
+DROP TABLE IF EXISTS allocations;
+DROP TABLE IF EXISTS server_members;
+DROP TABLE IF EXISTS servers;
+DROP TABLE IF EXISTS game_bundles;
+DROP TABLE IF EXISTS game_definitions;
+DROP TABLE IF EXISTS node_capabilities;
+DROP TABLE IF EXISTS nodes;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS users;
+
+COMMIT;
+

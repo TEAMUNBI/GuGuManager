@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gugumanager.io/schemas/game-definition/v1alpha1.schema.json",
+  "title": "GuGuManager GameDefinition v1alpha1",
+  "$defs": {
+    "startupVariablesSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "properties"],
+      "properties": {
+        "type": {"const": "object"},
+        "additionalProperties": {"const": false},
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+        },
+        "properties": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+          "additionalProperties": {
+            "oneOf": [
+              {"$ref": "#/$defs/startupStringVariable"},
+              {"$ref": "#/$defs/startupIntegerVariable"},
+              {"$ref": "#/$defs/startupBooleanVariable"}
+            ]
+          }
+        }
+      }
+    },
+    "startupStringVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"const": "string"},
+        "default": {"type": "string"},
+        "const": {"type": "string"},
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string"}
+        },
+        "minLength": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "maxLength": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "startupIntegerVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"const": "integer"},
+        "default": {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        "const": {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        "minimum": {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        "maximum": {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}
+      }
+    },
+    "startupBooleanVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"const": "boolean"},
+        "default": {"type": "boolean"},
+        "const": {"type": "boolean"}
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "gugumanager.io/games/v1alpha1"},
+    "kind": {"const": "GameDefinition"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "license"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+([.-][a-z0-9]+)+$"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+([0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*))?$"},
+        "license": {"type": "string", "minLength": 1}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "compatibility", "capabilities", "runtime", "lifecycle"],
+      "properties": {
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version"],
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "not": {"const": "latest"}
+            }
+          }
+        },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["panel", "agent", "platforms"],
+          "properties": {
+            "panel": {"type": "string"},
+            "agent": {"type": "string"},
+            "platforms": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"enum": ["linux/amd64", "linux/arm64"]}
+            }
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["console", "query", "backup", "update"]}
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema"],
+          "properties": {
+            "schema": {"$ref": "#/$defs/startupVariablesSchema"},
+            "secrets": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["variable", "target", "template"],
+                "properties": {
+                  "variable": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                  "target": {"enum": ["environment", "argument", "file"]},
+                  "name": {"type": "string", "minLength": 1},
+                  "path": {"type": "string", "minLength": 1},
+                  "template": {"type": "string"}
+                },
+                "allOf": [
+                  {
+                    "if": {"properties": {"target": {"const": "file"}}, "required": ["target"]},
+                    "then": {"required": ["path"]}
+                  },
+                  {
+                    "if": {"properties": {"target": {"const": "environment"}}, "required": ["target"]},
+                    "then": {"required": ["name"]}
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "image", "user", "workingDir", "command", "dataMounts", "ports", "stop", "health"],
+          "properties": {
+            "adapter": {"const": "container/v1"},
+            "image": {"type": "string", "pattern": "^[^@]+@sha256:[a-f0-9]{64}$"},
+            "user": {"type": "string", "pattern": "^[0-9]+:[0-9]+$"},
+            "workingDir": {"type": "string", "pattern": "^/"},
+            "command": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["executable", "args"],
+              "properties": {
+                "executable": {"type": "string", "minLength": 1},
+                "args": {"type": "array", "items": {"type": "string"}}
+              }
+            },
+            "dataMounts": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "target", "backup"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "target": {"type": "string", "pattern": "^/"},
+                  "backup": {"type": "boolean"}
+                }
+              }
+            },
+            "ports": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "protocol", "containerPort", "role"],
+                "properties": {
+                  "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+                  "protocol": {"enum": ["tcp", "udp"]},
+                  "containerPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+                  "role": {"enum": ["primary", "query", "rcon", "additional"]}
+                }
+              }
+            },
+            "stop": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["method", "value", "timeoutSeconds"],
+              "properties": {
+                "method": {"enum": ["signal", "console"]},
+                "value": {"type": "string"},
+                "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 300}
+              }
+            },
+            "health": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "intervalSeconds", "timeoutSeconds", "failureThreshold"],
+              "properties": {
+                "type": {"enum": ["tcp", "udp-query", "process"]},
+                "portRef": {"type": "string"},
+                "intervalSeconds": {"type": "integer", "minimum": 1},
+                "timeoutSeconds": {"type": "integer", "minimum": 1},
+                "failureThreshold": {"type": "integer", "minimum": 1}
+              },
+              "allOf": [
+                {
+                  "if": {"properties": {"type": {"enum": ["tcp", "udp-query"]}}, "required": ["type"]},
+                  "then": {"required": ["portRef"]}
+                }
+              ]
+            }
+          }
+        },
+        "install": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": {"type": "string", "pattern": "^[^@]+@sha256:[a-f0-9]{64}$"},
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["url", "destination", "sha256"],
+                "properties": {
+                  "url": {"type": "string", "pattern": "^https://"},
+                  "destination": {"type": "string", "minLength": 1},
+                  "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+                }
+              }
+            },
+            "networkAllowlist": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["install", "configure"],
+          "properties": {
+            "install": {"type": "string"},
+            "configure": {"type": "string"},
+            "update": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}

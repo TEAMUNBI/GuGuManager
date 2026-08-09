@@ -1,0 +1,258 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: bufbuild/buf-action@v1
+        with:
+          version: 1.72.0
+          setup_only: true
+      - name: Verify formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Verify Protobuf format
+        run: buf format --diff --exit-code
+      - name: Verify Protobuf contract
+        run: |
+          buf build
+          buf lint
+          buf breaking --against api/proto/agent-v1.baseline.binpb
+      - name: Verify generated Protobuf code
+        run: |
+          buf generate
+          generated_status="$(git status --porcelain=v1 --untracked-files=all -- ':(glob)api/proto/**/*.pb.go')"
+          if [ -n "$generated_status" ]; then
+            echo "Generated Protobuf code is not up to date:"
+            echo "$generated_status"
+            exit 1
+          fi
+      - name: Verify Protobuf compatibility with pull request target
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF:$BASE_REF"
+          if git cat-file -e "$BASE_REF:buf.yaml"; then
+            buf breaking --against ".git#branch=$BASE_REF"
+          else
+            echo "Pull request target has no Buf module; checked the repository baseline instead."
+          fi
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: Lint example definitions
+        run: |
+          go run ./cmd/gamectl lint spec/game-definition/examples/papermc.json
+          go run ./cmd/gamectl lint spec/game-definition/examples/factorio.json
+          go run ./cmd/gamectl lint spec/game-definition/examples/vintagestory.json
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run api:lint
+      - run: npm run api:check
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+
+  openapi-compatibility:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: oasdiff/oasdiff-action/breaking@v0
+        with:
+          base: origin/${{ github.base_ref }}:api/openapi/openapi.yaml
+          revision: HEAD:api/openapi/openapi.yaml
+          fail-on: WARN
+          review: false
+
+  postgres-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: gugumanager_test
+          POSTGRES_USER: gugumanager
+          POSTGRES_PASSWORD: integration-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gugumanager -d gugumanager_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: false
+      - name: Test PostgreSQL migrations
+        env:
+          GUGU_TEST_DATABASE_URL: postgres://gugumanager:integration-test-only@127.0.0.1:5432/gugumanager_test?sslmode=disable
+        run: go test ./internal/migrations -count=1 -v
+
+  browser-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Record browser test environment
+        shell: bash
+        run: |
+          mkdir -p web/test-results/ci
+          {
+            echo "go=$(go version)"
+            echo "node=$(node --version)"
+            echo "npm=$(npm --version)"
+            echo "runner=${RUNNER_OS}-${RUNNER_ARCH}"
+          } > web/test-results/ci/environment.txt
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Test the built SPA against the real Control Plane
+        working-directory: web
+        run: npm run e2e
+      - name: Upload browser evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-e2e-evidence
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: error
+          retention-days: 7
+
+  development-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build control-plane image
+        run: docker build --file deploy/Dockerfile --tag gugumanager/control-plane-development-preview:${{ github.sha }} .
+      - name: Record image metadata
+        shell: bash
+        run: |
+          mkdir -p container-evidence
+          docker image inspect gugumanager/control-plane-development-preview:${{ github.sha }} \
+            > container-evidence/image-inspect.json
+      - name: Smoke test the running image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="gugumanager/control-plane-development-preview:${{ github.sha }}"
+          evidence_dir="$PWD/container-evidence"
+          container_id="$(docker run --detach --publish 127.0.0.1:18081:8080 \
+            --env GUGU_ENVIRONMENT=development \
+            --env GUGU_DEV_DATA_ROOT=/var/lib/gugumanager/servers \
+            --env GUGU_DEV_OPERATION_LATENCY=0s \
+            "$image")"
+          cleanup() {
+            status=$?
+            docker inspect "$container_id" > "$evidence_dir/container-inspect.json" 2>&1 || true
+            docker logs "$container_id" > "$evidence_dir/container.log" 2>&1 || true
+            if [ "$status" -ne 0 ]; then
+              cat "$evidence_dir/container.log" || true
+            fi
+            docker rm --force "$container_id" >/dev/null 2>&1 || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 \
+              --output "$evidence_dir/ready.json" \
+              http://127.0.0.1:18081/readyz; then
+              break
+            fi
+            sleep 1
+          done
+          grep --fixed-strings '"status":"ready"' "$evidence_dir/ready.json"
+          grep --fixed-strings '"adapter":"development-memory"' "$evidence_dir/ready.json"
+          curl --fail --silent --show-error --connect-timeout 2 --max-time 3 http://127.0.0.1:18081/ \
+            --output "$evidence_dir/index.html"
+          grep --fixed-strings '<title>GuGuManager / Control</title>' "$evidence_dir/index.html"
+      - name: Generate vulnerability report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: gugumanager/control-plane-development-preview:${{ github.sha }}
+          format: json
+          output: trivy-image.json
+          scanners: vuln
+          version: v0.72.0
+          exit-code: '0'
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: gugumanager/control-plane-development-preview:${{ github.sha }}
+          format: cyclonedx
+          output: gugumanager-control-plane.cdx.json
+          scanners: vuln
+          version: v0.72.0
+          skip-setup-trivy: true
+          exit-code: '0'
+      - name: Upload image evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-plane-image-evidence
+          path: |
+            container-evidence
+            trivy-image.json
+            gugumanager-control-plane.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Block fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: gugumanager/control-plane-development-preview:${{ github.sha }}
+          format: table
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          version: v0.72.0
+          skip-setup-trivy: true
+          exit-code: '1'

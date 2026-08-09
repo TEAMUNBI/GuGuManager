@@ -1,0 +1,48 @@
+{
+  "apiVersion": "gugumanager.io/games/v1alpha1",
+  "kind": "GameDefinition",
+  "metadata": {
+    "id": "io.gugumanager.factorio",
+    "name": "Factorio",
+    "version": "1.0.0",
+    "license": "Apache-2.0"
+  },
+  "spec": {
+    "release": {
+      "version": "2.0.55"
+    },
+    "compatibility": {
+      "panel": ">=0.1 <1.0",
+      "agent": ">=0.1 <1.0",
+      "platforms": ["linux/amd64"]
+    },
+    "capabilities": ["console", "query", "backup", "update"],
+    "variables": {
+      "schema": {
+        "type": "object",
+        "required": ["server_name", "autosave_interval"],
+        "properties": {
+          "server_name": {"type": "string", "default": "Friday Factory", "minLength": 1, "maxLength": 64},
+          "autosave_interval": {"type": "integer", "default": 10, "minimum": 1, "maximum": 60},
+          "public_listing": {"type": "boolean", "default": false},
+          "difficulty": {"type": "string", "default": "normal", "enum": ["peaceful", "normal", "hard"]},
+          "server_token": {"type": "string", "minLength": 8, "maxLength": 128}
+        }
+      },
+      "secrets": ["server_token"]
+    },
+    "runtime": {
+      "adapter": "container/v1",
+      "image": "registry.invalid/gugumanager/factorio@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "user": "845:845",
+      "workingDir": "/opt/factorio",
+      "command": {"executable": "/opt/factorio/bin/x64/factorio", "args": ["--start-server", "/data/saves/world.zip"]},
+      "dataMounts": [{"name": "server-data", "target": "/data", "backup": true}],
+      "ports": [{"name": "game", "protocol": "udp", "containerPort": 34197, "role": "primary"}],
+      "stop": {"method": "console", "value": "/quit", "timeoutSeconds": 30},
+      "health": {"type": "udp-query", "portRef": "game", "intervalSeconds": 15, "timeoutSeconds": 5, "failureThreshold": 4}
+    },
+    "install": {},
+    "lifecycle": {"install": "builtin.artifacts", "configure": "builtin.bindings", "update": "builtin.replace-artifacts"}
+  }
+}

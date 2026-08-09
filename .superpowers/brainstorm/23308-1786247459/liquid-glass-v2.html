@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GuGuManager · Liquid Command</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root { color-scheme: dark; font-family: "Bahnschrift", "Microsoft YaHei UI", sans-serif; --mx:68%; --my:16%; }
+    body { margin:0; min-height:100vh; overflow:hidden; background:#05080d; color:#f4fbff; }
+    button { font:inherit; }
+    .app { position:relative; height:100vh; min-height:720px; overflow:hidden; isolation:isolate; background:radial-gradient(circle at 46% 34%,#0b1a26 0,#071019 36%,#04070b 72%); }
+    .ambient { position:absolute; inset:-16%; z-index:-4; filter:blur(46px) saturate(118%); transform:translateZ(0); }
+    .ambient::before,.ambient::after { content:""; position:absolute; border-radius:48% 52% 42% 58% / 61% 40% 60% 39%; mix-blend-mode:screen; }
+    .ambient::before { width:68%; height:60%; left:-6%; top:-8%; opacity:.8; background:conic-gradient(from 210deg,transparent 0 20%,rgba(31,203,186,.7) 31%,rgba(9,80,117,.46) 48%,transparent 65%); animation:current-a 26s ease-in-out infinite alternate; }
+    .ambient::after { width:63%; height:68%; right:-8%; bottom:-12%; opacity:.66; background:conic-gradient(from 20deg,transparent 0 22%,rgba(19,92,180,.58) 34%,rgba(237,103,74,.42) 48%,transparent 68%); animation:current-b 31s ease-in-out infinite alternate; }
+    .ribbon { position:absolute; z-index:-3; width:82vw; height:38vw; left:18vw; top:12vh; opacity:.78; transform:rotate(-7deg); filter:blur(1px) drop-shadow(0 40px 70px rgba(0,0,0,.5)); animation:ribbon-drift 22s ease-in-out infinite alternate; }
+    .ribbon path { vector-effect:non-scaling-stroke; }
+    .cursor-light { position:absolute; z-index:-2; width:420px; height:420px; left:calc(var(--mx) - 210px); top:calc(var(--my) - 210px); border-radius:50%; pointer-events:none; background:radial-gradient(circle,rgba(154,248,229,.09),transparent 64%); transition:left .45s cubic-bezier(.2,.75,.25,1),top .45s cubic-bezier(.2,.75,.25,1); }
+    .noise { position:absolute; inset:0; z-index:-1; pointer-events:none; opacity:.15; mix-blend-mode:soft-light; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.3'/%3E%3C/svg%3E"); }
+
+    .glass { background:linear-gradient(135deg,rgba(240,252,255,.12),rgba(145,190,210,.045) 48%,rgba(255,255,255,.07)); border:1px solid rgba(223,248,255,.2); box-shadow:inset 0 1px 0 rgba(255,255,255,.21),inset 0 -1px 0 rgba(8,19,27,.28),0 18px 60px rgba(0,0,0,.28); -webkit-backdrop-filter:blur(28px) saturate(155%); backdrop-filter:blur(28px) saturate(155%); }
+    .dock { position:absolute; inset:18px auto 18px 18px; width:76px; z-index:5; display:flex; flex-direction:column; align-items:center; padding:14px 10px 12px; border-radius:26px; }
+    .logo { width:42px; height:42px; display:grid; place-items:center; border-radius:15px; margin-bottom:26px; background:linear-gradient(145deg,#b9fff0,#5dd5c2); color:#06120f; font-weight:900; letter-spacing:-.08em; box-shadow:inset 0 1px #fff,0 8px 22px rgba(74,229,199,.2); }
+    .dock nav { display:flex; flex-direction:column; gap:8px; width:100%; }
+    .nav-btn { position:relative; width:100%; height:44px; display:grid; place-items:center; border:0; border-radius:15px; color:#879ba8; background:transparent; cursor:pointer; transition:color .18s ease,background .18s ease,transform .18s ease; }
+    .nav-btn svg { width:18px; height:18px; stroke:currentColor; fill:none; stroke-width:1.7; }
+    .nav-btn:hover { color:#e9fffa; background:rgba(255,255,255,.09); }
+    .nav-btn:active { transform:scale(.95); }
+    .nav-btn.active { color:#c8fff3; background:rgba(119,241,215,.12); box-shadow:inset 0 0 0 1px rgba(144,255,232,.12); }
+    .nav-btn.active::after { content:""; position:absolute; right:-10px; width:2px; height:18px; border-radius:3px; background:#81f2da; box-shadow:0 0 12px #58d8bd; }
+    .dock .spacer { flex:1; }
+    .avatar { width:38px; height:38px; display:grid; place-items:center; border-radius:50%; background:#1d3140; border:1px solid rgba(255,255,255,.17); color:#dffaf5; font-size:11px; font-weight:800; }
+
+    .topbar { position:absolute; z-index:4; left:112px; right:18px; top:18px; height:64px; display:flex; align-items:center; justify-content:space-between; padding:0 11px 0 22px; border-radius:23px; }
+    .crumb { display:flex; align-items:center; gap:10px; color:#8ea0ac; font-size:12px; }
+    .crumb b { color:#eef9fb; font-weight:680; }
+    .pulse { width:7px; height:7px; border-radius:50%; background:#6fe5c7; box-shadow:0 0 11px #52d4b6; }
+    .top-actions { display:flex; align-items:center; gap:7px; }
+    .icon-action,.language,.primary { height:42px; border:0; cursor:pointer; transition:transform .18s ease,background .18s ease; }
+    .icon-action { width:42px; display:grid; place-items:center; border-radius:14px; color:#b7c6cf; background:rgba(255,255,255,.07); }
+    .icon-action svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.7; }
+    .language { padding:0 13px; border-radius:14px; color:#c5d2d9; background:rgba(255,255,255,.07); font-size:12px; }
+    .primary { position:relative; overflow:hidden; padding:0 17px; border-radius:14px; color:#06130f; background:linear-gradient(145deg,#d8fff6,#72e5cd); font-size:12px; font-weight:850; box-shadow:inset 0 1px #fff,0 8px 24px rgba(83,226,196,.18); }
+    .primary::before { content:""; position:absolute; inset:-60% auto -60% -30%; width:36%; transform:rotate(18deg); background:rgba(255,255,255,.6); filter:blur(10px); transition:left .45s ease; }
+    .primary:hover::before { left:110%; }
+    .icon-action:active,.language:active,.primary:active { transform:scale(.97); }
+
+    .content { position:absolute; left:112px; right:18px; top:102px; bottom:22px; overflow:auto; scrollbar-width:none; }
+    .content::-webkit-scrollbar { display:none; }
+    .heading-row { display:flex; justify-content:space-between; align-items:end; min-height:85px; padding:0 7px 20px; border-bottom:1px solid rgba(220,244,250,.13); }
+    .heading-row h1 { margin:0; font-size:clamp(28px,3vw,44px); line-height:1; letter-spacing:-.055em; font-weight:680; }
+    .heading-row p { margin:10px 0 0; color:#8da0ac; font-size:12px; }
+    .time { text-align:right; }
+    .time b { display:block; font:650 21px/1.1 Consolas,monospace; letter-spacing:-.04em; }
+    .time span { color:#82939f; font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
+
+    .status-strip { display:grid; grid-template-columns:1.2fr repeat(3,.72fr); padding:20px 7px; border-bottom:1px solid rgba(220,244,250,.13); }
+    .status-lead { display:flex; align-items:center; gap:14px; }
+    .health-ring { position:relative; width:49px; height:49px; display:grid; place-items:center; border-radius:50%; background:conic-gradient(#72ead0 0 92%,rgba(255,255,255,.1) 92%); }
+    .health-ring::before { content:""; position:absolute; inset:5px; border-radius:50%; background:#0a141d; }
+    .health-ring b { position:relative; z-index:1; font:700 11px Consolas,monospace; }
+    .status-lead strong { display:block; font-size:14px; }
+    .status-lead span { display:block; margin-top:4px; color:#7f929e; font-size:10px; }
+    .metric { padding-left:24px; border-left:1px solid rgba(220,244,250,.12); }
+    .metric span { display:block; color:#7f929e; font-size:10px; text-transform:uppercase; letter-spacing:.09em; }
+    .metric b { display:block; margin-top:7px; font:650 25px/1 Consolas,monospace; letter-spacing:-.06em; }
+    .metric em { color:#72ead0; font-style:normal; font-size:10px; }
+    .metric.alert b,.metric.alert em { color:#ff9f7c; }
+
+    .workspace { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(300px,.62fr); gap:28px; padding:25px 7px 0; }
+    .section-title { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+    .section-title h2 { margin:0; font-size:15px; letter-spacing:-.02em; }
+    .section-title button { color:#a9b8c1; background:none; border:0; font-size:10px; cursor:pointer; }
+    .fleet-chart { position:relative; height:174px; overflow:hidden; border-bottom:1px solid rgba(220,244,250,.12); }
+    .chart-labels { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:space-between; color:#627481; font:9px Consolas,monospace; }
+    .chart-labels i { display:block; height:1px; margin-left:35px; background:rgba(255,255,255,.065); }
+    .chart { position:absolute; inset:12px 0 10px 34px; width:calc(100% - 34px); height:calc(100% - 22px); overflow:visible; }
+    .chart .area { opacity:.22; }
+    .chart .line { fill:none; stroke:#78ead2; stroke-width:2.2; filter:drop-shadow(0 0 6px rgba(93,232,203,.5)); }
+    .chart-dot { fill:#d8fff7; stroke:#59d7bb; stroke-width:3; }
+    .axis { display:flex; justify-content:space-between; margin:8px 0 20px 34px; color:#677985; font:9px Consolas,monospace; }
+
+    .server-table { width:100%; border-collapse:collapse; }
+    .server-table th { padding:0 10px 10px; color:#71838f; font-size:9px; font-weight:650; letter-spacing:.08em; text-align:left; text-transform:uppercase; }
+    .server-table td { height:48px; padding:0 10px; border-top:1px solid rgba(220,244,250,.09); color:#b8c6ce; font-size:11px; }
+    .server-table th:first-child,.server-table td:first-child { padding-left:0; }
+    .server-table th:last-child,.server-table td:last-child { padding-right:0; text-align:right; }
+    .server-id { display:flex; align-items:center; gap:10px; color:#eff8fa; font-weight:650; }
+    .game-icon { width:28px; height:28px; display:grid; place-items:center; border-radius:9px; color:#cafff3; background:rgba(113,233,207,.1); border:1px solid rgba(113,233,207,.13); font-size:9px; }
+    .live-dot { display:inline-block; width:6px; height:6px; margin-right:6px; border-radius:50%; background:#70e7c9; box-shadow:0 0 9px rgba(112,231,201,.55); }
+    .warn-dot { background:#ff9c77; box-shadow:0 0 9px rgba(255,156,119,.45); }
+    .more { width:27px; height:27px; border:0; border-radius:9px; color:#91a2ad; background:rgba(255,255,255,.06); }
+
+    .events { padding-left:2px; }
+    .event { position:relative; padding:0 0 22px 24px; }
+    .event::before { content:""; position:absolute; left:5px; top:7px; bottom:-2px; width:1px; background:rgba(220,244,250,.12); }
+    .event:last-child::before { display:none; }
+    .event-mark { position:absolute; left:0; top:3px; width:11px; height:11px; border-radius:50%; background:#71e6c8; border:3px solid #0c1720; box-shadow:0 0 0 1px rgba(113,230,200,.38),0 0 10px rgba(113,230,200,.34); }
+    .event.warning .event-mark { background:#ff9a75; box-shadow:0 0 0 1px rgba(255,154,117,.38),0 0 10px rgba(255,154,117,.25); }
+    .event b { display:block; font-size:11px; font-weight:650; }
+    .event p { margin:5px 0 0; color:#8396a2; font-size:10px; line-height:1.45; }
+    .event time { display:block; margin-top:6px; color:#5f727e; font:9px Consolas,monospace; }
+
+    .approve { position:fixed; z-index:10; right:30px; bottom:28px; display:flex; align-items:center; gap:10px; padding:8px 9px 8px 17px; border-radius:18px; color:#d5e2e8; font-size:11px; }
+    .approve button { height:38px; padding:0 15px; border:0; border-radius:12px; color:#06130f; background:#bffdef; font-weight:850; cursor:pointer; }
+    .approve.selected { border-color:#8af5de; box-shadow:0 0 0 3px rgba(107,235,207,.16),0 18px 60px rgba(0,0,0,.28); }
+
+    @keyframes current-a { to { transform:translate3d(14%,12%,0) rotate(18deg) scale(1.12); } }
+    @keyframes current-b { to { transform:translate3d(-16%,-8%,0) rotate(-16deg) scale(1.16); } }
+    @keyframes ribbon-drift { to { transform:translate3d(-4%,5%,0) rotate(-3deg) scale(1.04); } }
+    @media (prefers-reduced-motion:reduce) { .ambient::before,.ambient::after,.ribbon { animation:none; } .cursor-light { display:none; } }
+    @media (max-width:900px) { body{overflow:auto}.app{min-height:100vh;height:auto;overflow:visible}.dock{inset:auto 12px 12px;position:fixed;width:auto;height:66px;flex-direction:row;padding:8px 10px;border-radius:22px}.dock .logo{width:40px;height:40px;margin:0 12px 0 0}.dock nav{flex-direction:row;gap:4px}.dock .spacer,.dock nav .nav-btn:nth-child(n+5),.avatar{display:none}.nav-btn{width:43px;height:43px}.nav-btn.active::after{right:auto;bottom:-8px;width:18px;height:2px}.topbar{left:12px;right:12px;top:12px;height:58px}.crumb span:last-child,.language{display:none}.content{position:relative;left:auto;right:auto;top:auto;bottom:auto;padding:92px 18px 102px;overflow:visible}.workspace{grid-template-columns:1fr}.status-strip{grid-template-columns:repeat(2,1fr);gap:16px}.status-lead{grid-column:1/-1}.metric{padding-left:0;border-left:0}.metric:nth-child(3){border-left:1px solid rgba(220,244,250,.12);padding-left:16px}.metric:last-child{grid-column:1/-1;border-top:1px solid rgba(220,244,250,.12);padding-top:15px}.approve{right:14px;bottom:88px}.server-table th:nth-child(3),.server-table td:nth-child(3){display:none} }
+  </style>
+</head>
+<body>
+  <div class="app" id="app">
+    <div class="ambient"></div>
+    <svg class="ribbon" viewBox="0 0 1200 520" aria-hidden="true"><defs><linearGradient id="ribbonFill" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4de1c4" stop-opacity="0"/><stop offset=".28" stop-color="#48d8c3" stop-opacity=".24"/><stop offset=".56" stop-color="#318dd5" stop-opacity=".18"/><stop offset=".82" stop-color="#ff8568" stop-opacity=".13"/><stop offset="1" stop-color="#ff8568" stop-opacity="0"/></linearGradient><linearGradient id="ribbonEdge" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#75f1d9" stop-opacity="0"/><stop offset=".32" stop-color="#75f1d9" stop-opacity=".72"/><stop offset=".7" stop-color="#69a9e9" stop-opacity=".3"/><stop offset="1" stop-color="#ff9b79" stop-opacity="0"/></linearGradient><filter id="soft"><feGaussianBlur stdDeviation="11"/></filter></defs><path d="M-40 407C140 238 244 471 405 303S701 69 838 232s205 222 409 58v161C1029 559 880 479 741 354S491 244 350 403 85 566-40 505Z" fill="url(#ribbonFill)" filter="url(#soft)"/><path d="M-40 407C140 238 244 471 405 303S701 69 838 232s205 222 409 58" fill="none" stroke="url(#ribbonEdge)" stroke-width="1.4"/></svg>
+    <div class="cursor-light"></div><div class="noise"></div>
+
+    <aside class="dock glass"><div class="logo">GG</div><nav><button class="nav-btn active" aria-label="概览"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg></button><button class="nav-btn" aria-label="服务器"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg></button><button class="nav-btn" aria-label="节点"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="m7 11 10-5M7 13l10 5"/></svg></button><button class="nav-btn" aria-label="任务"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 3-6.2L4 8"/><path d="M4 4v4h4M12 8v5l3 2"/></svg></button><button class="nav-btn" aria-label="目录"><svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h5v18H6a2 2 0 0 1-2-2zM20 5a2 2 0 0 0-2-2h-5v18h5a2 2 0 0 0 2-2z"/></svg></button><button class="nav-btn" aria-label="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg></button></nav><div class="spacer"></div><div class="avatar">AN</div></aside>
+
+    <header class="topbar glass"><div class="crumb"><i class="pulse"></i><span>GuGuManager</span><span>/</span><b>基础设施</b></div><div class="top-actions"><button class="icon-action" aria-label="搜索"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></button><button class="icon-action" aria-label="通知"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button><button class="language">简体中文 · CN</button><button class="primary">部署新实例</button></div></header>
+
+    <main class="content"><div class="heading-row"><div><h1>基础设施态势</h1><p>所有区域正在同步 · 3 个事件需要你的注意</p></div><div class="time"><b>12:48:05</b><span>09 Aug 2026 · CST</span></div></div>
+      <section class="status-strip"><div class="status-lead"><div class="health-ring"><b>92</b></div><div><strong>舰队运行健康</strong><span>过去 30 分钟无服务中断</span></div></div><div class="metric"><span>在线实例</span><b>18 / 20</b><em>+2 本周</em></div><div class="metric"><span>当前玩家</span><b>286</b><em>↑ 12.4%</em></div><div class="metric alert"><span>待处理事件</span><b>03</b><em>1 个高优先级</em></div></section>
+      <div class="workspace"><section><div class="section-title"><h2>负载流量 · 最近 60 分钟</h2><button>查看遥测详情 →</button></div><div class="fleet-chart"><div class="chart-labels"><span>100%</span><i></i><span>50%</span><i></i><span>0%</span></div><svg class="chart" viewBox="0 0 780 170" preserveAspectRatio="none"><defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#66e3c9"/><stop offset="1" stop-color="#66e3c9" stop-opacity="0"/></linearGradient></defs><path class="area" d="M0 137C65 127 84 90 142 103s81 33 137 12 75-75 138-56 75 65 135 41 72-55 118-22 73 32 110 14v78H0Z" fill="url(#area)"/><path class="line" d="M0 137C65 127 84 90 142 103s81 33 137 12 75-75 138-56 75 65 135 41 72-55 118-22 73 32 110 14"/><circle class="chart-dot" cx="780" cy="92" r="4"/></svg></div><div class="axis"><span>11:48</span><span>12:03</span><span>12:18</span><span>12:33</span><span>12:48</span></div><div class="section-title"><h2>实时实例</h2><button>全部服务器 →</button></div><table class="server-table"><thead><tr><th>实例</th><th>状态</th><th>玩家</th><th>延迟</th><th></th></tr></thead><tbody><tr><td><div class="server-id"><span class="game-icon">MC</span>Minecraft · 生存一服</div></td><td><span class="live-dot"></span>在线</td><td>48 / 120</td><td>23 ms</td><td><button class="more">•••</button></td></tr><tr><td><div class="server-id"><span class="game-icon">PW</span>Palworld · Asia</div></td><td><span class="live-dot"></span>在线</td><td>31 / 64</td><td>41 ms</td><td><button class="more">•••</button></td></tr><tr><td><div class="server-id"><span class="game-icon">PZ</span>Project Zomboid</div></td><td><span class="live-dot warn-dot"></span>警告</td><td>18 / 40</td><td>89 ms</td><td><button class="more">•••</button></td></tr></tbody></table></section>
+        <aside class="events"><div class="section-title"><h2>事件流</h2><button>活动日志 →</button></div><div class="event warning"><i class="event-mark"></i><b>Project Zomboid 延迟升高</b><p>Tokyo-02 节点的网络延迟连续 4 分钟高于阈值。</p><time>12:46:12 · 2 分钟前</time></div><div class="event"><i class="event-mark"></i><b>备份已完成</b><p>Minecraft · 生存一服已创建自动快照。</p><time>12:41:28 · 7 分钟前</time></div><div class="event"><i class="event-mark"></i><b>实例部署成功</b><p>Factorio · 工厂已在 Shanghai-01 启动。</p><time>12:22:04 · 26 分钟前</time></div><div class="event"><i class="event-mark"></i><b>节点检查通过</b><p>Frankfurt-01 的运行时与存储检查正常。</p><time>11:58:47 · 49 分钟前</time></div></aside></div>
+    </main>
+    <div class="approve glass" data-choice="liquid-command-v2" onclick="toggleSelect(this)"><span>这次只确认一个完整方向</span><button>采用这套设计</button></div>
+  </div>
+  <script>
+    const root=document.documentElement;
+    window.addEventListener('pointermove',e=>{root.style.setProperty('--mx',e.clientX+'px');root.style.setProperty('--my',e.clientY+'px')},{passive:true});
+  </script>
+</body>
+</html>

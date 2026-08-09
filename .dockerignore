@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.vscode
+.env
+**/.env
+**/.env.*
+!**/.env.example
+deploy/.env
+web/node_modules
+web/dist
+web/playwright-report
+web/test-results
+bin
+coverage.out
+*.test

@@ -1,0 +1,312 @@
+syntax = "proto3";
+
+package gugumanager.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1;agentv1";
+
+service AgentGatewayService {
+  rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+message ConnectRequest {
+  oneof payload {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    TaskAck task_ack = 3;
+    TaskProgress task_progress = 4;
+    TaskResult task_result = 5;
+    LogBatch log_batch = 6;
+    ServerObserved server_observed = 7;
+    RunningTaskHeartbeat running_task_heartbeat = 8;
+    MetricsBatch metrics_batch = 9;
+    CertificateSigningRequest certificate_signing_request = 10;
+  }
+}
+
+message ConnectResponse {
+  oneof payload {
+    Welcome welcome = 1;
+    Task task = 2;
+    RotateCertificate rotate_certificate = 3;
+    Drain drain = 4;
+    CertificateResponse certificate_response = 5;
+  }
+}
+
+message Hello {
+  string node_id = 1;
+  string agent_version = 2;
+  repeated string protocol_versions = 3;
+  repeated Capability capabilities = 4;
+  repeated RunningOperation running_operations = 5;
+}
+
+message Welcome {
+  string protocol_version = 1;
+  uint32 heartbeat_interval_seconds = 2;
+  uint32 max_in_flight_tasks = 3;
+}
+
+message Capability {
+  string name = 1;
+  string version = 2;
+}
+
+message RunningOperation {
+  string operation_id = 1;
+  string checkpoint = 2;
+  uint32 attempt = 3;
+  string server_id = 4;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp observed_at = 1;
+  uint64 memory_total_bytes = 2;
+  uint64 memory_available_bytes = 3;
+  uint64 disk_total_bytes = 4;
+  uint64 disk_available_bytes = 5;
+  double cpu_load = 6;
+  string agent_version = 7;
+  repeated RunningOperation running_operations = 8;
+}
+
+message Task {
+  string operation_id = 1;
+  string server_id = 2;
+  uint64 generation = 3;
+  // Legacy task name. For typed payloads this MUST match the selected arm
+  // (provision, power, backup, or extension); receivers reject mismatches.
+  string type = 4;
+  google.protobuf.Timestamp deadline = 6;
+  string idempotency_key = 7;
+  uint32 attempt = 8;
+  repeated CapabilityRequirement required_capabilities = 9;
+  string bundle_digest = 10;
+
+  oneof payload {
+    // Legacy JSON payload. New protocol versions MUST use a typed arm.
+    bytes payload_json = 5 [deprecated = true];
+    ProvisionTaskPayload provision = 11;
+    PowerTaskPayload power = 12;
+    BackupTaskPayload backup = 13;
+    ExtensionTaskPayload extension = 14;
+  }
+}
+
+message CapabilityRequirement {
+  string name = 1;
+  string version_constraint = 2;
+}
+
+message ProvisionTaskPayload {
+  string game_definition_id = 1;
+  ResourceLimits resource_limits = 2;
+  repeated PortAllocation allocations = 3;
+  map<string, string> variables = 4;
+  bool start_after_provision = 5;
+}
+
+message ResourceLimits {
+  uint64 memory_bytes = 1;
+  uint64 disk_bytes = 2;
+  uint32 cpu_millicores = 3;
+  uint32 pids = 4;
+}
+
+message PortAllocation {
+  string allocation_id = 1;
+  string bind_ip = 2;
+  uint32 host_port = 3;
+  uint32 container_port = 4;
+  NetworkProtocol protocol = 5;
+}
+
+enum NetworkProtocol {
+  NETWORK_PROTOCOL_UNSPECIFIED = 0;
+  NETWORK_PROTOCOL_TCP = 1;
+  NETWORK_PROTOCOL_UDP = 2;
+}
+
+message PowerTaskPayload {
+  PowerAction action = 1;
+  uint32 graceful_timeout_seconds = 2;
+  bool wait_for_health = 3;
+}
+
+enum PowerAction {
+  POWER_ACTION_UNSPECIFIED = 0;
+  POWER_ACTION_START = 1;
+  POWER_ACTION_STOP = 2;
+  POWER_ACTION_RESTART = 3;
+  POWER_ACTION_KILL = 4;
+}
+
+message BackupTaskPayload {
+  oneof action {
+    CreateBackupPayload create = 1;
+    RestoreBackupPayload restore = 2;
+    DeleteBackupPayload delete = 3;
+  }
+}
+
+message CreateBackupPayload {
+  string backup_id = 1;
+  string format_version = 2;
+  string storage_object_key = 3;
+  string consistency_method = 4;
+  google.protobuf.Timestamp retain_until = 5;
+}
+
+message RestoreBackupPayload {
+  string backup_id = 1;
+  string storage_object_key = 2;
+  string expected_manifest_digest = 3;
+  string expected_content_digest = 4;
+}
+
+message DeleteBackupPayload {
+  string backup_id = 1;
+  string storage_object_key = 2;
+  bool delete_remote_object = 3;
+}
+
+message ExtensionTaskPayload {
+  string type_url = 1;
+  bytes value = 2;
+}
+
+message TaskAck {
+  string operation_id = 1;
+  bool accepted = 2;
+  string error_code = 3;
+  uint32 attempt = 4;
+}
+
+message TaskProgress {
+  string operation_id = 1;
+  uint32 percent = 2;
+  string checkpoint = 3;
+  string message = 4;
+  uint32 attempt = 5;
+}
+
+message TaskResult {
+  string operation_id = 1;
+  bool succeeded = 2;
+  string error_code = 3;
+  bool retryable = 4;
+  bytes result_json = 5;
+  uint32 attempt = 6;
+}
+
+message LogBatch {
+  string server_id = 1;
+  uint64 first_sequence = 2;
+  repeated string lines = 3;
+  uint64 dropped_lines = 4;
+}
+
+message ServerObserved {
+  string server_id = 1;
+  uint64 observed_generation = 2;
+  ObservedPower observed_power = 3;
+  HealthCondition health_condition = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  string runtime_id = 6;
+  string bundle_digest = 7;
+  string detail = 8;
+}
+
+enum ObservedPower {
+  reserved 6;
+  reserved "OBSERVED_POWER_UNHEALTHY";
+
+  OBSERVED_POWER_UNSPECIFIED = 0;
+  OBSERVED_POWER_UNKNOWN = 1;
+  OBSERVED_POWER_STOPPED = 2;
+  OBSERVED_POWER_STARTING = 3;
+  OBSERVED_POWER_RUNNING = 4;
+  OBSERVED_POWER_STOPPING = 5;
+}
+
+enum HealthCondition {
+  HEALTH_CONDITION_UNSPECIFIED = 0;
+  HEALTH_CONDITION_UNKNOWN = 1;
+  HEALTH_CONDITION_HEALTHY = 2;
+  HEALTH_CONDITION_UNHEALTHY = 3;
+}
+
+message RunningTaskHeartbeat {
+  string operation_id = 1;
+  uint32 attempt = 2;
+  google.protobuf.Timestamp observed_at = 3;
+  string checkpoint = 4;
+  uint32 percent = 5;
+}
+
+message MetricsBatch {
+  google.protobuf.Timestamp observed_at = 1;
+  repeated ServerMetrics servers = 2;
+  uint64 dropped_samples = 3;
+}
+
+message ServerMetrics {
+  string server_id = 1;
+  uint64 observed_generation = 2;
+  double cpu_percent = 3;
+  uint64 memory_bytes = 4;
+  uint64 memory_limit_bytes = 5;
+  uint64 disk_bytes = 6;
+  uint64 disk_limit_bytes = 7;
+  uint64 network_rx_bytes = 8;
+  uint64 network_tx_bytes = 9;
+  uint32 players_online = 10;
+  uint32 players_max = 11;
+}
+
+message EnrollRequest {
+  string registration_token = 1;
+  // PEM-encoded PKCS#10 CSR containing exactly one CERTIFICATE REQUEST block.
+  bytes certificate_signing_request = 2;
+  string node_name = 3;
+  string agent_version = 4;
+  repeated Capability capabilities = 5;
+}
+
+message EnrollResponse {
+  string node_id = 1;
+  // PEM certificate chain ordered leaf first, followed by intermediates.
+  // The trust root is omitted here and sent in ca_certificate.
+  bytes certificate_chain = 2;
+  // PEM trust bundle containing one or more root CA certificates.
+  bytes ca_certificate = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message RotateCertificate {
+  google.protobuf.Timestamp rotate_before = 1;
+}
+
+message CertificateSigningRequest {
+  string request_id = 1;
+  // PEM-encoded PKCS#10 CSR containing exactly one CERTIFICATE REQUEST block.
+  bytes certificate_signing_request = 2;
+  string current_certificate_serial = 3;
+}
+
+message CertificateResponse {
+  string request_id = 1;
+  // PEM certificate chain ordered leaf first, followed by intermediates.
+  // The trust root is omitted here and sent in ca_certificate.
+  bytes certificate_chain = 2;
+  // PEM trust bundle containing one or more root CA certificates.
+  bytes ca_certificate = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message Drain {
+  string reason = 1;
+}

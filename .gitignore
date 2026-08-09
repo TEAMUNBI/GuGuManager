@@ -1,0 +1,34 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+deploy/.env
+*.local
+
+# Go
+bin/
+coverage.out
+*.test
+
+# Local runtime data
+var/development/
+
+# Superpowers local dev-server runtime artifacts
+.superpowers/**/.server.log
+.superpowers/**/.server.err.log
+.superpowers/**/.server.pid
+.superpowers/**/.server-stopped
+
+# Web
+web/node_modules/
+web/dist/
+web/.vite/
+web/coverage/
+web/playwright-report/
+web/test-results/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,49 @@
+{
+  "apiVersion": "gugumanager.io/games/v1alpha1",
+  "kind": "GameDefinition",
+  "metadata": {
+    "id": "io.gugumanager.papermc",
+    "name": "PaperMC",
+    "version": "1.0.0",
+    "license": "Apache-2.0"
+  },
+  "spec": {
+    "release": {
+      "version": "1.21.8"
+    },
+    "compatibility": {
+      "panel": ">=0.1 <1.0",
+      "agent": ">=0.1 <1.0",
+      "platforms": ["linux/amd64", "linux/arm64"]
+    },
+    "capabilities": ["console", "query", "backup", "update"],
+    "variables": {
+      "schema": {
+        "type": "object",
+        "required": ["accept_eula", "memory_mb"],
+        "properties": {
+          "accept_eula": {"type": "boolean", "default": true, "const": true},
+          "memory_mb": {"type": "integer", "default": 2048, "minimum": 1024, "maximum": 32768},
+          "rcon_password": {"type": "string", "minLength": 8, "maxLength": 128}
+        }
+      },
+      "secrets": ["rcon_password"],
+      "bindings": [
+        {"variable": "memory_mb", "target": "argument", "template": "-Xmx{{ value }}M"}
+      ]
+    },
+    "runtime": {
+      "adapter": "container/v1",
+      "image": "registry.invalid/gugumanager/papermc@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "user": "1000:1000",
+      "workingDir": "/srv/game",
+      "command": {"executable": "java", "args": ["{{ memory_mb }}", "-jar", "paper.jar", "--nogui"]},
+      "dataMounts": [{"name": "server-data", "target": "/srv/game", "backup": true}],
+      "ports": [{"name": "game", "protocol": "tcp", "containerPort": 25565, "role": "primary"}],
+      "stop": {"method": "console", "value": "stop", "timeoutSeconds": 30},
+      "health": {"type": "tcp", "portRef": "game", "intervalSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 6}
+    },
+    "install": {},
+    "lifecycle": {"install": "builtin.artifacts", "configure": "builtin.bindings", "update": "builtin.replace-artifacts"}
+  }
+}
