@@ -100,6 +100,8 @@ func main() {
 		lintCommand(os.Args[2:])
 	case "init":
 		initCommand(os.Args[2:])
+	case "bundle":
+		bundleCommand(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -295,4 +297,6 @@ func initCommand(args []string) {
 func usage() {
 	fmt.Println("gamectl lint <definition.json>")
 	fmt.Println("gamectl init --dir <directory>")
+	fmt.Println("gamectl bundle build <definition.json>")
+	fmt.Println("gamectl bundle publish <bundle.json>")
 }

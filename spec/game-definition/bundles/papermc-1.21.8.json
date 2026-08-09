@@ -1,0 +1,92 @@
+{
+  "gameDefinitionId": "io.gugumanager.papermc",
+  "definitionVersion": "1.0.0",
+  "gameVersion": "1.21.8",
+  "digest": "sha256:be3d87378cabd923dd9ca09667b649c15909c35c3aa700fba1e2d0fd73499b82",
+  "schemaVersion": "gugumanager.io/games/v1alpha1",
+  "license": "Apache-2.0",
+  "compatibility": {
+    "agent": "\u003e=0.1 \u003c1.0",
+    "panel": "\u003e=0.1 \u003c1.0",
+    "platforms": "linux/amd64,linux/arm64"
+  },
+  "capabilities": [
+    "console",
+    "query",
+    "backup",
+    "update"
+  ],
+  "image": "registry.invalid/gugumanager/papermc@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "command": {
+    "executable": "java",
+    "args": [
+      "{{ memory_mb }}",
+      "-jar",
+      "paper.jar",
+      "--nogui"
+    ]
+  },
+  "variables": {
+    "schema": {
+      "type": "object",
+      "required": [
+        "accept_eula",
+        "memory_mb"
+      ],
+      "properties": {
+        "accept_eula": {
+          "type": "boolean",
+          "default": true,
+          "const": true
+        },
+        "memory_mb": {
+          "type": "integer",
+          "default": 2048,
+          "minimum": 1024,
+          "maximum": 32768
+        },
+        "rcon_password": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        }
+      }
+    },
+    "secrets": [
+      "rcon_password"
+    ],
+    "bindings": [
+      {
+        "variable": "memory_mb",
+        "target": "argument",
+        "template": "-Xmx{{ value }}M"
+      }
+    ]
+  },
+  "stop": {
+    "method": "console",
+    "value": "stop",
+    "timeoutSeconds": 30
+  },
+  "health": {
+    "type": "tcp",
+    "portRef": "game",
+    "intervalSeconds": 10,
+    "timeoutSeconds": 5,
+    "failureThreshold": 6
+  },
+  "ports": [
+    {
+      "name": "game",
+      "protocol": "tcp",
+      "containerPort": 25565,
+      "role": "primary"
+    }
+  ],
+  "install": {},
+  "lifecycle": {
+    "install": "builtin.artifacts",
+    "configure": "builtin.bindings",
+    "update": "builtin.replace-artifacts"
+  }
+}

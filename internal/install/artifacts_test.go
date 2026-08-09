@@ -331,6 +331,61 @@ func TestInstallStopsWhenContextIsCancelled(t *testing.T) {
 	}
 }
 
+func TestResolvePaperMCArtifact(t *testing.T) {
+	const latestDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/projects/paper/versions/1.21.8/builds" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = writer.Write([]byte(`{
+			"project_id": "paper",
+			"version": "1.21.8",
+			"builds": [
+				{
+					"build": 100,
+					"downloads": {"application": {"name": "paper-1.21.8-100.jar", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+				},
+				{
+					"build": 621,
+					"downloads": {"application": {"name": "paper-1.21.8-621.jar", "sha256": "` + latestDigest + `"}}
+				}
+			]
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	downloadURL, sha256, err := ResolvePaperMCArtifact(context.Background(), "1.21.8",
+		WithPaperMCBaseURL(server.URL), WithPaperMCClient(server.Client()))
+	if err != nil {
+		t.Fatalf("ResolvePaperMCArtifact returned error: %v", err)
+	}
+	if sha256 != latestDigest {
+		t.Fatalf("sha256 = %q, want the latest build %q", sha256, latestDigest)
+	}
+	const expectedPath = "/projects/paper/versions/1.21.8/builds/621/downloads/paper-1.21.8-621.jar"
+	if !strings.HasSuffix(downloadURL, expectedPath) {
+		t.Fatalf("download URL %q does not end with %q", downloadURL, expectedPath)
+	}
+}
+
+func TestResolvePaperMCArtifactRejectsMalformedDigest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{
+			"builds": [
+				{"build": 1, "downloads": {"application": {"name": "paper.jar", "sha256": "not-a-digest"}}}
+			]
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	_, _, err := ResolvePaperMCArtifact(context.Background(), "1.21.8",
+		WithPaperMCBaseURL(server.URL), WithPaperMCClient(server.Client()))
+	if !errors.Is(err, ErrInvalidDigest) {
+		t.Fatalf("ResolvePaperMCArtifact error = %v, want ErrInvalidDigest", err)
+	}
+}
+
 // assertNoTemporaryFiles fails when an aborted or completed write left a
 // staging file anywhere under the data root.
 func assertNoTemporaryFiles(t *testing.T, root string) {
