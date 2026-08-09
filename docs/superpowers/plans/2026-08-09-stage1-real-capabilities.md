@@ -737,15 +737,15 @@ go run ./cmd/agent -panel 127.0.0.1:8443 -token <注册令牌>
 # 5) 浏览器打开面板，确认服务器 running、日志可见
 ```
 
-- [ ] **Step 2: 验收清单**
+- [x] **Step 2: 验收清单**
 
-- [ ] 新环境（空 DB + 空节点）能在 15 分钟内接入节点并创建可运行 PaperMC
-- [ ] 重复创建不产生重复容器或端口冲突
-- [ ] 节点 30 秒无心跳被标记 offline 并禁止新任务
-- [ ] Web 全程使用真实数据（无 memory 模拟）
-- [ ] 关键操作有持久审计（audit_events）
+- [x] 新环境（空 DB + 空节点）能在 15 分钟内接入节点并创建可运行 PaperMC
+- [x] 重复创建不产生重复容器或端口冲突
+- [x] 节点 30 秒无心跳被标记 offline 并禁止新任务
+- [x] Web 全程使用真实数据（无 memory 模拟）
+- [x] 关键操作有持久审计（audit_events）
 
-- [ ] **Step 3: 写变更记录并 commit**
+- [x] **Step 3: 写变更记录并 commit**（GM-20260809-001，commit 8a54a51）
 
 ```powershell
 git commit -am "docs(changes): GM-20260809-001 stage 1 real vertical capability"
