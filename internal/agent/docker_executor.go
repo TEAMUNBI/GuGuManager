@@ -273,6 +273,10 @@ func (e *DockerExecutor) executeProvision(ctx context.Context, task *agentv1.Tas
 		MemoryMB:     1024,
 		CPUShares:    1024,
 	}
+	// 开启 RCON，供指标采样器查询在线玩家；密码随机，仅容器内可见。
+	cfg.Env["ENABLE_RCON"] = "TRUE"
+	cfg.Env["RCON_PORT"] = "25575"
+	cfg.Env["RCON_PASSWORD"] = randomHex(16)
 	for k, v := range payload.GetVariables() {
 		cfg.Env[k] = v
 	}

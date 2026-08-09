@@ -728,4 +728,29 @@ func TestExecuteDeleteBackupTask(t *testing.T) {
 	}
 }
 
+func TestDockerExecutorProvisionEnablesRCON(t *testing.T) {
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 
+	task := &agentv1.Task{
+		OperationId: "op-prov-rcon",
+		ServerId:    "server-1",
+		Type:        "provision",
+		Attempt:     1,
+		Payload:     &agentv1.Task_Provision{Provision: provisionPayload()},
+	}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("execute provision: outcome=%+v err=%v", outcome, err)
+	}
+	cfg := fd.lastCreated()
+	if cfg.Env["ENABLE_RCON"] != "TRUE" {
+		t.Errorf("env ENABLE_RCON = %q, want TRUE", cfg.Env["ENABLE_RCON"])
+	}
+	if cfg.Env["RCON_PORT"] != "25575" {
+		t.Errorf("env RCON_PORT = %q, want 25575", cfg.Env["RCON_PORT"])
+	}
+	if cfg.Env["RCON_PASSWORD"] == "" {
+		t.Error("expected a non-empty RCON_PASSWORD")
+	}
+}
