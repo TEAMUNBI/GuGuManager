@@ -153,22 +153,22 @@ const shellCopy = defineCopy({
 
 const overviewCopy = defineCopy({
   "zh-CN": {
-    cpuLoad: "CPU 负载", cpuTrend: "CPU 最近一小时趋势", lastHour: "最近 60 分钟", memory: "内存", memoryTrend: "内存最近一小时趋势", limit: (value: string) => `上限 ${value}`, players: "玩家", playersUnavailable: "暂无玩家遥测", developmentSnapshot: "开发环境快照",
+    cpuLoad: "CPU 负载", cpuTrend: "CPU 最近一小时趋势", lastHour: "最近 60 分钟", memory: "内存", memoryTrend: "内存最近一小时趋势", limit: (value: string) => `上限 ${value}`, players: "玩家", playersUnavailable: "暂无玩家遥测", developmentSnapshot: "实时采集 · 每 5 秒",
     resourceEyebrow: "资源用量", runtimeLimits: "资源配额", cpu: "CPU", disk: "磁盘", ofNodeShares: "节点配额占比",
     connectionEyebrow: "连接信息", allocation: "连接地址", copyAddress: "复制连接地址", node: "运行节点", game: "游戏", definition: "模板版本", owner: "所有者", observedGeneration: "已生效版本", lastUpdate: "最近更新",
   },
   en: {
-    cpuLoad: "CPU load", cpuTrend: "CPU trend over the last hour", lastHour: "Last 60 minutes", memory: "Memory", memoryTrend: "Memory trend over the last hour", limit: (value: string) => `Limit ${value}`, players: "Players", playersUnavailable: "Player telemetry unavailable", developmentSnapshot: "Development snapshot",
+    cpuLoad: "CPU load", cpuTrend: "CPU trend over the last hour", lastHour: "Last 60 minutes", memory: "Memory", memoryTrend: "Memory trend over the last hour", limit: (value: string) => `Limit ${value}`, players: "Players", playersUnavailable: "Player telemetry unavailable", developmentSnapshot: "Live · sampled every 5s",
     resourceEyebrow: "RESOURCE USAGE", runtimeLimits: "Resource limits", cpu: "CPU", disk: "Disk", ofNodeShares: "of node capacity",
     connectionEyebrow: "CONNECTION", allocation: "Connection address", copyAddress: "Copy address", node: "Node", game: "Game", definition: "Template version", owner: "Owner", observedGeneration: "Applied version", lastUpdate: "Last update",
   },
   ja: {
-    cpuLoad: "CPU 負荷", cpuTrend: "直近 1 時間の CPU 推移", lastHour: "直近 60 分", memory: "メモリ", memoryTrend: "直近 1 時間のメモリ推移", limit: (value: string) => `上限 ${value}`, players: "プレイヤー", playersUnavailable: "プレイヤー情報を取得できません", developmentSnapshot: "開発環境のスナップショット",
+    cpuLoad: "CPU 負荷", cpuTrend: "直近 1 時間の CPU 推移", lastHour: "直近 60 分", memory: "メモリ", memoryTrend: "直近 1 時間のメモリ推移", limit: (value: string) => `上限 ${value}`, players: "プレイヤー", playersUnavailable: "プレイヤー情報を取得できません", developmentSnapshot: "リアルタイム収集 · 5 秒ごと",
     resourceEyebrow: "リソース使用量", runtimeLimits: "リソース上限", cpu: "CPU", disk: "ディスク", ofNodeShares: "ノード容量に対する使用率",
     connectionEyebrow: "接続情報", allocation: "接続先", copyAddress: "アドレスをコピー", node: "ノード", game: "ゲーム", definition: "テンプレートバージョン", owner: "所有者", observedGeneration: "適用済みバージョン", lastUpdate: "最終更新",
   },
   ko: {
-    cpuLoad: "CPU 부하", cpuTrend: "최근 1시간 CPU 추이", lastHour: "최근 60분", memory: "메모리", memoryTrend: "최근 1시간 메모리 추이", limit: (value: string) => `한도 ${value}`, players: "플레이어", playersUnavailable: "플레이어 정보를 확인할 수 없음", developmentSnapshot: "개발 환경 스냅샷",
+    cpuLoad: "CPU 부하", cpuTrend: "최근 1시간 CPU 추이", lastHour: "최근 60분", memory: "메모리", memoryTrend: "최근 1시간 메모리 추이", limit: (value: string) => `한도 ${value}`, players: "플레이어", playersUnavailable: "플레이어 정보를 확인할 수 없음", developmentSnapshot: "실시간 수집 · 5초 간격",
     resourceEyebrow: "리소스 사용량", runtimeLimits: "리소스 한도", cpu: "CPU", disk: "디스크", ofNodeShares: "노드 용량 대비 사용률",
     connectionEyebrow: "연결 정보", allocation: "접속 주소", copyAddress: "주소 복사", node: "노드", game: "게임", definition: "템플릿 버전", owner: "소유자", observedGeneration: "적용된 버전", lastUpdate: "마지막 업데이트",
   },
@@ -177,19 +177,19 @@ const overviewCopy = defineCopy({
 const consoleCopy = defineCopy({
   "zh-CN": {
     sendFailed: "命令发送失败", stream: "控制台流", sequence: "序号", waiting: "正在等待控制台输出…", commandPlaceholder: "输入服务器命令", stoppedPlaceholder: "服务器必须处于运行状态", commandAria: "控制台命令", send: "发送命令",
-    eyebrow: "实时输出", connection: "连接状态", transport: "传输方式", transportValue: "轮询 / 开发环境", lastSequence: "最后序号", snapshot: "快照", lineCount: (count: number) => `${count} 行`, inputLimit: "输入上限", characterCount: (count: number) => `${count} 个字符`, scoped: "命令输入受当前权限范围限制。", authorization: "管理服务会在发送时再次检查操作权限。",
+    eyebrow: "实时输出", connection: "连接状态", transport: "传输方式", transportValue: "实时（Agent 日志流）", lastSequence: "最后序号", snapshot: "快照", lineCount: (count: number) => `${count} 行`, inputLimit: "输入上限", characterCount: (count: number) => `${count} 个字符`, scoped: "命令输入受当前权限范围限制。", authorization: "管理服务会在发送时再次检查操作权限。",
   },
   en: {
     sendFailed: "Command could not be sent", stream: "console stream", sequence: "seq", waiting: "Waiting for console output...", commandPlaceholder: "Enter a server command", stoppedPlaceholder: "Server must be running", commandAria: "Console command", send: "Send command",
-    eyebrow: "LIVE OUTPUT", connection: "Connection", transport: "Transport", transportValue: "Polling / development", lastSequence: "Last sequence", snapshot: "Snapshot", lineCount: (count: number) => `${count} ${count === 1 ? "line" : "lines"}`, inputLimit: "Input limit", characterCount: (count: number) => `${count} characters`, scoped: "Command input is restricted to your current permissions.", authorization: "The control plane checks authorization again before sending.",
+    eyebrow: "LIVE OUTPUT", connection: "Connection", transport: "Transport", transportValue: "Realtime (agent log stream)", lastSequence: "Last sequence", snapshot: "Snapshot", lineCount: (count: number) => `${count} ${count === 1 ? "line" : "lines"}`, inputLimit: "Input limit", characterCount: (count: number) => `${count} characters`, scoped: "Command input is restricted to your current permissions.", authorization: "The control plane checks authorization again before sending.",
   },
   ja: {
     sendFailed: "コマンドを送信できません", stream: "コンソールストリーム", sequence: "連番", waiting: "コンソール出力を待機しています…", commandPlaceholder: "サーバーコマンドを入力", stoppedPlaceholder: "サーバーを起動してください", commandAria: "コンソールコマンド", send: "コマンドを送信",
-    eyebrow: "リアルタイム出力", connection: "接続状態", transport: "転送方式", transportValue: "ポーリング / 開発環境", lastSequence: "最終連番", snapshot: "スナップショット", lineCount: (count: number) => `${count} 行`, inputLimit: "入力上限", characterCount: (count: number) => `${count} 文字`, scoped: "コマンド入力は現在の権限範囲に限定されます。", authorization: "管理サービスが送信時に操作権限を再確認します。",
+    eyebrow: "リアルタイム出力", connection: "接続状態", transport: "転送方式", transportValue: "リアルタイム（Agent ログストリーム）", lastSequence: "最終連番", snapshot: "スナップショット", lineCount: (count: number) => `${count} 行`, inputLimit: "入力上限", characterCount: (count: number) => `${count} 文字`, scoped: "コマンド入力は現在の権限範囲に限定されます。", authorization: "管理サービスが送信時に操作権限を再確認します。",
   },
   ko: {
     sendFailed: "명령을 전송할 수 없습니다", stream: "콘솔 스트림", sequence: "순번", waiting: "콘솔 출력을 기다리는 중…", commandPlaceholder: "서버 명령 입력", stoppedPlaceholder: "서버가 실행 중이어야 합니다", commandAria: "콘솔 명령", send: "명령 전송",
-    eyebrow: "실시간 출력", connection: "연결 상태", transport: "전송 방식", transportValue: "폴링 / 개발 환경", lastSequence: "마지막 순번", snapshot: "스냅샷", lineCount: (count: number) => `${count}줄`, inputLimit: "입력 제한", characterCount: (count: number) => `${count}자`, scoped: "명령 입력은 현재 권한 범위로 제한됩니다.", authorization: "관리 서비스가 전송 전에 작업 권한을 다시 확인합니다.",
+    eyebrow: "실시간 출력", connection: "연결 상태", transport: "전송 방식", transportValue: "실시간 (Agent 로그 스트림)", lastSequence: "마지막 순번", snapshot: "스냅샷", lineCount: (count: number) => `${count}줄`, inputLimit: "입력 제한", characterCount: (count: number) => `${count}자`, scoped: "명령 입력은 현재 권한 범위로 제한됩니다.", authorization: "관리 서비스가 전송 전에 작업 권한을 다시 확인합니다.",
   },
 });
 
