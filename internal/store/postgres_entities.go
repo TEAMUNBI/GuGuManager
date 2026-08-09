@@ -239,6 +239,7 @@ func (s *Postgres) Server(serverID string) (domain.Server, error) {
 	if err != nil {
 		return domain.Server{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
 	}
+	s.appendMetricsToServer(&server)
 	return server, nil
 }
 
@@ -269,6 +270,7 @@ func (s *Postgres) Servers(query string) []domain.Server {
 		if err != nil {
 			continue
 		}
+		s.appendMetricsToServer(&server)
 		servers = append(servers, server)
 	}
 	return servers

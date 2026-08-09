@@ -1327,13 +1327,16 @@ func normalizeStartupUpdates(definitions map[string]domain.StartupVariable, upda
 	return normalized, cleared, nil
 }
 
-// Console returns the buffered console lines of a server. This stage is
-// metadata-level: no agent console stream is attached, so the buffer is empty.
+// Console returns the buffered console lines of a server. 生产链路中日志由
+// Agent 的 LogBatch 帧经 RecordConsoleLines 写入内存缓冲；无上报时为空。
 func (s *Postgres) Console(serverID string) ([]domain.ConsoleLine, error) {
 	if _, err := s.Server(serverID); err != nil {
 		return nil, err
 	}
-	return []domain.ConsoleLine{}, nil
+	buf := s.consoleBufferFor(serverID)
+	buf.mu.Lock()
+	defer buf.mu.Unlock()
+	return append([]domain.ConsoleLine(nil), buf.lines...), nil
 }
 
 // SendConsoleCommand validates the command and records it as an audit event.

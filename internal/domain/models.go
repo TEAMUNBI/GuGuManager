@@ -87,6 +87,23 @@ type MetricPoint struct {
 	MemoryBytes int64     `json:"memoryBytes"`
 }
 
+// ServerMetrics 是 Agent 通过 MetricsBatch 上报的单台服务器实时指标，
+// 由控制面合并进 Server.Metrics（ResourceMetrics）与 MetricHistory。
+type ServerMetrics struct {
+	ServerID           string    `json:"serverId"`
+	ObservedGeneration int64     `json:"observedGeneration"`
+	CPUPercent         float64   `json:"cpuPercent"`
+	MemoryBytes        int64     `json:"memoryBytes"`
+	MemoryLimitBytes   int64     `json:"memoryLimitBytes"`
+	DiskBytes          int64     `json:"diskBytes"`
+	DiskLimitBytes     int64     `json:"diskLimitBytes"`
+	NetworkRxBytes     int64     `json:"networkRxBytes"`
+	NetworkTxBytes     int64     `json:"networkTxBytes"`
+	PlayersOnline      int       `json:"playersOnline"`
+	PlayersMax         int       `json:"playersMax"`
+	ObservedAt         time.Time `json:"observedAt"`
+}
+
 type Server struct {
 	ID                    string            `json:"id"`
 	Name                  string            `json:"name"`

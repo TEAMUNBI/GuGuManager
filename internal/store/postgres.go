@@ -23,6 +23,10 @@ type Postgres struct {
 	fileRoot             string
 	fileMutationGates    sync.Map
 	fileSystems          map[string]*serverfiles.ServerFS
+	// 控制台日志与服务器指标的内存缓冲（生产链路由 Agent 帧上报写入）。
+	bufMu          sync.Mutex
+	consoleBuffers map[string]*consoleBuffer
+	metricStates   map[string]*metricState
 }
 
 // NewPostgres creates a new PostgreSQL-backed store.
@@ -48,11 +52,13 @@ func NewPostgres(ctx context.Context, dsn string, environment string, agentToken
 	var agentTokenBytes [32]byte = sha256.Sum256([]byte(agentToken))
 
 	store := &Postgres{
-		db:          db,
-		environment: environment,
-		agentToken:  agentTokenBytes,
-		fileRoot:    fileRoot,
-		fileSystems: map[string]*serverfiles.ServerFS{},
+		db:             db,
+		environment:    environment,
+		agentToken:     agentTokenBytes,
+		fileRoot:       fileRoot,
+		fileSystems:    map[string]*serverfiles.ServerFS{},
+		consoleBuffers: map[string]*consoleBuffer{},
+		metricStates:   map[string]*metricState{},
 	}
 
 	return store, nil
