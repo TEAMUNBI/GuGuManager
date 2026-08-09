@@ -433,10 +433,10 @@ func TestDockerExecutorUnsupportedTask(t *testing.T) {
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 
 	task := &agentv1.Task{
-		OperationId: "op-backup",
+		OperationId: "op-extension",
 		ServerId:    "server-1",
-		Type:        "backup",
-		Payload:     &agentv1.Task_Backup{Backup: &agentv1.BackupTaskPayload{}},
+		Type:        "extension",
+		Payload:     &agentv1.Task_Extension{Extension: &agentv1.ExtensionTaskPayload{}},
 	}
 
 	outcome, err := exec.ExecuteTask(context.Background(), task)
@@ -612,6 +612,119 @@ func TestExecuteConsoleCommandExecError(t *testing.T) {
 	}
 	if outcome.Succeeded || outcome.ErrorCode != "COMMAND_FAILED" || outcome.Retryable {
 		t.Errorf("outcome = %+v, want COMMAND_FAILED non-retryable", outcome)
+	}
+}
+
+func backupCreateTaskPayload(t *testing.T, backupID string) []byte {
+	t.Helper()
+	payload, err := protojson.Marshal(&agentv1.BackupTaskPayload{Action: &agentv1.BackupTaskPayload_Create{
+		Create: &agentv1.CreateBackupPayload{BackupId: backupID, StorageObjectKey: "backups/" + backupID + ".tar.gz"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal backup payload: %v", err)
+	}
+	return payload
+}
+
+func TestExecuteBackupTaskArchivesDataVolume(t *testing.T) {
+	dir := t.TempDir()
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: dir, rt: fd}
+
+	task := &agentv1.Task{
+		OperationId: "op-b",
+		ServerId:    "srv-1",
+		Type:        "backup",
+		Attempt:     1,
+		Payload:     &agentv1.Task_PayloadJson{PayloadJson: backupCreateTaskPayload(t, "b-1")},
+	}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("execute backup: outcome=%+v err=%v", outcome, err)
+	}
+	var result struct {
+		Checksum        string `json:"checksum"`
+		SizeBytes       int64  `json:"sizeBytes"`
+		StorageLocation string `json:"storageLocation"`
+	}
+	if err := json.Unmarshal(outcome.ResultJSON, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.StorageLocation != "backups/b-1.tar.gz" {
+		t.Errorf("storage location = %q, want backups/b-1.tar.gz", result.StorageLocation)
+	}
+	if !strings.HasPrefix(result.Checksum, "sha256:") {
+		t.Errorf("checksum = %q, want sha256: prefix", result.Checksum)
+	}
+	archive := filepath.Join(dir, "backups", "b-1.tar.gz")
+	if _, err := os.Stat(archive); err != nil {
+		t.Errorf("archive %s not created: %v", archive, err)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.execArgv) != 1 || !strings.Contains(strings.Join(fd.execArgv[0], " "), "tar -czf") {
+		t.Errorf("expected in-container tar exec, got %v", fd.execArgv)
+	}
+}
+
+func TestExecuteRestoreBackupTask(t *testing.T) {
+	dir := t.TempDir()
+	// 预置归档供恢复读取。
+	if err := os.MkdirAll(filepath.Join(dir, "backups"), 0o755); err != nil {
+		t.Fatalf("mkdir backups: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "backups", "b-1.tar.gz"), []byte("archive-bytes"), 0o644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: dir, rt: fd}
+
+	payload, err := protojson.Marshal(&agentv1.BackupTaskPayload{Action: &agentv1.BackupTaskPayload_Restore{
+		Restore: &agentv1.RestoreBackupPayload{BackupId: "b-1", StorageObjectKey: "backups/b-1.tar.gz"},
+	}})
+	if err != nil {
+		t.Fatalf("marshal restore payload: %v", err)
+	}
+	task := &agentv1.Task{OperationId: "op-r", ServerId: "srv-1", Type: "backup", Attempt: 1, Payload: &agentv1.Task_PayloadJson{PayloadJson: payload}}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("execute restore: outcome=%+v err=%v", outcome, err)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.copiesTo) != 1 {
+		t.Fatalf("copy to container calls = %d, want 1", len(fd.copiesTo))
+	}
+	if fd.copiesTo[0].HostPath != filepath.Join(dir, "backups", "b-1.tar.gz") {
+		t.Errorf("restore source = %q", fd.copiesTo[0].HostPath)
+	}
+}
+
+func TestExecuteDeleteBackupTask(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "backups"), 0o755); err != nil {
+		t.Fatalf("mkdir backups: %v", err)
+	}
+	archive := filepath.Join(dir, "backups", "b-1.tar.gz")
+	if err := os.WriteFile(archive, []byte("bytes"), 0o644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: dir, rt: fd}
+
+	payload, err := protojson.Marshal(&agentv1.BackupTaskPayload{Action: &agentv1.BackupTaskPayload_Delete{
+		Delete: &agentv1.DeleteBackupPayload{BackupId: "b-1", StorageObjectKey: "backups/b-1.tar.gz", DeleteRemoteObject: true},
+	}})
+	if err != nil {
+		t.Fatalf("marshal delete payload: %v", err)
+	}
+	task := &agentv1.Task{OperationId: "op-d", ServerId: "srv-1", Type: "backup", Attempt: 1, Payload: &agentv1.Task_PayloadJson{PayloadJson: payload}}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("execute delete: outcome=%+v err=%v", outcome, err)
+	}
+	if _, err := os.Stat(archive); !os.IsNotExist(err) {
+		t.Errorf("archive should be removed, stat err = %v", err)
 	}
 }
 

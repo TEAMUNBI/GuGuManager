@@ -93,6 +93,8 @@ func (e *DockerExecutor) ExecuteTask(ctx context.Context, task *agentv1.Task) (*
 		return e.executeProvision(ctx, task)
 	case "power":
 		return e.executePower(ctx, task)
+	case "backup":
+		return e.executeBackup(ctx, task)
 	default:
 		return &ExecutionOutcome{
 			Succeeded: false,
@@ -100,6 +102,112 @@ func (e *DockerExecutor) ExecuteTask(ctx context.Context, task *agentv1.Task) (*
 			Retryable: false,
 		}, nil
 	}
+}
+
+// executeBackup 执行备份创建/恢复/删除：容器内 tar 打包数据卷，归档保存到
+// 节点本地 <dataRoot>/backups/，回传 checksum/size/storageLocation。
+func (e *DockerExecutor) executeBackup(ctx context.Context, task *agentv1.Task) (*ExecutionOutcome, error) {
+	payload := task.GetBackup()
+	if payload == nil && len(task.GetPayloadJson()) > 0 {
+		payload = &agentv1.BackupTaskPayload{}
+		if err := protojson.Unmarshal(task.GetPayloadJson(), payload); err != nil {
+			slog.Warn("backup: decode payload", "server_id", task.GetServerId(), "error", err)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+		}
+	}
+	if payload == nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+	}
+	rt, err := e.runtime()
+	if err != nil {
+		slog.Warn("backup: runtime unavailable", "server_id", task.GetServerId(), "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
+	}
+	containerName := fmt.Sprintf("gugu-server-%s", task.GetServerId())
+	switch action := payload.GetAction().(type) {
+	case *agentv1.BackupTaskPayload_Create:
+		create := action.Create
+		if create == nil {
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+		}
+		return e.createBackup(ctx, rt, task.GetServerId(), containerName, create)
+	case *agentv1.BackupTaskPayload_Restore:
+		restore := action.Restore
+		if restore == nil {
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+		}
+		return e.restoreBackup(ctx, rt, containerName, restore)
+	case *agentv1.BackupTaskPayload_Delete:
+		del := action.Delete
+		if del == nil {
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+		}
+		return e.deleteBackup(ctx, del)
+	default:
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+	}
+}
+
+func (e *DockerExecutor) createBackup(ctx context.Context, rt containerRuntime, serverID, containerName string, create *agentv1.CreateBackupPayload) (*ExecutionOutcome, error) {
+	backupDir := filepath.Join(e.dataRoot, "backups")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		slog.Warn("backup: create backup dir", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	archive := filepath.Join(backupDir, create.GetBackupId()+".tar.gz")
+	// 容器内打包到 /tmp，再拷出到节点备份目录。
+	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", fmt.Sprintf("tar -czf /tmp/%s.tar.gz -C /data .", create.GetBackupId())}); err != nil {
+		slog.Warn("backup: in-container tar", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	if err := rt.CopyArchiveFromContainer(ctx, containerName, fmt.Sprintf("/tmp/%s.tar.gz", create.GetBackupId()), archive); err != nil {
+		slog.Warn("backup: copy archive from container", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	sum, size, err := fileChecksum(archive)
+	if err != nil {
+		slog.Warn("backup: checksum archive", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	result, err := json.Marshal(map[string]any{
+		"checksum":        "sha256:" + sum,
+		"sizeBytes":       size,
+		"storageLocation": "backups/" + create.GetBackupId() + ".tar.gz",
+	})
+	if err != nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: false}, nil
+	}
+	return &ExecutionOutcome{Succeeded: true, ResultJSON: result}, nil
+}
+
+func (e *DockerExecutor) restoreBackup(ctx context.Context, rt containerRuntime, containerName string, restore *agentv1.RestoreBackupPayload) (*ExecutionOutcome, error) {
+	archive := filepath.Join(e.dataRoot, restore.GetStorageObjectKey())
+	if _, err := os.Stat(archive); err != nil {
+		slog.Warn("backup: restore archive missing", "archive", archive, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+	}
+	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", "rm -rf /data/* /data/.[!.]* 2>/dev/null || true"}); err != nil {
+		slog.Warn("backup: clear data dir", "container", containerName, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	if err := rt.CopyArchiveToContainer(ctx, containerName, archive, "/tmp"); err != nil {
+		slog.Warn("backup: copy archive into container", "container", containerName, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", "tar -xzf /tmp/restore.tar.gz -C /data 2>/dev/null || tar -xzf $(ls /tmp/*.tar.gz | head -1) -C /data"}); err != nil {
+		slog.Warn("backup: in-container extract", "container", containerName, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	return &ExecutionOutcome{Succeeded: true}, nil
+}
+
+func (e *DockerExecutor) deleteBackup(ctx context.Context, del *agentv1.DeleteBackupPayload) (*ExecutionOutcome, error) {
+	archive := filepath.Join(e.dataRoot, del.GetStorageObjectKey())
+	if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
+		slog.Warn("backup: delete archive", "archive", archive, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	return &ExecutionOutcome{Succeeded: true}, nil
 }
 
 // ExecuteConsoleCommand 在服务器容器内执行控制台命令，输出回传控制面。
