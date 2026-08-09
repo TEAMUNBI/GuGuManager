@@ -558,6 +558,7 @@ func TestDockerExecutorDefaultRuntimeLazy(t *testing.T) {
 func TestExecuteConsoleCommandRunsExecInContainer(t *testing.T) {
 	fd := newFakeDocker()
 	fd.execOut = "There are 2 of a max of 20 players online"
+	fd.env["RCON_PASSWORD"] = "secret123"
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 
 	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
@@ -581,8 +582,31 @@ func TestExecuteConsoleCommandRunsExecInContainer(t *testing.T) {
 	if len(fd.execArgv) != 1 {
 		t.Fatalf("exec calls = %d, want 1", len(fd.execArgv))
 	}
-	if got := strings.Join(fd.execArgv[0], " "); got != "sh -c list" {
-		t.Errorf("exec argv = %q, want 'sh -c list'", got)
+	if got := strings.Join(fd.execArgv[0], " "); got != "rcon-cli --host 127.0.0.1 --port 25575 --password secret123 list" {
+		t.Errorf("exec argv = %q, want rcon-cli dispatch", got)
+	}
+}
+
+func TestExecuteConsoleCommandFallsBackToShellWithoutRCON(t *testing.T) {
+	fd := newFakeDocker()
+	fd.execOut = "hello"
+	// newFakeDocker 的 env 不含 RCON_PASSWORD。
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+
+	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "echo hello")
+	if err != nil {
+		t.Fatalf("execute console command: %v", err)
+	}
+	if !outcome.Succeeded {
+		t.Fatalf("expected success, got %s", outcome.ErrorCode)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.execArgv) != 1 {
+		t.Fatalf("exec calls = %d, want 1", len(fd.execArgv))
+	}
+	if got := strings.Join(fd.execArgv[0], " "); got != "sh -c echo hello" {
+		t.Errorf("exec argv = %q, want 'sh -c echo hello'", got)
 	}
 }
 
@@ -697,6 +721,9 @@ func TestExecuteRestoreBackupTask(t *testing.T) {
 	}
 	if fd.copiesTo[0].HostPath != filepath.Join(dir, "backups", "b-1.tar.gz") {
 		t.Errorf("restore source = %q", fd.copiesTo[0].HostPath)
+	}
+	if len(fd.started) != 1 || fd.started[0] != "gugu-server-srv-1" {
+		t.Errorf("restore should start container first, started = %v", fd.started)
 	}
 }
 

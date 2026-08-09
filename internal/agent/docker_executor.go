@@ -186,6 +186,12 @@ func (e *DockerExecutor) restoreBackup(ctx context.Context, rt containerRuntime,
 		slog.Warn("backup: restore archive missing", "archive", archive, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
 	}
+	// 服务器 stop 后容器为 stopped，docker exec 无法在容器内执行；
+	// 恢复前先确保容器 running（对已 running 容器 docker start 幂等）。
+	if err := rt.StartContainer(ctx, containerName); err != nil {
+		slog.Warn("backup: start container before restore", "container", containerName, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
 	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", "rm -rf /data/* /data/.[!.]* 2>/dev/null || true"}); err != nil {
 		slog.Warn("backup: clear data dir", "container", containerName, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
@@ -216,7 +222,21 @@ func (e *DockerExecutor) ExecuteConsoleCommand(ctx context.Context, serverID str
 	if err != nil {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
 	}
-	output, err := rt.ExecInContainer(ctx, fmt.Sprintf("gugu-server-%s", serverID), []string{"sh", "-c", command})
+	containerName := fmt.Sprintf("gugu-server-%s", serverID)
+	// 游戏命令（list/say/stop 等）由游戏服务器进程解释，不能作为 shell 命令执行。
+	// 优先走容器内 RCON（密码由 provision 注入）；无 RCON 时回退容器 shell。
+	if env, envErr := rt.InspectEnv(ctx, containerName); envErr == nil {
+		if password := env["RCON_PASSWORD"]; password != "" {
+			output, execErr := rt.ExecInContainer(ctx, containerName,
+				[]string{"rcon-cli", "--host", "127.0.0.1", "--port", "25575", "--password", password, command})
+			if execErr == nil {
+				result, _ := json.Marshal(map[string]string{"output": output})
+				return &ExecutionOutcome{Succeeded: true, ResultJSON: result}, nil
+			}
+			// RCON 执行失败不立即返回：fallthrough 到 shell 兜底。
+		}
+	}
+	output, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", command})
 	if err != nil {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "COMMAND_FAILED", Retryable: false}, nil
 	}

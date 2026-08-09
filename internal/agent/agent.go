@@ -640,7 +640,7 @@ func (a *agent) collectServerMetrics(ctx context.Context, serverID string) *agen
 		NetworkTxBytes:    stats.NetworkTxBytes,
 	}
 	if password := env["RCON_PASSWORD"]; password != "" {
-		if output, execErr := rt.ExecInContainer(ctx, containerName, []string{"rcon-cli", "-H", "127.0.0.1", "-P", "25575", "-p", password, "list"}); execErr == nil {
+		if output, execErr := rt.ExecInContainer(ctx, containerName, []string{"rcon-cli", "--host", "127.0.0.1", "--port", "25575", "--password", password, "list"}); execErr == nil {
 			online, max := parsePlayersFromRCON(output)
 			m.PlayersOnline = uint32(online)
 			m.PlayersMax = uint32(max)

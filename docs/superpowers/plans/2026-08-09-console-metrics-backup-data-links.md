@@ -1437,23 +1437,29 @@ git commit -m "chore: stage real data links build artifacts and fixes"
 
 **Files:** 无（使用 `var/e2e/` 脚本，该目录被 gitignore）。
 
-- [ ] **Step 1: 部署新 control-plane 与 agent**
+- [x] **Step 1: 部署新 control-plane 与 agent**
 
 scp `var/e2e/dist/control-plane` 与 `var/e2e/dist/agent` 到服务器；`install` 到 `/opt/gugumanager/bin/` 与 agent 路径；重启两个 systemd 服务；确认日志无错误、agent connected、liveness 对账正常。
 
-- [ ] **Step 2: 控制台验证**
+- [x] **Step 2: 控制台验证**
 
 浏览器打开 paper-05 工作区控制台：容器 stdout 日志滚动出现；输入命令（如 `list`）→ 输出回显（玩家在线数或错误信息）。
 
 > 验收发现并修复的接线缺口：原 `Postgres.SendConsoleCommand` 仅校验+审计，HTTP `POST /console/commands` 不真正下发。修复：`internal/httpapi/handler.go` 定义 `CommandDispatcher` 接口与 `WithCommandDispatcher` option，`consoleCommand` handler 在 store 校验+审计通过后查服务器 NodeID 并调用 `dispatcher.SendConsoleCommand`；`cmd/control-plane/main.go` 将 `serveAgentGRPC` 拆为 `buildAgentGRPCServer`（返回 `*agentrpc.Server`）+ `agentGRPCAddr`，并把 server 作为 dispatcher 注入 `httpapi.New`。节点离线返回 503 `NODE_OFFLINE`。新增 handler_test.go 测试 `TestConsoleCommandDispatchesToAgent`/`TestConsoleCommandNodeOfflineReportsError`。
+>
+> 验收中另发现两处 Agent 侧修复：① 该镜像的 `rcon-cli` 仅接受长参数（`--host/--port/--password`），短参数 `-H/-P/-p` 报 "unknown shorthand flag"，控制台命令回退到 shell（`sh: 1: list: not found`）；改为长参数后 `list` 正确回显 `There are 0 of a max of 20 players online`。② 旧容器缺 `RCON_PASSWORD` env（provision 注入 RCON 的代码晚于容器创建），重建 paper-05 后 RCON env 就位。
 
-- [ ] **Step 3: 指标验证**
+- [x] **Step 3: 指标验证**
 
 概览页：CPU/内存随时间变化（每 5 秒刷新）；玩家数为 0 或实际值；无"开发环境快照"字样。
 
-- [ ] **Step 4: 备份验证**
+> 实测 paper-05：`cpu=0.5%`、`mem=824MB/1024MB`、rx/tx 网络字节、`playersOnline=0/playersMax=20`（RCON list 解析）、metricHistory 60 点随时间变化；概览 `serverCount=2/runningServerCount=1/onlineNodeCount=1`，recentActivity 含 `console.command` 审计。
+
+- [x] **Step 4: 备份验证**
 
 备份 tab：创建备份 → 任务 succeeded、列表出现 ready 备份（含 checksum/大小）；节点 `/opt/gugumanager/agent-data/backups/<id>.tar.gz` 存在；stop 服务器后 restore → 数据卷恢复；删除备份 → 列表移除、归档删除。
+
+> 实测：create → `creating→ready`（size=121907712、checksum=sha256:bbc4798c...、storage_location 回写），节点归档 117MB 存在；stop 后 restore 任务从 `restoring→ready`，`/data` 恢复为 126M，start 后 MC 正常加载世界并回显玩家数；delete → DB `status=deleted`、列表过滤、归档清空。验收修复：restore 在服务器 stopped 时容器为 stopped，`docker exec` 无法执行导致任务卡 `restoring`——restoreBackup 先 `StartContainer`（幂等）再 exec。
 
 - [ ] **Step 5: 提交（如有修复）**
 
