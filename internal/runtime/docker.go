@@ -1,9 +1,13 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -237,4 +241,180 @@ func (r *DockerRuntime) AttachToContainer(ctx context.Context, containerID strin
 		return nil, fmt.Errorf("attach container: %w", err)
 	}
 	return resp.Conn, nil
+}
+
+// ContainerStats 是一次 docker stats 单容器采样的结果。
+type ContainerStats struct {
+	CPUPercent       float64
+	MemoryBytes      uint64
+	MemoryLimitBytes uint64
+	NetworkRxBytes   uint64
+	NetworkTxBytes   uint64
+}
+
+// dockerStatsSnapshot 是 docker stats 响应中我们需要的字段子集。
+type dockerStatsSnapshot struct {
+	CPUStats struct {
+		CPUUsage struct {
+			TotalUsage uint64 `json:"total_usage"`
+		} `json:"cpu_usage"`
+		SystemUsage uint64 `json:"system_cpu_usage"`
+		OnlineCPUs  uint32 `json:"online_cpus"`
+	} `json:"cpu_stats"`
+	PreCPUStats struct {
+		CPUUsage struct {
+			TotalUsage uint64 `json:"total_usage"`
+		} `json:"cpu_usage"`
+		SystemUsage uint64 `json:"system_cpu_usage"`
+	} `json:"precpu_stats"`
+	MemoryStats struct {
+		Usage uint64 `json:"usage"`
+		Limit uint64 `json:"limit"`
+	} `json:"memory_stats"`
+	Networks map[string]struct {
+		RxBytes uint64 `json:"rx_bytes"`
+		TxBytes uint64 `json:"tx_bytes"`
+	} `json:"networks"`
+}
+
+// containerStatsFromJSON 解析 docker stats 单容器响应为 ContainerStats。
+// CPU% = (Δtotal / Δsystem) * onlineCPUs * 100；首次采样（precpu 为零）返回 0。
+func containerStatsFromJSON(data []byte) (ContainerStats, error) {
+	var stats dockerStatsSnapshot
+	if len(data) == 0 {
+		return ContainerStats{}, fmt.Errorf("empty stats payload")
+	}
+	if err := json.Unmarshal(data, &stats); err != nil {
+		return ContainerStats{}, fmt.Errorf("decode container stats: %w", err)
+	}
+	var out ContainerStats
+	out.MemoryBytes = stats.MemoryStats.Usage
+	out.MemoryLimitBytes = stats.MemoryStats.Limit
+	if stats.PreCPUStats.CPUUsage.TotalUsage > 0 &&
+		stats.CPUStats.SystemUsage > stats.PreCPUStats.SystemUsage &&
+		stats.CPUStats.OnlineCPUs > 0 {
+		cpuDelta := float64(stats.CPUStats.CPUUsage.TotalUsage - stats.PreCPUStats.CPUUsage.TotalUsage)
+		systemDelta := float64(stats.CPUStats.SystemUsage - stats.PreCPUStats.SystemUsage)
+		if systemDelta > 0 {
+			out.CPUPercent = cpuDelta / systemDelta * float64(stats.CPUStats.OnlineCPUs) * 100
+		}
+	}
+	for _, netStats := range stats.Networks {
+		out.NetworkRxBytes += netStats.RxBytes
+		out.NetworkTxBytes += netStats.TxBytes
+	}
+	return out, nil
+}
+
+// ContainerStats 采集单个容器的实时资源使用（docker stats 单容器）。
+func (r *DockerRuntime) ContainerStats(ctx context.Context, containerID string) (ContainerStats, error) {
+	resp, err := r.client.ContainerStats(ctx, containerID, false)
+	if err != nil {
+		return ContainerStats{}, fmt.Errorf("container stats: %w", err)
+	}
+	defer resp.Body.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, resp.Body); err != nil {
+		return ContainerStats{}, fmt.Errorf("read container stats: %w", err)
+	}
+	return containerStatsFromJSON(buf.Bytes())
+}
+
+// ExecInContainer 在容器内执行命令并返回合并的 stdout/stderr 输出。
+func (r *DockerRuntime) ExecInContainer(ctx context.Context, containerID string, argv []string) (string, error) {
+	execConfig := container.ExecOptions{
+		Cmd:          argv,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	execID, err := r.client.ContainerExecCreate(ctx, containerID, execConfig)
+	if err != nil {
+		return "", fmt.Errorf("exec create: %w", err)
+	}
+	attach, err := r.client.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
+	if err != nil {
+		return "", fmt.Errorf("exec attach: %w", err)
+	}
+	defer attach.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, attach.Reader); err != nil {
+		return "", fmt.Errorf("exec read: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// FollowLogs 从容器实时输出流式读取日志（docker logs -f --timestamps）。
+// 返回的 ReadCloser 需要调用方在结束后 Close；ctx 取消会中断读取。
+func (r *DockerRuntime) FollowLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
+	return r.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+		Timestamps: true,
+	})
+}
+
+// InspectEnv 返回容器当前环境变量（docker inspect .Config.Env）。
+func (r *DockerRuntime) InspectEnv(ctx context.Context, containerID string) (map[string]string, error) {
+	inspect, err := r.client.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect container env: %w", err)
+	}
+	env := make(map[string]string, len(inspect.Config.Env))
+	for _, pair := range inspect.Config.Env {
+		if idx := strings.IndexByte(pair, '='); idx >= 0 {
+			env[pair[:idx]] = pair[idx+1:]
+		}
+	}
+	return env, nil
+}
+
+// CopyArchiveToContainer 把宿主机上的归档复制进容器目标路径（docker cp 语义）。
+func (r *DockerRuntime) CopyArchiveToContainer(ctx context.Context, containerID, hostPath, containerPath string) error {
+	file, err := os.Open(hostPath)
+	if err != nil {
+		return fmt.Errorf("open archive: %w", err)
+	}
+	defer file.Close()
+	if err := r.client.CopyToContainer(ctx, containerID, containerPath, file, container.CopyToContainerOptions{}); err != nil {
+		return fmt.Errorf("copy to container: %w", err)
+	}
+	return nil
+}
+
+// CopyArchiveFromContainer 把容器内路径复制为宿主机归档文件（docker cp 语义）。
+func (r *DockerRuntime) CopyArchiveFromContainer(ctx context.Context, containerID, containerPath, hostPath string) error {
+	reader, _, err := r.client.CopyFromContainer(ctx, containerID, containerPath)
+	if err != nil {
+		return fmt.Errorf("copy from container: %w", err)
+	}
+	defer reader.Close()
+	file, err := os.Create(hostPath)
+	if err != nil {
+		return fmt.Errorf("create archive: %w", err)
+	}
+	defer file.Close()
+	if _, err := io.Copy(file, reader); err != nil {
+		return fmt.Errorf("write archive: %w", err)
+	}
+	return nil
+}
+
+// ListRunningContainers 返回名称以 namePrefix 开头的运行中容器，去掉前缀。
+func (r *DockerRuntime) ListRunningContainers(ctx context.Context, namePrefix string) ([]string, error) {
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	var out []string
+	for _, c := range containers {
+		for _, name := range c.Names {
+			trimmed := strings.TrimPrefix(name, "/")
+			if strings.HasPrefix(trimmed, namePrefix) {
+				out = append(out, trimmed[len(namePrefix):])
+				break
+			}
+		}
+	}
+	return out, nil
 }
