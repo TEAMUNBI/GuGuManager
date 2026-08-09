@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
@@ -150,11 +151,12 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	defer tx.Rollback()
 
 	var serverID, taskType string
+	var taskCheckpoint string
 	err = tx.QueryRowContext(ctx, `
-		SELECT server_id::text, task_type FROM server_tasks
+		SELECT server_id::text, task_type, COALESCE(checkpoint::text, '') FROM server_tasks
 		WHERE id = $1 AND node_id = $2
 		FOR UPDATE
-	`, operationID, nodeID).Scan(&serverID, &taskType)
+	`, operationID, nodeID).Scan(&serverID, &taskType, &taskCheckpoint)
 	if err == sql.ErrNoRows {
 		return domain.NewProblem("NOT_FOUND", "任务不存在", false)
 	}
@@ -187,6 +189,60 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			WHERE id = $1 AND deleted_at IS NULL
 		`, serverID); err != nil {
 			return domain.NewProblem("INTERNAL_ERROR", "无法更新服务器生命周期", true)
+		}
+	}
+
+	// 成功的备份任务把 backups 元数据推进到终态：创建 → ready（带校验与位置），
+	// 恢复 → 回到 ready，删除 → 标记 deleted。backupId 从 checkpoint 解析，
+	// checksum/size/storageLocation 从 resultJSON（Agent 执行回传）解析。
+	if succeeded {
+		switch taskType {
+		case "backup":
+			var payload struct {
+				BackupID string `json:"backupId"`
+			}
+			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
+			var res struct {
+				Checksum        string `json:"checksum"`
+				SizeBytes       int64  `json:"sizeBytes"`
+				StorageLocation string `json:"storageLocation"`
+			}
+			_ = json.Unmarshal(resultJSON, &res)
+			if payload.BackupID != "" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE backups
+					SET status = 'ready', checksum = $2, size_bytes = $3, storage_location = $4, completed_at = now(), updated_at = now()
+					WHERE id = $1 AND server_id = $5
+				`, payload.BackupID, res.Checksum, res.SizeBytes, res.StorageLocation, serverID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份元数据", true)
+				}
+			}
+		case "restore":
+			var payload struct {
+				BackupID string `json:"backupId"`
+			}
+			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
+			if payload.BackupID != "" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE backups SET status = 'ready', updated_at = now()
+					WHERE id = $1 AND server_id = $2
+				`, payload.BackupID, serverID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
+				}
+			}
+		case "backup-delete":
+			var payload struct {
+				BackupID string `json:"backupId"`
+			}
+			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
+			if payload.BackupID != "" {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE backups SET status = 'deleted', updated_at = now()
+					WHERE id = $1 AND server_id = $2
+				`, payload.BackupID, serverID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
+				}
+			}
 		}
 	}
 

@@ -469,3 +469,45 @@ func TestCreateBackupWritesCheckpointPayload(t *testing.T) {
 		t.Errorf("storageObjectKey = %q, want %q", payload.StorageObjectKey, want)
 	}
 }
+
+func TestCompleteBackupTaskMarksBackupReady(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+
+	op, err := s.CreateBackup(serverID, "idem-cp-ready-0001", admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, err := s.Backups(serverID)
+	if err != nil {
+		t.Fatalf("backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backups = %+v, want 1", backups)
+	}
+	backupID := backups[0].ID
+	result := []byte(`{"checksum":"sha256:abc123def4567890","sizeBytes":42,"storageLocation":"backups/` + backupID + `.tar.gz"}`)
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, result); err != nil {
+		t.Fatalf("complete backup task: %v", err)
+	}
+
+	var status, checksum, storageLocation string
+	var sizeBytes int64
+	if err := s.db.QueryRow(`
+		SELECT status, COALESCE(checksum, ''), COALESCE(storage_location, ''), COALESCE(size_bytes, 0)
+		FROM backups WHERE id = $1`, backupID).Scan(&status, &checksum, &storageLocation, &sizeBytes); err != nil {
+		t.Fatalf("query backup state: %v", err)
+	}
+	if status != "ready" {
+		t.Errorf("backup status = %q, want ready", status)
+	}
+	if checksum != "sha256:abc123def4567890" {
+		t.Errorf("backup checksum = %q", checksum)
+	}
+	if sizeBytes != 42 {
+		t.Errorf("backup size = %d, want 42", sizeBytes)
+	}
+	if want := "backups/" + backupID + ".tar.gz"; storageLocation != want {
+		t.Errorf("storage location = %q, want %q", storageLocation, want)
+	}
+}
