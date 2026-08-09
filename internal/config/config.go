@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"net/mail"
 	"net/url"
@@ -136,9 +135,6 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if len(problems) > 0 {
 		return Config{}, &ValidationError{Problems: problems}
-	}
-	if cfg.Environment == Production {
-		return Config{}, fmt.Errorf("%w; configuration passed production field validation but no production runtime is wired", ErrProductionAdapterUnavailable)
 	}
 	return cfg, nil
 }

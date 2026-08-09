@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gugumanager/gugumanager/internal/migrations"
 )
 
 func TestPlanValidatesAndListsMigrationsWithoutExecutingSQL(t *testing.T) {
@@ -148,7 +150,7 @@ func TestProjectPlanIncludesMembershipPermissionMigration(t *testing.T) {
 	if !ok {
 		t.Fatal("locate migration command test source")
 	}
-	plan, err := buildPlan(filepath.Join(filepath.Dir(currentFile), "..", "..", "migrations"))
+	plan, err := migrations.LoadMigrations(filepath.Join(filepath.Dir(currentFile), "..", "..", "migrations"))
 	if err != nil {
 		t.Fatalf("build project migration plan: %v", err)
 	}

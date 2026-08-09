@@ -102,16 +102,15 @@ func TestProductionValidationReportsAllRequiredGateFields(t *testing.T) {
 	}
 }
 
-func TestCompleteProductionConfigStillHitsAdapterGate(t *testing.T) {
+func TestCompleteProductionConfigLoadsSuccessfully(t *testing.T) {
 	env := completeProductionEnv(t)
 
-	_, err := load(mapLookup(env))
-	if !errors.Is(err, ErrProductionAdapterUnavailable) {
-		t.Fatalf("error = %v, want ErrProductionAdapterUnavailable", err)
+	cfg, err := load(mapLookup(env))
+	if err != nil {
+		t.Fatalf("complete production config failed to load: %v", err)
 	}
-	var validation *ValidationError
-	if errors.As(err, &validation) {
-		t.Fatalf("complete production config failed field validation: %+v", validation.Problems)
+	if cfg.Environment != Production {
+		t.Fatalf("Environment = %q, want %q", cfg.Environment, Production)
 	}
 }
 
