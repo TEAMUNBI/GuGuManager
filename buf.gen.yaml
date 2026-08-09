@@ -5,5 +5,9 @@ plugins:
     out: api/proto
     opt:
       - paths=source_relative
+  - remote: buf.build/grpc/go:v1.5.1
+    out: api/proto
+    opt:
+      - paths=source_relative
 inputs:
   - directory: api/proto
