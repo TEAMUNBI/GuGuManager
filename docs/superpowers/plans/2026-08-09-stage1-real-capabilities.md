@@ -65,26 +65,31 @@ git commit -m "chore: restore toolchain baseline, fix go.sum"
 
 ---
 
-## Task 1：PostgreSQL Store — Identity 持久化（1A 核心）
+## Task 1：PostgreSQL Store — Identity 扩展（membership + reset 令牌 + bootstrap 校验）
 
-实现 `Postgres` Store 的 Identity 部分：用户、会话、CSRF、setup、reset 令牌、membership。这些是 `httpapi.ControlPlane` 接口的子集。当前 `internal/store/postgres.go` 只有骨架（使用 `database/sql` + lib/pq，但 go.mod 只有 pgx/v5，需统一到 pgx 或加 lib/pq）。决定：**统一到 pgx/v5**（已在 go.mod，支持 pgxpool）。
+**重要现状（Task 0 已核实）：** `internal/store/postgres.go` / `postgres_identity.go` / `postgres_session.go` 已存在且实现了部分 Identity：`SetupStatus`、`SetupAdmin`、`Users`、`UserByID`、`CreateUser`、`Login`、`Session`、`Logout`、`ValidateCSRF`。它们使用 `database/sql` + `lib/pq`（`Postgres.db *sql.DB` 字段，`NewPostgres(ctx, dsn, environment, agentToken, fileRoot)` 签名）。**不要**改成 pgxpool——保持现有 `database/sql` 风格，只在现有基础上扩展。
+
+本任务补全缺失的 Identity 能力：
+1. `SetupAdmin` 增加 bootstrap token 校验（当前完全不校验，生产不安全）
+2. `UpdateUser`、`IssuePasswordResetToken`、`ResetPassword`
+3. `ServerMembership`、`PutServerMembership`、`DeleteServerMembership`
+4. `ValidateAgentToken`
 
 **Files:**
-- Modify: `internal/store/postgres.go` — 重写为 pgxpool 连接 + 核心字段
-- Create: `internal/store/postgres_identity.go` — 用户/会话/令牌/membership 实现
-- Test: `internal/store/postgres_identity_test.go` — 需真实 PostgreSQL（复用现有集成测试模式，`GUGU_TEST_DATABASE_URL` 时运行，否则 Skip）
+- Modify: `internal/store/postgres.go` — 增加 `bootstrapTokenDigest [32]byte` 字段与 `SetBootstrapToken(token string)` 方法；保持 `NewPostgres` 签名不变
+- Modify: `internal/store/postgres_identity.go` — 补全上述方法（保持无 ctx 签名，内部 `context.WithTimeout` + `s.db`）
+- Create: `migrations/000004_password_reset.up.sql` / `migrations/000004_password_reset.down.sql`
+- Test: `internal/store/postgres_identity_ext_test.go` — 真实 PostgreSQL 集成测试
 
-- [ ] **Step 1: 编写失败测试**（postgres_identity_test.go）
+- [ ] **Step 1: 编写失败测试**（postgres_identity_ext_test.go）
 
 ```go
 package store
 
 import (
-	"context"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
 )
@@ -95,149 +100,208 @@ func testPostgres(t *testing.T) *Postgres {
 	if dsn == "" || !strings.HasSuffix(dsn, "_test") {
 		t.Skip("GUGU_TEST_DATABASE_URL required, must end in _test")
 	}
-	ctx := context.Background()
-	store, err := NewPostgres(ctx, dsn, Production, "test-agent-token-1234567890", "")
+	s, err := NewPostgres(context.Background(), dsn, Production, "test-agent-token-1234567890", "")
 	if err != nil {
 		t.Fatalf("new postgres: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	return store
+	t.Cleanup(func() { s.Close() })
+	return s
 }
 
-func TestPostgresIdentityLifecycle(t *testing.T) {
-	// 注意：Postgres 必须实现 httpapi.ControlPlane 接口（无 ctx 方法签名），
-	// 内部使用 context.Background() 或持有的请求上下文，与 Memory 行为一致。
+func TestPostgresMembershipAndReset(t *testing.T) {
 	s := testPostgres(t)
+	s.SetBootstrapToken("bootstrap-token-12345678901234567890123456789012")
 
-	// Setup admin
-	admin, err := s.SetupAdmin(domain.SetupAdminInput{Email: "admin@test.local", DisplayName: "Admin", Password: "correct-horse-battery", BootstrapToken: s.bootstrapToken})
+	// Setup 必须校验 bootstrap token
+	if _, err := s.SetupAdmin(domain.SetupAdminInput{Email: "admin@test.local", DisplayName: "Admin", Password: "correct-horse-battery", BootstrapToken: "wrong-token"}); err == nil {
+		t.Fatal("expected wrong bootstrap token to be rejected")
+	}
+	admin, err := s.SetupAdmin(domain.SetupAdminInput{Email: "admin@test.local", DisplayName: "Admin", Password: "correct-horse-battery", BootstrapToken: "bootstrap-token-12345678901234567890123456789012"})
 	if err != nil {
 		t.Fatalf("setup admin: %v", err)
 	}
 
-	// Login creates persistent session
-	view, token, err := s.Login("admin@test.local", "correct-horse-battery")
+	// membership 写入/读取/撤销
+	member, err := s.PutServerMembership("server-1", admin.ID, []string{"servers.read", "servers.power"}, admin)
+	if err != nil {
+		t.Fatalf("put membership: %v", err)
+	}
+	if len(member.Permissions) != 2 {
+		t.Fatalf("expected 2 permissions, got %v", member.Permissions)
+	}
+	got, err := s.ServerMembership("server-1", admin.ID)
+	if err != nil || len(got.Permissions) != 2 {
+		t.Fatalf("read membership: %v %v", got, err)
+	}
+	if err := s.DeleteServerMembership("server-1", admin.ID, admin); err != nil {
+		t.Fatalf("delete membership: %v", err)
+	}
+	if _, err := s.ServerMembership("server-1", admin.ID); err == nil {
+		t.Fatal("expected membership to be gone")
+	}
+
+	// reset 令牌签发与消费；旧会话应被撤销
+	_, loginToken, err := s.Login("admin@test.local", "correct-horse-battery")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if view.UserID == "" || token == "" {
-		t.Fatal("expected session token")
-	}
-	got, err := s.Session(token)
+	resetToken, err := s.IssuePasswordResetToken(admin.ID, admin)
 	if err != nil {
-		t.Fatalf("session lookup: %v", err)
+		t.Fatalf("issue reset token: %v", err)
 	}
-	if got.UserID != admin.ID {
-		t.Fatalf("session user mismatch: %s != %s", got.UserID, admin.ID)
+	if err := s.ResetPassword(resetToken.Token, "new-password-12345"); err != nil {
+		t.Fatalf("reset password: %v", err)
 	}
-
-	// Create second user + membership
-	user2, err := s.CreateUser(domain.CreateUserInput{Email: "player@test.local", DisplayName: "Player", Password: "password-12345"}, admin)
-	if err != nil {
-		t.Fatalf("create user: %v", err)
+	if _, err := s.Session(loginToken); err == nil {
+		t.Fatal("expected pre-reset session to be revoked")
 	}
-	_ = user2
-
-	// Logout revokes session
-	s.Logout(token)
-	if _, err := s.Session(token); err == nil {
-		t.Fatal("expected revoked session to fail")
+	if _, err := s.Login("admin@test.local", "new-password-12345"); err != nil {
+		t.Fatalf("login with new password: %v", err)
+	}
+	if !s.ValidateAgentToken("test-agent-token-1234567890") {
+		t.Fatal("expected agent token to validate")
+	}
+	if s.ValidateAgentToken("wrong-agent-token") {
+		t.Fatal("expected wrong agent token to fail")
 	}
 }
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-先启动本地 PostgreSQL（Docker）：
+本机已安装 PostgreSQL 17（服务 `postgresql-x64-17`，监听 127.0.0.1:5432，密码 `postgres`）。测试库 `gugu_identity_test` 已创建（若被删，重建）：
 
 ```powershell
-docker run -d --name gugu-pg-test -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17
-# 创建测试库（DSN 必须以 _test 结尾，testPostgres 才会运行）
-docker exec gugu-pg-test psql -U postgres -c "CREATE DATABASE gugu_identity_test;"
+$env:PGPASSWORD="postgres"; & "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -h 127.0.0.1 -c "CREATE DATABASE gugu_identity_test;" 2>$null
 $env:GUGU_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/gugu_identity_test"
-& "C:\Users\andi\sdk\go1.26.5\bin\go.exe" test ./internal/store/ -run TestPostgresIdentityLifecycle -v
+& "C:\Users\andi\sdk\go1.26.5\bin\go.exe" test ./internal/store/ -run TestPostgresMembershipAndReset -v
 ```
 
-Expected: FAIL——`SetupAdmin` 等方法尚未实现（编译错误或 `no such method`）。若 Docker 不可用，测试会 Skip，此时需在任一真实 PG（含远端）上验证；不得把 Skip 当通过。
+Expected: FAIL——`SetBootstrapToken` 等方法不存在（编译错误或 `no such method`）。若本机 PG 不可用则测试 Skip，此时需在任一真实 PG（含远端）上验证；不得把 Skip 当通过。
 
-- [ ] **Step 3: 重写 postgres.go（pgxpool + 公共字段）**
+- [ ] **Step 3: 扩展 postgres.go（bootstrap 字段，保持 database/sql）**
+
+在 `Postgres` 结构体增加字段，并新增 `SetBootstrapToken` 方法（文件顶部需已 import `crypto/sha256`，若无则补）：
 
 ```go
-package store
-
-import (
-	"context"
-	"fmt"
-	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-)
-
-// Postgres implements the Store/ControlPlane contracts with PostgreSQL persistence.
 type Postgres struct {
-	pool            *pgxpool.Pool
-	environment     string
-	fileRoot        string
-	bootstrapToken  string
-	bootstrapDigest [32]byte
-	bootstrapExpiry time.Time
+	db                   *sql.DB
+	mu                   sync.RWMutex
+	environment          string
+	agentToken           [32]byte
+	bootstrapTokenDigest [32]byte
+	fileRoot             string
+	fileMutationGates    sync.Map
 }
 
-// NewPostgres creates a PostgreSQL-backed store using pgxpool.
-// dsn 使用 postgres:// 形式；environment 用于日志与适配器标识。
-func NewPostgres(ctx context.Context, dsn string, environment string, bootstrapToken string, fileRoot string) (*Postgres, error) {
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("create pgx pool: %w", err)
+// SetBootstrapToken 记录 bootstrap token 的 SHA-256 摘要，供 SetupAdmin 校验。
+// 仅用于首次初始化；生产从 GUGU_BOOTSTRAP_TOKEN_FILE 读取后调用。
+func (s *Postgres) SetBootstrapToken(token string) {
+	if token == "" {
+		return
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
-	}
-	s := &Postgres{pool: pool, environment: environment, fileRoot: fileRoot, bootstrapToken: bootstrapToken}
-	s.bootstrapDigest = sha256Sum(bootstrapToken)
-	s.bootstrapExpiry = time.Now().UTC().Add(15 * time.Minute)
-	return s, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootstrapTokenDigest = sha256.Sum256([]byte(token))
 }
-
-func (s *Postgres) Close() { s.pool.Close() }
-func (s *Postgres) Environment() string { return s.environment }
-func sha256Sum(v string) [32]byte { return sha256.Sum256([]byte(v)) }
 ```
 
-（注意：`postgres.go` 原用 `database/sql` + `lib/pq`，本步彻底移除。）
+**注意**：现有 `NewPostgres(ctx, dsn, environment, agentToken, fileRoot)` 的签名保持不变，`agentToken` 继续写入 `s.agentToken`（sha256 摘要）。不要引入 pgxpool。
 
-- [ ] **Step 4: 实现 postgres_identity.go（核心方法）**
+- [ ] **Step 4: 补全 postgres_identity.go（membership + reset + bootstrap 校验）**
 
-实现 `SetupAdmin`、`Login`、`Session`、`Logout`、`ValidateCSRF`、`CreateUser`、`UpdateUser`、`Users`、`UserByID`、`ServerMembership`、`PutServerMembership`、`DeleteServerMembership`。签名对齐 `httpapi.ControlPlane` 现有方法（去掉 `actor domain.User` 处按需保留）。
+在现有 `SetupAdmin` 开头（email 校验前）插入 bootstrap 校验：
 
-关键实现要点：
-- `Login`：按 normalized_email 查 `password_hash`，`identity.VerifyPassword`，签发随机 token，存 SHA-256 digest 到 `sessions`，返回 `domain.SessionView`
-- `Session`：按 token digest 查 sessions join users，校验 `revoked_at IS NULL AND expires_at > now()`
-- `SetupAdmin`：校验 bootstrap digest 且未过期，事务内插入首个 `platform_admin`（复用 migrations 里的 roles）
-- membership 写 `server_members`（`permissions text[]`）
-
-- [ ] **Step 5: 运行测试转绿**
-
-```powershell
-& "C:\Users\andi\sdk\go1.26.5\bin\go.exe" test ./internal/store/ -run TestPostgresIdentityLifecycle -v
+```go
+func (s *Postgres) SetupAdmin(input domain.SetupAdminInput) (domain.User, error) {
+	if err := s.verifyBootstrapToken(input.BootstrapToken); err != nil {
+		return domain.User{}, err
+	}
+	// ... 原有校验与事务逻辑保持不变 ...
+}
 ```
 
-Expected: PASS（真实 PG 下）。
+新增私有方法（放同一文件底部，需 import `crypto/sha256`）：
 
-- [ ] **Step 6: 保持 memory 测试不回归**
+```go
+func (s *Postgres) verifyBootstrapToken(token string) error {
+	s.mu.RLock()
+	digest := s.bootstrapTokenDigest
+	s.mu.RUnlock()
+	if digest == [32]byte{} {
+		return nil // 未配置 bootstrap（开发模式），跳过校验
+	}
+	if sha256.Sum256([]byte(token)) != digest {
+		return domain.NewProblem("SETUP_TOKEN_INVALID", "无效或已过期的初始化令牌", false)
+	}
+	return nil
+}
+```
+
+其余新增方法签名（无 ctx，与 ControlPlane 接口一致）：
+
+```go
+func (s *Postgres) UpdateUser(userID string, input domain.UpdateUserInput, actor domain.User) (domain.User, error)
+func (s *Postgres) IssuePasswordResetToken(userID string, actor domain.User) (domain.PasswordResetToken, error)
+func (s *Postgres) ResetPassword(token string, password string) error
+func (s *Postgres) ServerMembership(serverID string, userID string) (domain.ServerMembership, error)
+func (s *Postgres) PutServerMembership(serverID string, userID string, permissions []string, actor domain.User) (domain.ServerMembership, error)
+func (s *Postgres) DeleteServerMembership(serverID string, userID string, actor domain.User) error
+func (s *Postgres) ValidateAgentToken(token string) bool
+```
+
+实现要点：
+- `IssuePasswordResetToken`：校验 actor 是 platform_admin（复用 `requirePlatformAdmin`，注意它接收 `*sql.Tx`，若走非事务路径需改造成接收 `*sql.DB` 的重载）；生成随机 token（复用 `randomToken()`），只存 SHA-256 摘要到新表 `password_reset_tokens`；返回 `domain.PasswordResetToken{Token: rawToken, ExpiresAt: now+15m}`
+- `ResetPassword`：按摘要查未消费且未过期的令牌 → 事务内更新 password_hash、标记 consumed、撤销该用户所有活跃 session（`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`）
+- `ServerMembership`：查 `server_members`，无记录返回 `domain.NewProblem("NOT_FOUND", "该用户不是服务器成员", false)`
+- `PutServerMembership`：actor 校验 platform_admin → upsert permissions（`INSERT ... ON CONFLICT (server_id, user_id) DO UPDATE SET permissions = EXCLUDED.permissions, updated_at = now()`）
+- `ValidateAgentToken`：常量时间比较 `sha256.Sum256([]byte(token)) == s.agentToken`
+
+参考 Memory 对应实现 `internal/store/identity.go` 与 `internal/store/memory.go` 的语义保持一致（状态码、错误码）。
+
+- [ ] **Step 5: 实现 migration 000004**
+
+Create: `migrations/000004_password_reset.up.sql`：
+
+```sql
+BEGIN;
+CREATE TABLE password_reset_tokens (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_digest bytea NOT NULL UNIQUE CHECK (octet_length(token_digest) = 32),
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX password_reset_tokens_user_idx ON password_reset_tokens (user_id) WHERE consumed_at IS NULL;
+COMMIT;
+```
+
+Create: `migrations/000004_password_reset.down.sql`：
+
+```sql
+BEGIN;
+DROP TABLE IF EXISTS password_reset_tokens;
+COMMIT;
+```
+
+（可选但推荐：在 `internal/migrations/postgres_integration_test.go` 中按现有模式追加 000004 up/down 断言。）
+
+- [ ] **Step 6: 测试转绿 + memory 回归**
 
 ```powershell
+& "C:\Users\andi\sdk\go1.26.5\bin\go.exe" test ./internal/store/ -run TestPostgresMembershipAndReset -v
 & "C:\Users\andi\sdk\go1.26.5\bin\go.exe" test ./internal/store/ -run TestMemory -count=1
+& "C:\Users\andi\sdk\go1.26.5\bin\go.exe" test ./internal/store/ -run TestPostgres -count=1
 ```
 
-Expected: PASS。
+Expected: 均 PASS（真实 PG 下）。
 
 - [ ] **Step 7: Commit**
 
 ```powershell
-git add internal/store/postgres.go internal/store/postgres_identity.go internal/store/postgres_identity_test.go
-git commit -m "feat(store): PostgreSQL identity persistence (users, sessions, membership)"
+git add internal/store/postgres.go internal/store/postgres_identity.go internal/store/postgres_identity_ext_test.go migrations/000004_password_reset.up.sql migrations/000004_password_reset.down.sql
+git commit -m "feat(store): PostgreSQL membership, reset tokens, bootstrap validation"
 ```
 
 ---
@@ -256,7 +320,8 @@ git commit -m "feat(store): PostgreSQL identity persistence (users, sessions, me
 ```go
 func TestPostgresTaskClaimAndComplete(t *testing.T) {
 	s := testPostgres(t)
-	admin, err := s.SetupAdmin(domain.SetupAdminInput{Email: "admin2@test.local", DisplayName: "Admin", Password: "correct-horse-battery", BootstrapToken: s.bootstrapToken})
+	s.SetBootstrapToken("bootstrap-token-12345678901234567890123456789012")
+	admin, err := s.SetupAdmin(domain.SetupAdminInput{Email: "admin2@test.local", DisplayName: "Admin", Password: "correct-horse-battery", BootstrapToken: "bootstrap-token-12345678901234567890123456789012"})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
