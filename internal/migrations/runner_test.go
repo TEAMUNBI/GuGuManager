@@ -27,7 +27,14 @@ func testPool(t *testing.T) *sql.DB {
 	if !strings.HasSuffix(databaseName, "_test") {
 		t.Fatalf("refusing to run migrations against database %q: test database name must end in _test", databaseName)
 	}
-	db, err := sql.Open("postgres", dsn)
+	// lib/pq defaults to sslmode=require while the local test instance has no
+	// SSL configured; fall back to plaintext unless the DSN already pins a mode.
+	if parsed.Query().Get("sslmode") == "" {
+		query := parsed.Query()
+		query.Set("sslmode", "disable")
+		parsed.RawQuery = query.Encode()
+	}
+	db, err := sql.Open("postgres", parsed.String())
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

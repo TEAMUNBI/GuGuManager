@@ -198,6 +198,11 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	if succeeded {
 		switch taskType {
 		case "backup":
+			// 只有 Agent 回传了结果（checksum/size/location）才算成功创建；
+			// 空 resultJSON 表示没有有效归档，备份保持 creating 供重试/处置。
+			if len(resultJSON) == 0 {
+				break
+			}
 			var payload struct {
 				BackupID string `json:"backupId"`
 			}
@@ -209,11 +214,21 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			}
 			_ = json.Unmarshal(resultJSON, &res)
 			if payload.BackupID != "" {
+				// content_digest 有 CHECK 约束（sha256: + 64 位 hex 或 NULL），
+				// 未回传校验值时落 NULL 而非空串。
+				var contentDigest any
+				if res.Checksum != "" {
+					contentDigest = res.Checksum
+				}
+				var sizeBytes any
+				if res.SizeBytes > 0 {
+					sizeBytes = res.SizeBytes
+				}
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE backups
-					SET status = 'ready', checksum = $2, size_bytes = $3, storage_location = $4, completed_at = now(), updated_at = now()
+					SET status = 'ready', content_digest = $2, size_bytes = $3, storage_location = $4, completed_at = now()
 					WHERE id = $1 AND server_id = $5
-				`, payload.BackupID, res.Checksum, res.SizeBytes, res.StorageLocation, serverID); err != nil {
+				`, payload.BackupID, contentDigest, sizeBytes, res.StorageLocation, serverID); err != nil {
 					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份元数据", true)
 				}
 			}
@@ -224,7 +239,7 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
 			if payload.BackupID != "" {
 				if _, err := tx.ExecContext(ctx, `
-					UPDATE backups SET status = 'ready', updated_at = now()
+					UPDATE backups SET status = 'ready'
 					WHERE id = $1 AND server_id = $2
 				`, payload.BackupID, serverID); err != nil {
 					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
@@ -237,7 +252,7 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
 			if payload.BackupID != "" {
 				if _, err := tx.ExecContext(ctx, `
-					UPDATE backups SET status = 'deleted', updated_at = now()
+					UPDATE backups SET status = 'deleted'
 					WHERE id = $1 AND server_id = $2
 				`, payload.BackupID, serverID); err != nil {
 					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
