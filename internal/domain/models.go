@@ -267,3 +267,15 @@ type CreateServerInput struct {
 	MemoryMB         int    `json:"memoryMb"`
 	DiskGB           int    `json:"diskGb"`
 }
+
+// ServerObserved 是 Agent 对某个服务器实际状态的回报。
+type ServerObserved struct {
+	ServerID           string
+	ObservedGeneration int64
+	ObservedPower      string // unknown|stopped|starting|running|stopping
+	HealthCondition    string // unknown|healthy|unhealthy
+	RuntimeID          string
+	BundleDigest       string
+	Detail             string
+	ObservedAt         time.Time
+}
