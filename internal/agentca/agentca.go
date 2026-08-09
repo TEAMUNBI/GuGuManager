@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -80,6 +81,31 @@ func (c *CA) IssueAgentCertificateWithKey(nodeID string, ttl time.Duration) ([]b
 	return certPEM, keyPEM, nil
 }
 
+// IssueAgentCertificateFromCSR 基于 Agent 提交的 PKCS#10 CSR 签发 client auth
+// 叶证书（CN 固定为 nodeID）。CSR 只承担公钥传输：其 Subject CN 只是节点标签，
+// 注册令牌已完成身份认证，因此不校验 CSR CN。签发结果使用 CSR 中的公钥，
+// 保证 Agent 持有的私钥与证书匹配，是真实 mTLS 注册与轮换的必经路径。
+func (c *CA) IssueAgentCertificateFromCSR(csrPEM []byte, nodeID string, ttl time.Duration) ([]byte, error) {
+	csr, err := parseCSR(csrPEM)
+	if err != nil {
+		return nil, err
+	}
+	return c.signLeaf(pkix.Name{CommonName: nodeID}, x509.ExtKeyUsageClientAuth, ttl, csr.PublicKey)
+}
+
+// parseCSR 解析 PEM CSR，要求恰好包含一个 CERTIFICATE REQUEST 块。
+func parseCSR(csrPEM []byte) (*x509.CertificateRequest, error) {
+	block, _ := pem.Decode(csrPEM)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, errors.New("no CERTIFICATE REQUEST block in csr")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate request: %w", err)
+	}
+	return csr, nil
+}
+
 // IssueServerCertificate 生成 RSA 2048 密钥并签发 CN="control-plane" 的 server
 // auth 证书，返回证书与私钥 PEM，供 Control Plane 的 gRPC TLS 监听使用。
 func (c *CA) IssueServerCertificate(ttl time.Duration) ([]byte, []byte, error) {
@@ -95,9 +121,28 @@ func (c *CA) IssueServerCertificate(ttl time.Duration) ([]byte, []byte, error) {
 	return certPEM, keyPEM, nil
 }
 
+// IssueServerCertificateWithSAN 签发 server auth 证书，额外携带指定的 IP SAN，
+// 使 Agent 可用 IP 地址（而非仅 DNS 名）校验证书链。
+func (c *CA) IssueServerCertificateWithSAN(ttl time.Duration, ips []net.IP) ([]byte, []byte, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate server key: %w", err)
+	}
+	certPEM, err := c.signLeafWithIPs(pkix.Name{CommonName: "control-plane"}, x509.ExtKeyUsageServerAuth, ttl, &key.PublicKey, ips)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return certPEM, keyPEM, nil
+}
+
 // signLeaf 用根私钥签发一张由本 CA 签发的叶证书。
 // 证书同时携带 CN 与对应的 DNS SAN，满足现代 x509 校验（Go 1.26 拒绝仅有 CN 的证书）。
 func (c *CA) signLeaf(subject pkix.Name, extKeyUsage x509.ExtKeyUsage, ttl time.Duration, pub any) ([]byte, error) {
+	return c.signLeafWithIPs(subject, extKeyUsage, ttl, pub, nil)
+}
+
+func (c *CA) signLeafWithIPs(subject pkix.Name, extKeyUsage x509.ExtKeyUsage, ttl time.Duration, pub any, ips []net.IP) ([]byte, error) {
 	serial, err := randomSerial()
 	if err != nil {
 		return nil, err
@@ -107,6 +152,7 @@ func (c *CA) signLeaf(subject pkix.Name, extKeyUsage x509.ExtKeyUsage, ttl time.
 		SerialNumber: serial,
 		Subject:      subject,
 		DNSNames:     []string{subject.CommonName},
+		IPAddresses:  ips,
 		NotBefore:    now.Add(-5 * time.Minute),
 		NotAfter:     now.Add(ttl),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

@@ -152,11 +152,18 @@ func (s *Server) handleServerObserved(ctx context.Context, nodeID string, obs *a
 }
 
 // handleCertificateRotation 应 Agent 的轮换请求签发新证书并回发。
+// 与 Enroll 一致：优先基于轮换 CSR 的公钥签发，保证 Agent 新私钥可配对。
 func (s *Server) handleCertificateRotation(ctx context.Context, nodeID string, csr *agentv1.CertificateSigningRequest, send func(*agentv1.ConnectResponse) error) {
 	if csr == nil {
 		return
 	}
-	certPEM, err := s.ca.IssueAgentCertificate(nodeID, enrollCertTTL)
+	var certPEM []byte
+	var err error
+	if raw := csr.GetCertificateSigningRequest(); len(raw) > 0 {
+		certPEM, err = s.ca.IssueAgentCertificateFromCSR(raw, nodeID, enrollCertTTL)
+	} else {
+		certPEM, err = s.ca.IssueAgentCertificate(nodeID, enrollCertTTL)
+	}
 	if err != nil {
 		s.log.Warn("rotate certificate", "node", nodeID, "error", err)
 		return

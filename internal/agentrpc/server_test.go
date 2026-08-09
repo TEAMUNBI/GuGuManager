@@ -3,8 +3,12 @@ package agentrpc
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -246,11 +250,24 @@ func TestEnrollAndConnect(t *testing.T) {
 		t.Fatalf("root ca pem: %v", err)
 	}
 
-	// 1. Enroll：正确 token → 返回 node id + 可校验的证书链 + 根证书
+	// 1. Enroll：正确 token + CSR → 返回 node id + 可校验的证书链 + 根证书
+	//    （证书必须使用 CSR 公钥，保证 Agent 私钥可配对——真实 mTLS 路径）
+	agentKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate agent key: %v", err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "node-1"},
+	}, agentKey)
+	if err != nil {
+		t.Fatalf("create csr: %v", err)
+	}
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 	resp, err := client.Enroll(ctx, &agentv1.EnrollRequest{
-		RegistrationToken: "reg-token",
-		NodeName:          "node-1",
-		AgentVersion:      "0.1.0",
+		RegistrationToken:         "reg-token",
+		CertificateSigningRequest: csrPEM,
+		NodeName:                  "node-1",
+		AgentVersion:              "0.1.0",
 		Capabilities: []*agentv1.Capability{
 			{Name: "runtime.docker", Version: "1"},
 		},
@@ -266,6 +283,14 @@ func TestEnrollAndConnect(t *testing.T) {
 	}
 	if err := ca.VerifyPeerCertificate(resp.CertificateChain, resp.NodeId); err != nil {
 		t.Fatalf("enrolled certificate not valid for node %q: %v", resp.NodeId, err)
+	}
+	issuedBlock, _ := pem.Decode(resp.CertificateChain)
+	issuedCert, err := x509.ParseCertificate(issuedBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse issued certificate: %v", err)
+	}
+	if !issuedCert.PublicKey.(*rsa.PublicKey).Equal(&agentKey.PublicKey) {
+		t.Fatal("enrolled certificate public key does not match csr public key")
 	}
 	if !bytes.Equal(resp.CaCertificate, rootPEM) {
 		t.Fatal("ca certificate mismatch")

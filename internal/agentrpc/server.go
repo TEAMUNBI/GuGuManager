@@ -130,10 +130,21 @@ func (s *Server) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agent
 		return nil, status.Error(codes.Internal, "failed to register node")
 	}
 
-	certPEM, err := s.ca.IssueAgentCertificate(nodeID, enrollCertTTL)
-	if err != nil {
-		s.log.Error("enroll: issue certificate", "node", nodeID, "error", err)
-		return nil, status.Error(codes.Internal, "failed to issue certificate")
+	// 优先基于 Agent 提交的 CSR 公钥签发证书，保证其私钥可配对；
+	// 未携带 CSR 时回退到服务器生成的密钥（测试与工具路径）。
+	var certPEM []byte
+	if csr := req.GetCertificateSigningRequest(); len(csr) > 0 {
+		certPEM, err = s.ca.IssueAgentCertificateFromCSR(csr, nodeID, enrollCertTTL)
+		if err != nil {
+			s.log.Error("enroll: issue certificate from csr", "node", nodeID, "error", err)
+			return nil, status.Error(codes.InvalidArgument, "invalid certificate signing request")
+		}
+	} else {
+		certPEM, err = s.ca.IssueAgentCertificate(nodeID, enrollCertTTL)
+		if err != nil {
+			s.log.Error("enroll: issue certificate", "node", nodeID, "error", err)
+			return nil, status.Error(codes.Internal, "failed to issue certificate")
+		}
 	}
 	rootPEM, err := s.ca.RootCAPEM()
 	if err != nil {
@@ -153,7 +164,7 @@ func (s *Server) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agent
 // ListenAndServe 启动 mTLS gRPC 服务器。tlsCert/tlsKey 为 nil 时自动用 CA
 // 签发一张 CN="control-plane" 的 server auth 证书。ctx 取消时优雅停机。
 func (s *Server) ListenAndServe(ctx context.Context, addr string, tlsCert []byte, tlsKey []byte) error {
-	tlsConfig, err := s.tlsConfig(tlsCert, tlsKey)
+	tlsConfig, err := s.tlsConfig(addr, tlsCert, tlsKey)
 	if err != nil {
 		return err
 	}
@@ -190,10 +201,11 @@ func (s *Server) newGRPCServer(tlsConfig *tls.Config) *grpc.Server {
 
 // tlsConfig 组装 mTLS 配置：服务端证书（缺省自动签发）+ 要求并校验客户端证书
 // （客户端证书必须由本 CA 签发，验证链与 client auth 用途）。
-func (s *Server) tlsConfig(certPEM, keyPEM []byte) (*tls.Config, error) {
+func (s *Server) tlsConfig(addr string, certPEM, keyPEM []byte) (*tls.Config, error) {
 	if len(certPEM) == 0 {
 		var err error
-		certPEM, keyPEM, err = s.ca.IssueServerCertificate(serverCertTTL)
+		// 服务器证书携带监听地址的 IP SAN，使 Agent 用 IP 而非仅 DNS 名校验证书。
+		certPEM, keyPEM, err = s.ca.IssueServerCertificateWithSAN(serverCertTTL, listenerIPs(addr))
 		if err != nil {
 			return nil, fmt.Errorf("issue server certificate: %w", err)
 		}
@@ -212,9 +224,12 @@ func (s *Server) tlsConfig(certPEM, keyPEM []byte) (*tls.Config, error) {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{pair},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
-		MinVersion:   tls.VersionTLS12,
+		// TLS 层请求但不强制客户端证书：首次 Enroll 时 Agent 尚无证书
+		// （Enroll 正是为签发证书），必须允许匿名 TLS 连接；
+		// Connect 双向流在应用层用 verifyPeerNode 强制 mTLS 校验。
+		ClientAuth: tls.VerifyClientCertIfGiven,
+		ClientCAs:  pool,
+		MinVersion: tls.VersionTLS12,
 	}, nil
 }
 
@@ -240,4 +255,18 @@ func (s *Server) verifyPeerNode(ctx context.Context, nodeID string) error {
 
 func pemEncodeCert(raw []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: raw})
+}
+
+// listenerIPs 从 host:port 监听地址提取 IP（host 为空或非 IP 时返回 nil，
+// 例如 host 为域名或 0.0.0.0 时交给 DNS SAN / 证书默认行为）。
+func listenerIPs(addr string) []net.IP {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	return []net.IP{ip}
 }

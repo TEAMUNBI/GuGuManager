@@ -12,6 +12,8 @@ coverage.out
 
 # Local runtime data
 var/development/
+var/e2e/
+var/production/
 
 # Superpowers local dev-server runtime artifacts
 .superpowers/**/.server.log

@@ -381,6 +381,8 @@ func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayServi
 }
 
 // heartbeatLoop 按 Welcome 指定间隔发送 Heartbeat，直到会话结束或 ctx 取消。
+// 心跳携带主机资源快照（内存/磁盘总量与可用量），供 Control Plane 落库并
+// 参与节点容量校验；探测失败时相关字段为零值。
 func (a *agent) heartbeatLoop(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, interval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -391,7 +393,15 @@ func (a *agent) heartbeatLoop(ctx context.Context, stream agentv1.AgentGatewaySe
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hb := &agentv1.Heartbeat{ObservedAt: timestamppb.Now(), AgentVersion: a.cfg.AgentVersion}
+			stats := collectHostStats(a.cfg.DataRoot)
+			hb := &agentv1.Heartbeat{
+				ObservedAt:           timestamppb.Now(),
+				AgentVersion:         a.cfg.AgentVersion,
+				MemoryTotalBytes:     uint64(stats.MemoryTotalBytes),
+				MemoryAvailableBytes: uint64(stats.MemoryAvailableBytes),
+				DiskTotalBytes:       uint64(stats.DiskTotalBytes),
+				DiskAvailableBytes:   uint64(stats.DiskAvailableBytes),
+			}
 			if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Heartbeat{Heartbeat: hb}}); err != nil {
 				return
 			}
