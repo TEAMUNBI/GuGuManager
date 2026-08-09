@@ -10,6 +10,7 @@ import (
 	"github.com/gugumanager/gugumanager/internal/domain"
 	"github.com/gugumanager/gugumanager/internal/id"
 	"github.com/gugumanager/gugumanager/internal/identity"
+	"github.com/lib/pq"
 )
 
 const sessionTTL = 12 * time.Hour
@@ -32,7 +33,7 @@ func (s *Postgres) Login(email string, password string) (domain.SessionView, str
 		LEFT JOIN roles r ON ur.role_id = r.id
 		WHERE u.normalized_email = $1
 		GROUP BY u.id, u.password_hash, u.display_name, u.status
-	`, normalizedEmail).Scan(&userID, &passwordHash, &displayName, &status, &roles)
+	`, normalizedEmail).Scan(&userID, &passwordHash, &displayName, &status, pq.Array(&roles))
 
 	if err == sql.ErrNoRows || status != "active" {
 		auditLoginFailure(ctx, s.db, "auth.login", "Unknown actor")
@@ -102,7 +103,7 @@ func (s *Postgres) Session(token string) (domain.SessionView, error) {
 		LEFT JOIN roles r ON ur.role_id = r.id
 		WHERE s.token_digest = $1 AND s.revoked_at IS NULL
 		GROUP BY s.user_id, s.csrf_digest, s.expires_at, u.email, u.display_name, u.status
-	`, digest[:]).Scan(&userID, &csrfToken, &expiresAt, &email, &displayName, &status, &roles)
+	`, digest[:]).Scan(&userID, &csrfToken, &expiresAt, &email, &displayName, &status, pq.Array(&roles))
 
 	if err == sql.ErrNoRows || status != "active" || time.Now().UTC().After(expiresAt) {
 		// Cleanup expired session

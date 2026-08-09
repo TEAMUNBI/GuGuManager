@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -13,12 +14,13 @@ import (
 // Postgres implements the Store interface with PostgreSQL persistence.
 // It replaces the in-memory development adapter for production deployments.
 type Postgres struct {
-	db              *sql.DB
-	mu              sync.RWMutex
-	environment     string
-	agentToken      [32]byte
-	fileRoot        string
-	fileMutationGates sync.Map
+	db                   *sql.DB
+	mu                   sync.RWMutex
+	environment          string
+	agentToken           [32]byte
+	bootstrapTokenDigest [32]byte
+	fileRoot             string
+	fileMutationGates    sync.Map
 }
 
 // NewPostgres creates a new PostgreSQL-backed store.
@@ -41,8 +43,7 @@ func NewPostgres(ctx context.Context, dsn string, environment string, agentToken
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	var agentTokenBytes [32]byte
-	copy(agentTokenBytes[:], agentToken)
+	var agentTokenBytes [32]byte = sha256.Sum256([]byte(agentToken))
 
 	store := &Postgres{
 		db:          db,
@@ -52,6 +53,17 @@ func NewPostgres(ctx context.Context, dsn string, environment string, agentToken
 	}
 
 	return store, nil
+}
+
+// SetBootstrapToken 记录 bootstrap token 的 SHA-256 摘要，供 SetupAdmin 校验。
+// 仅用于首次初始化；生产从 GUGU_BOOTSTRAP_TOKEN_FILE 读取后调用。
+func (s *Postgres) SetBootstrapToken(token string) {
+	if token == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootstrapTokenDigest = sha256.Sum256([]byte(token))
 }
 
 // Close closes the database connection pool.
