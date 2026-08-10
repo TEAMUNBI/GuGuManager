@@ -15,9 +15,14 @@ import (
 
 func testPool(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("GUGU_TEST_DATABASE_URL")
+	// migrations 集成测试会 destructive 地 up/down_all，必须与 store 测试隔离。
+	// 优先使用 GUGU_MIGRATE_TEST_DATABASE_URL，未设置时回退 GUGU_TEST_DATABASE_URL。
+	dsn := os.Getenv("GUGU_MIGRATE_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("GUGU_TEST_DATABASE_URL required")
+		dsn = os.Getenv("GUGU_TEST_DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("GUGU_MIGRATE_TEST_DATABASE_URL or GUGU_TEST_DATABASE_URL required")
 	}
 	parsed, err := url.Parse(dsn)
 	if err != nil {
@@ -73,6 +78,9 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		"server_tasks",
 		"password_reset_tokens",
 		"audit_events",
+		"server_metrics",
+		"server_metric_history",
+		"console_logs",
 	} {
 		assertPublicTableExists(t, db, table, true)
 	}
@@ -80,8 +88,8 @@ func TestRunMigrationsUpDown(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if applied != 5 {
-		t.Fatalf("schema_migrations rows = %d, want 5", applied)
+	if applied != 6 {
+		t.Fatalf("schema_migrations rows = %d, want 6", applied)
 	}
 
 	// Idempotency: a repeated up must be a no-op without error.

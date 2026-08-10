@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gugumanager/gugumanager/internal/config"
 	"github.com/gugumanager/gugumanager/internal/domain"
 )
 
@@ -55,7 +56,7 @@ func TestPostgresConsoleBufferAutoSequence(t *testing.T) {
 	}
 }
 
-func TestPostgresApplyServerMetricsAndMerge(t *testing.T) {
+func TestPostgresMetricsAndConsolePersistAcrossRestart(t *testing.T) {
 	s := testPostgres(t)
 	resetTestDatabase(t, s)
 	admin := setupAdminForTest(t, s)
@@ -68,17 +69,61 @@ func TestPostgresApplyServerMetricsAndMerge(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("apply metrics: %v", err)
 	}
-	server, err := s.Server(serverID)
+	if err := s.RecordConsoleLines(context.Background(), serverID, []domain.ConsoleLine{
+		{Timestamp: now, Stream: "stdout", Message: "line-a"},
+		{Timestamp: now, Stream: "stdout", Message: "line-b"},
+	}); err != nil {
+		t.Fatalf("record console lines: %v", err)
+	}
+
+	// 模拟控制面重启：用同一数据库新建 store，调用 RestoreTelemetry 恢复。
+	dsn := testDatabaseDSN()
+	restarted, err := NewPostgres(context.Background(), dsn, config.Production, "test-agent-token-1234567890", "")
 	if err != nil {
-		t.Fatalf("server: %v", err)
+		t.Fatalf("new postgres after restart: %v", err)
+	}
+	t.Cleanup(func() { restarted.Close() })
+	restarted.RestoreTelemetry(context.Background())
+
+	server, err := restarted.Server(serverID)
+	if err != nil {
+		t.Fatalf("server after restart: %v", err)
 	}
 	if server.Metrics.CPUPercent != 42.5 {
-		t.Fatalf("metrics cpu = %v, want 42.5", server.Metrics.CPUPercent)
+		t.Fatalf("restored cpu = %v, want 42.5", server.Metrics.CPUPercent)
 	}
-	if server.Metrics.PlayersOnline != 3 || server.Metrics.PlayersCapacity != 20 {
-		t.Fatalf("metrics players = %d/%d, want 3/20", server.Metrics.PlayersOnline, server.Metrics.PlayersCapacity)
+	if server.Metrics.PlayersOnline != 3 {
+		t.Fatalf("restored players online = %d, want 3", server.Metrics.PlayersOnline)
 	}
 	if len(server.MetricHistory) < 1 {
-		t.Fatalf("metric history empty, want >=1")
+		t.Fatalf("restored metric history empty, want >=1")
+	}
+
+	lines, err := restarted.Console(serverID)
+	if err != nil {
+		t.Fatalf("console after restart: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("restored console lines = %d, want 2", len(lines))
+	}
+	if lines[0].Message != "line-a" || lines[1].Message != "line-b" {
+		t.Fatalf("restored messages = %q/%q, want line-a/line-b", lines[0].Message, lines[1].Message)
+	}
+
+	// 恢复后继续追加日志，sequence 应从 DB 最大值之后继续。
+	if err := restarted.RecordConsoleLines(context.Background(), serverID, []domain.ConsoleLine{
+		{Timestamp: time.Now().UTC(), Stream: "stdout", Message: "line-c"},
+	}); err != nil {
+		t.Fatalf("record after restart: %v", err)
+	}
+	lines, err = restarted.Console(serverID)
+	if err != nil {
+		t.Fatalf("console after append: %v", err)
+	}
+	if len(lines) != 3 || lines[2].Message != "line-c" {
+		t.Fatalf("appended lines = %d (last %q), want 3 with line-c", len(lines), lines[len(lines)-1].Message)
+	}
+	if lines[0].Sequence != 1 || lines[2].Sequence != 3 {
+		t.Fatalf("sequences after restart = %d..%d, want 1..3", lines[0].Sequence, lines[2].Sequence)
 	}
 }

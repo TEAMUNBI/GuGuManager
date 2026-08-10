@@ -2,13 +2,163 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
+	serverfiles "github.com/gugumanager/gugumanager/internal/files"
 	"github.com/gugumanager/gugumanager/internal/httpapi"
 )
+
+// localFileDispatcher 是测试用 FileDispatcher，在本地文件系统上执行操作，
+// 模拟 Agent 在容器 /data 目录内的行为。仅供集成测试使用。
+type localFileDispatcher struct {
+	fileRoot string
+}
+
+func (d *localFileDispatcher) fsFor(serverID string) (*serverfiles.ServerFS, error) {
+	root := filepath.Join(d.fileRoot, serverID)
+	// 模拟 Agent 在容器 /data 目录内的行为：目录始终存在，首次访问时创建。
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	return serverfiles.NewServerFS(root, serverfiles.Limits{
+		MaxReadBytes:  10 << 20,
+		MaxWriteBytes: 10 << 20,
+	})
+}
+
+func localFileErrorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case strings.Contains(err.Error(), "escape") || strings.Contains(err.Error(), "unsafe"):
+		return "PATH_ESCAPE"
+	case strings.Contains(err.Error(), "size limit"):
+		return "SIZE_LIMIT"
+	case strings.Contains(err.Error(), "not exist"):
+		return "NOT_FOUND"
+	case strings.Contains(err.Error(), "permission"):
+		return "FORBIDDEN"
+	default:
+		return "VALIDATION_FAILED"
+	}
+}
+
+func (d *localFileDispatcher) ListFiles(_ context.Context, _, serverID, path string) ([]domain.FileEntry, error) {
+	filesys, err := d.fsFor(serverID)
+	if err != nil {
+		return nil, &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	entries, err := filesys.List(path)
+	if err != nil {
+		return nil, &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	result := make([]domain.FileEntry, 0, len(entries))
+	for _, e := range entries {
+		kind := "file"
+		if e.Directory {
+			kind = "directory"
+		}
+		result = append(result, domain.FileEntry{
+			Name: e.Name, Path: e.Path, Kind: kind,
+			SizeBytes: e.SizeBytes, ModifiedAt: e.ModifiedAt,
+		})
+	}
+	return result, nil
+}
+
+func (d *localFileDispatcher) ReadFile(_ context.Context, _, serverID, path string) (domain.FileContent, error) {
+	filesys, err := d.fsFor(serverID)
+	if err != nil {
+		return domain.FileContent{}, &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	content, err := filesys.ReadFile(path)
+	if err != nil {
+		return domain.FileContent{}, &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	entry, err := filesys.Stat(path)
+	if err != nil {
+		return domain.FileContent{}, &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	encoded := string(content)
+	encoding := "utf-8"
+	if !utf8.Valid(content) {
+		encoded = base64.RawStdEncoding.EncodeToString(content)
+		encoding = "base64"
+	}
+	return domain.FileContent{
+		Path: entry.Path, Content: encoded, Encoding: encoding,
+		SizeBytes: entry.SizeBytes, ModifiedAt: entry.ModifiedAt,
+	}, nil
+}
+
+func (d *localFileDispatcher) WriteFile(_ context.Context, _, serverID, path string, content []byte, _ bool) error {
+	filesys, err := d.fsFor(serverID)
+	if err != nil {
+		return &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	if err := filesys.WriteFile(path, content); err != nil {
+		return &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	return nil
+}
+
+func (d *localFileDispatcher) MakeDirectory(_ context.Context, _, serverID, path string) error {
+	filesys, err := d.fsFor(serverID)
+	if err != nil {
+		return &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	if err := filesys.Mkdir(path); err != nil {
+		return &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	return nil
+}
+
+func (d *localFileDispatcher) MoveFile(_ context.Context, _, serverID, source, destination string, replace bool) error {
+	filesys, err := d.fsFor(serverID)
+	if err != nil {
+		return &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	if err := filesys.Move(source, destination, replace); err != nil {
+		return &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	return nil
+}
+
+func (d *localFileDispatcher) RemoveFile(_ context.Context, _, serverID, path string, recursive bool) error {
+	filesys, err := d.fsFor(serverID)
+	if err != nil {
+		return &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	if err := filesys.Delete(path, recursive); err != nil {
+		return &AgentFileError{Code: localFileErrorCode(err)}
+	}
+	return nil
+}
+
+// DownloadBackup 读取节点本地备份目录中的归档，模拟 Agent 的回传行为。
+func (d *localFileDispatcher) DownloadBackup(_ context.Context, _, _, backupID string) (domain.BackupContent, error) {
+	archive := filepath.Join(d.fileRoot, "backups", backupID+".tar.gz")
+	content, err := os.ReadFile(archive)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return domain.BackupContent{}, &AgentFileError{Code: "NOT_FOUND"}
+		}
+		return domain.BackupContent{}, &AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	return domain.BackupContent{
+		Content:   []byte(base64.StdEncoding.EncodeToString(content)),
+		Base64:    true,
+		SizeBytes: int64(len(content)),
+		Filename:  backupID + ".tar.gz",
+	}, nil
+}
 
 // Compile-time assertion: *Postgres must satisfy the full ControlPlane
 // interface once postgres_controlplane.go is implemented.
@@ -314,6 +464,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 func TestPostgresControlPlaneFiles(t *testing.T) {
 	s := testPostgres(t)
 	s.fileRoot = t.TempDir()
+	s.SetFileDispatcher(&localFileDispatcher{fileRoot: s.fileRoot})
 	admin, _, serverID := controlPlaneFixture(t, s)
 
 	entries, err := s.Files(serverID, "")

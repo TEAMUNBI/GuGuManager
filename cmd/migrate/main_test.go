@@ -154,8 +154,8 @@ func TestProjectPlanIncludesMembershipPermissionMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build project migration plan: %v", err)
 	}
-	if len(plan) != 5 {
-		t.Fatalf("project migration count = %d, want 5", len(plan))
+	if len(plan) != 6 {
+		t.Fatalf("project migration count = %d, want 6", len(plan))
 	}
 	if plan[2].VersionKey != "000003" || plan[2].Name != "membership_permissions" {
 		t.Fatalf("third migration = %+v, want 000003_membership_permissions", plan[2])
@@ -165,6 +165,9 @@ func TestProjectPlanIncludesMembershipPermissionMigration(t *testing.T) {
 	}
 	if plan[4].VersionKey != "000005" || plan[4].Name != "controlplane_stage1" {
 		t.Fatalf("fifth migration = %+v, want 000005_controlplane_stage1", plan[4])
+	}
+	if plan[5].VersionKey != "000006" || plan[5].Name != "telemetry_persistence" {
+		t.Fatalf("sixth migration = %+v, want 000006_telemetry_persistence", plan[5])
 	}
 }
 
