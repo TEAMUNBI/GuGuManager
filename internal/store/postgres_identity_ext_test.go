@@ -11,14 +11,13 @@ import (
 	"github.com/gugumanager/gugumanager/internal/domain"
 )
 
-func testPostgres(t *testing.T) *Postgres {
-	t.Helper()
+// testDatabaseDSN 返回规范化后的测试数据库 DSN；未配置或不是 _test 库时返回空串。
+// lib/pq 默认 sslmode=require 而本地测试实例无 SSL，未显式指定时回退 plaintext。
+func testDatabaseDSN() string {
 	dsn := os.Getenv("GUGU_TEST_DATABASE_URL")
 	if dsn == "" || !strings.HasSuffix(dsn, "_test") {
-		t.Skip("GUGU_TEST_DATABASE_URL required, must end in _test")
+		return ""
 	}
-	// lib/pq defaults to sslmode=require while the local test instance has no
-	// SSL configured; fall back to plaintext unless the DSN already pins a mode.
 	parsed, err := url.Parse(dsn)
 	if err == nil {
 		query := parsed.Query()
@@ -27,6 +26,15 @@ func testPostgres(t *testing.T) *Postgres {
 			parsed.RawQuery = query.Encode()
 			dsn = parsed.String()
 		}
+	}
+	return dsn
+}
+
+func testPostgres(t *testing.T) *Postgres {
+	t.Helper()
+	dsn := testDatabaseDSN()
+	if dsn == "" {
+		t.Skip("GUGU_TEST_DATABASE_URL required, must end in _test")
 	}
 	s, err := NewPostgres(context.Background(), dsn, config.Production, "test-agent-token-1234567890", "")
 	if err != nil {
@@ -43,7 +51,9 @@ func resetTestDatabase(t *testing.T, s *Postgres) {
 	if _, err := s.db.Exec(`
 		TRUNCATE server_members, servers, nodes, game_bundles, game_definitions,
 		         allocations, server_tasks, backups, startup_values, sessions,
-		         password_reset_tokens, audit_events, user_roles, users CASCADE`); err != nil {
+		         password_reset_tokens, audit_events, user_roles, users,
+		         server_metrics, server_metric_history, console_logs,
+		         outbox_events CASCADE`); err != nil {
 		t.Fatalf("reset test database: %v", err)
 	}
 }

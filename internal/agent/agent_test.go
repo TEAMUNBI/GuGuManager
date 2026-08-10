@@ -389,11 +389,14 @@ func TestAgentEnrollsAndConnects(t *testing.T) {
 		t.Errorf("enroll registration token = %q, want reg-token", lastEnroll.GetRegistrationToken())
 	}
 
-	// 证书与信任根应已持久化
+	// 证书与信任根应已持久化。Enroll 计数在服务端返回响应前递增，
+	// 而写文件发生在 Agent 收到响应之后，这里轮询等待避免时序竞态。
 	for _, p := range []string{filepath.Join(cfg.CertDir, "agent.crt"), filepath.Join(cfg.CertDir, "agent.key"), cfg.TrustRootPath} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("expected credential file %s: %v", p, err)
-		}
+		path := p
+		waitFor(t, "credential file "+path, 5*time.Second, func() bool {
+			_, err := os.Stat(path)
+			return err == nil
+		})
 	}
 
 	// Connect 流：Hello → Welcome → 心跳

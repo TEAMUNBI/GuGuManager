@@ -77,15 +77,24 @@ func main() {
 			logger.Error("initialize agent gRPC server", "error", err)
 			os.Exit(1)
 		}
+		// 将 Agent gRPC 服务器注入 store，文件操作经 Connect 流转发到容器执行。
+		pg.SetFileDispatcher(agentServer)
 		go func() {
 			if serveErr := agentServer.ListenAndServe(agentCtx, agentGRPCAddr(cfg), nil, nil); serveErr != nil {
 				logger.Error("agent gRPC server stopped", "error", serveErr)
 				os.Exit(1)
 			}
 		}()
+		// 多副本后台对账：租约回收器把 Agent 失联/超时未回报的过期任务
+		// 重新入队或按重试上限判失败；Outbox 发布器消费任务生命周期事件。
+		// 两个循环都幂等且基于 SKIP LOCKED，多副本并发运行安全。
+		outboxCtx, stopOutbox := context.WithCancel(context.Background())
+		defer stopOutbox()
+		go reconcileTaskLeases(outboxCtx, pg, logger)
+		go publishOutboxEvents(outboxCtx, pg, logger)
 	}
 
-	api := httpapi.New(service, logger, httpapi.WithCommandDispatcher(agentServer))
+	api := httpapi.New(service, logger, httpapi.WithCommandDispatcher(agentServer), httpapi.WithEnvironment(cfg.Environment))
 	handler := spa(api, cfg.WebRoot, logger)
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 
@@ -173,6 +182,8 @@ func buildProductionService(ctx context.Context, cfg config.Config, logger *slog
 		return nil, fmt.Errorf("initialize postgres store: %w", err)
 	}
 	pg.SetBootstrapToken(bootstrapToken)
+	// 恢复上次运行期间持久化的控制台日志与指标（启动一次）。
+	pg.RestoreTelemetry(ctx)
 	logger.Info("production service ready", "file_root", fileRoot, "adapter", "postgres")
 	return pg, nil
 }
@@ -286,6 +297,43 @@ func reconcileNodeLiveness(ctx context.Context, reconciler interface{ ReconcileN
 			return
 		case now := <-ticker.C:
 			reconciler.ReconcileNodeLiveness(now.UTC())
+		}
+	}
+}
+
+// reconcileTaskLeases 周期回收过期任务租约（多副本恢复）：Agent 失联或
+// 超时未回报的任务重新入队等待重试，重试次数耗尽的任务判失败。
+func reconcileTaskLeases(ctx context.Context, pg *store.Postgres, logger *slog.Logger) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			pg.ReconcileTaskLeases(now.UTC())
+		}
+	}
+}
+
+// publishOutboxEvents 周期消费 outbox_events 中未发布的任务事件并标记
+// published_at，防止未发布积压无限增长；SKIP LOCKED 保证多副本只消费一次。
+func publishOutboxEvents(ctx context.Context, pg *store.Postgres, logger *slog.Logger) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			published, err := pg.PublishOutboxEvents(ctx, 50)
+			if err != nil {
+				logger.Warn("publish outbox events", "error", err)
+				continue
+			}
+			if published > 0 {
+				logger.Debug("outbox events published", "count", published)
+			}
 		}
 	}
 }

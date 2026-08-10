@@ -478,6 +478,20 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法创建服务器任务", true)
 	}
 
+	// 服务器创建（provision 入队）与 outbox 事件同事务提交。
+	if err := s.recordTaskOutboxEvent(ctx, tx, "task.created", taskEventPayload{
+		OperationID: taskID,
+		ServerID:    serverID,
+		NodeID:      input.NodeID,
+		TaskType:    "provision",
+		Generation:  1,
+		Attempt:     0,
+		MaxAttempts: 3,
+		Status:      "queued",
+	}); err != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法记录任务事件", true)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO audit_events (actor_id, actor_type, action, target_type, target_id, result, operation_id, trace_id, created_at)
 		VALUES ($1, 'user', 'server.create', 'server', $2, 'accepted', $3, $4, $5)

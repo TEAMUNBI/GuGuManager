@@ -34,7 +34,7 @@ Agent 主动建立出站 mTLS 双向流，负责节点能力、Runtime、端口�
 
 ### Runtime Adapter
 
-统一封装 OCI、未来 VM 或其他 Runtime。游戏包不能直接调用 Runtime；只有 Agent 能调用适配器。首个生产适配器目标是 Docker Engine API，禁止把 Docker Socket 挂载给游戏容器。
+统一封装 OCI、未来 VM 或其他 Runtime。游戏包不能直接调用 Runtime；只有 Agent 能调用适配器。生产适配器使用 Docker Engine API（已实现），禁止把 Docker Socket 挂载给游戏容器。
 
 ### Extension Runner
 
@@ -62,16 +62,34 @@ Agent 主动建立出站 mTLS 双向流，负责节点能力、Runtime、端口�
 
 同一服务器的破坏性任务串行执行；不同服务器可以并行。事件广播不是事实源，客户端重连后总能从 REST 快照恢复。
 
-## 5. 开发适配器
+## 5. 存储与运行时适配器
+
+Control Plane 通过同一领域接口（`httpapi.ControlPlane`）对接两类适配器：生产 Postgres store 与开发 Memory store。
+
+### 生产适配器（PostgreSQL + mTLS gRPC Agent）
+
+生产模式已完整实现：PostgreSQL store 实现领域接口的全部契约方法（编译期断言 `var _ httpapi.ControlPlane = (*Postgres)(nil)`），migrations 000001-000006 在启动前按序执行；节点任务（provision、power、backup、文件操作、控制台命令、备份下载）经数据库任务表投递，由真实 mTLS gRPC Agent 以 Enroll/Connect 双向流执行，无模拟路径。
+
+指标与控制台日志已由 PostgreSQL 持久化（迁移 000006 的 `server_metrics`/`server_metric_history`/`console_logs` 表）。Agent 的 MetricsBatch/LogBatch 帧经 `ApplyServerMetrics`/`RecordConsoleLines` 双写内存缓冲（热读缓存）与数据库，概览页 CPU/内存用量由 `server_metrics` 表聚合（AVG/SUM）；控制面启动时 `RestoreTelemetry` 从 DB 恢复缓冲，重启不丢失。
+
+任务与 Outbox 采用事务化落库：任务入队（`enqueueTaskTx`/`CreateServer`/`EnqueueTask`）与完成（`CompleteTask`）在同一事务内写 `server_tasks` 业务行与 `outbox_events` 事件（`task.created`/`task.completed`），杜绝"业务已写、事件缺失"的半成功状态。每副本运行 Outbox 发布器（`PublishOutboxEvents`，`FOR UPDATE SKIP LOCKED`）消费未发布事件并标记 `published_at`，多副本只消费一次，为实时推送保留统一扩展点。
+
+多副本恢复由租约回收器兜底：`ReconcileTaskLeases` 周期把 `lease_expires_at` 过期的任务重新入队（`attempt < max_attempts`）或按重试上限判终态失败（`MAX_ATTEMPTS` + 系统审计）；`ClaimTask` 只领取 `attempt < max_attempts` 的任务，避免重试耗尽后仍被反复下发。多个控制面副本共享 PostgreSQL 时，领取（`FOR UPDATE SKIP LOCKED`）、发布与回收均幂等且逐行原子，副本故障切换后任务不卡死。
+
+当前已知限制：
+
+- 加密 Secret 静态存储、实时控制台 WebSocket 尚未实现。
+
+### 开发适配器（Memory）
 
 本地垂直切片允许使用内存存储、模拟节点和模拟控制台，但必须满足领域接口与 API 契约。开发模式具备以下限制：
 
 - 进程退出后状态重置。
+- 默认纯模拟：sleep 后置成功，不创建真实容器；即使调用 `EnableRealRuntime`，也只有 provision/power 走本地 Docker，备份/恢复/删除与网络对账仍是模拟。
 - Network/Startup 只修改内存期望状态并创建模拟 `reconcile` operation；不执行真实容器、端口或资源限制。
 - 当前 Allocation 只有单端口 bind IP/port/protocol/primary，Startup Secret 只在内存中保存并不回显。
+- `DownloadBackup` 在内存模式返回 `NOT_FOUND`。
 - 不生成生产证书，不接受公网部署承诺。
 - API 与界面显式返回 `environment: development`。
-
-仓库内 PostgreSQL 迁移是生产骨架，当前没有承载 Allocation 的 primary/portRef 约束或 Startup 变量/Secret 持久模型；Redis、Outbox、任务租约、Agent mTLS/gRPC 和 OCI Runtime 同样未接入开发 Control Plane。
 
 生产配置不得自动回退到开发适配器；缺少数据库、密钥或 Agent 信任根时必须启动失败。

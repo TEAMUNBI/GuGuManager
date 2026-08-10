@@ -1,10 +1,10 @@
 # GuGuManager 设计索引
 
-> 文档状态：阶段 0 工程基线与阶段 1 开发适配器切片；生产 MVP 尚未实现
+> 文档状态：阶段 0 工程基线与阶段 1 垂直能力；生产适配器（PostgreSQL store + mTLS Agent）已实现，完整生产发布仍待补强
 >
 > 文档版本：0.8.0
 >
-> 更新日期：2026-08-08
+> 更新日期：2026-08-10
 
 GuGuManager 是面向自托管用户和小型游戏托管团队的开源游戏服务器管理平台。项目采用“模块化单体控制面 + 独立节点 Agent”，以版本化游戏定义接入不同 Dedicated Server。
 
@@ -51,16 +51,16 @@ GuGuManager 是面向自托管用户和小型游戏托管团队的开源游戏�
 
 ## 当前实现边界
 
-本轮交付是可运行的开发垂直切片，不冒充生产版本：
+本轮交付是可运行的开发垂直切片 + 已实现的生产适配器，不冒充完整生产发布：
 
-- 包含管理员开发登录、首次 setup、本地用户与服务器访问管理、一次性密码重置、总览、节点、游戏目录、服务器创建、电源操作、控制台、文件、备份、Network、Startup 和审计界面。
-- Control Plane 提供版本化 REST API、结构化错误、幂等异步任务和开发用内存存储；每个开发 operation 固定受理时的目标节点快照，并在提交终态前同时校验 generation 与节点归属。
+- 包含管理员开发登录、首次 setup、本地用户与服务器访问管理、一次性密码重置、总览、节点、游戏目录、服务器创建、电源操作、控制台、文件、备份（含下载）、Network、Startup 和审计界面；生产模式经真实 Agent 执行建服、电源、备份、文件与控制台命令。
+- Control Plane 提供版本化 REST API、结构化错误和幂等异步任务；开发模式使用内存存储，生产模式使用 PostgreSQL store（任务经数据库任务表投递给 mTLS gRPC Agent）。每个 operation 固定受理时的目标节点快照，并在提交终态前同时校验 generation 与节点归属。
 - `Network` 在内存中维护单主 Allocation，并以 generation 和模拟 `reconcile` operation 演示增删与切主；它不预留宿主端口，也没有面向多端口 Bundle 的 `portRef`。
 - `Startup` 从服务器固定 Bundle 的受限 GameDefinition Schema 解析命令和变量；缺少 required 值时 Start/Restart 在状态变化前被拒绝。Secret 禁止 Bundle 内置 default/const/enum，公开响应只保留 `hasValue` 等声明状态，并使用 HMAC 幂等摘要；这不等同于加密持久化或 Agent Secret 句柄。
 - `1A Identity` 开发适配器与 Web 提供受控首次初始化、本地用户查询/创建/更新/停用、短期单次密码重置和服务器 membership 管理。Bootstrap Token 与重置令牌只保存 SHA-256 摘要；无效、过期或已消费的 setup/reset 凭据会在 Argon2 前被拒绝，密码重置或用户停用会撤销该用户的内存会话和未消费重置令牌。登录、setup 与重置使用 reservation 限流，Argon2id 受进程级并发门保护；membership 变更会立即影响当前 REST 资源授权。
 - 开发 Store 在创建服务器、电源、Network、Startup、控制台、备份和文件写入的提交／幂等回放前重新读取当前用户与 membership，不信任 HTTP session 的旧用户快照。文件写入、建目录、移动和删除与用户停用、角色降级或 membership 撤销互斥，避免撤权后仍产生本地磁盘副作用；这不取消撤权前已经受理的异步 operation。
-- Agent 与 `gamectl` 提供可运行入口；Agent 的真实 mTLS/gRPC、OCI Runtime 和持久任务执行仍属于后续里程碑。
-- PostgreSQL、Redis、反向代理和对象存储提供部署契约或骨架；`000003_membership_permissions` 已把稳定 membership 权限枚举、`servers.read`、非空、去重和无 `NULL` 值约束写入 PostgreSQL migration。Identity 数据、令牌、会话和 membership 当前仍随进程退出而丢失，多副本撤销与实时连接撤销尚未实现。
+- Agent 与 `gamectl` 提供可运行入口；Agent 的真实 mTLS/gRPC（Enroll/Connect 双向流）、OCI Runtime 和持久任务执行已实现并接入生产模式。
+- PostgreSQL 迁移 000001-000006 齐备，生产 Control Plane 启动时按序执行；Identity 数据、令牌、会话、membership 与审计已由 PostgreSQL store 持久化（token/CSRF 只保存摘要，会话恢复时轮换 CSRF 并返回新明文）；指标与控制台日志经 000006 迁移持久化（`server_metrics`/`server_metric_history`/`console_logs`），控制面启动时 `RestoreTelemetry` 恢复内存缓冲。任务入队/完成与 `outbox_events` 事件同事务落库，每副本发布器（`FOR UPDATE SKIP LOCKED`）消费标记 `published_at`；过期任务租约由 `ReconcileTaskLeases` 回收（回队或按 `MAX_ATTEMPTS` 判失败），多副本故障切换不卡死任务。开发模式（Memory store）仍随进程退出而丢失；Redis、多副本撤销与实时连接撤销尚未实现。
 - PaperMC、Factorio 与 Vintage Story 作为声明式示例，不依赖尚未实现的 Extension ABI。
 - `gamectl lint` 当前解析 JSON、执行内嵌 Draft 2020-12 Schema，要求明确的上游发行版本，并检查端口名称唯一性、非进程健康检查的 `health.portRef`、变量 closed-object 子集、`required`/Secret/binding 引用、Secret material 禁令，以及 file binding 与 Artifact destination 的规范相对路径；制品可下载性、摘要真实性、权限和复杂网络语义仍属于后续门禁。
 - Network/Startup 开发适配器拒绝 `0.0.0.0`、`::` 等 wildcard 绑定地址，精确 endpoint 冲突返回 `409 PORT_CONFLICT`，过期十进制 generation 返回 `412 PRECONDITION_FAILED`；这些检查只针对内存期望状态，不代表节点 OS 端口已经绑定。
@@ -68,7 +68,7 @@ GuGuManager 是面向自托管用户和小型游戏托管团队的开源游戏�
 
 当前与目标 API、页面和验证边界分别见 [API 契约](docs/design/08-api-contracts.md)、[用户体验](docs/design/02-user-experience.md) 和 [测试路线图](docs/design/11-testing-roadmap.md)。除“当前开发切片”明确列出的行为外，其余内容均为生产 MVP 或后续目标。
 
-禁止在 README、界面或发布说明中把演示状态、模拟指标或内存数据描述为真实容器执行结果。
+禁止在 README、界面或发布说明中把演示状态、模拟指标或内存数据描述为真实容器执行结果；生产模式由真实 Agent 执行的结果可以如实呈现，但加密 Secret、实时控制台 WebSocket 等已知限制不得包装。
 
 ## 设计原则
 

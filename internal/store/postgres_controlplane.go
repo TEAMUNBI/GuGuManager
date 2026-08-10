@@ -4,15 +4,14 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
 	serverfiles "github.com/gugumanager/gugumanager/internal/files"
@@ -218,8 +217,9 @@ func (s *Postgres) VisibleServers(userID string, query string) []domain.Server {
 }
 
 // Overview aggregates counts across the persisted tables. CPU and live memory
-// metrics are not persisted by the agent contract yet, so those fields are
-// reported as zero; memory limits come from the servers table.
+// usage come from the server_metrics snapshots persisted by agent MetricsBatch
+// frames; without any reporting those fields stay zero while memory limits come
+// from the servers table.
 func (s *Postgres) Overview() domain.Overview {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -232,9 +232,12 @@ func (s *Postgres) Overview() domain.Overview {
 			(SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL),
 			(SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL AND condition = 'available'),
 			(SELECT COUNT(*) FROM server_tasks WHERE status NOT IN ('succeeded', 'failed', 'canceled')),
-			(SELECT COALESCE(SUM(memory_limit_bytes), 0) FROM servers WHERE deleted_at IS NULL)
+			(SELECT COALESCE(SUM(memory_limit_bytes), 0) FROM servers WHERE deleted_at IS NULL),
+			(SELECT COALESCE(SUM(memory_bytes), 0) FROM server_metrics),
+			(SELECT COALESCE(AVG(cpu_percent), 0) FROM server_metrics)
 	`).Scan(&result.ServerCount, &result.RunningServerCount, &result.TotalNodeCount,
-		&result.OnlineNodeCount, &result.QueuedOperationCount, &result.MemoryTotalBytes)
+		&result.OnlineNodeCount, &result.QueuedOperationCount, &result.MemoryTotalBytes,
+		&result.MemoryUsedBytes, &result.CPUPercent)
 	if err != nil {
 		return result
 	}
@@ -555,6 +558,20 @@ func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, server
 		return "", nil
 	}
 	if err != nil {
+		return "", err
+	}
+	// 任务入队与 outbox 事件同事务提交：业务状态、任务、事件三者原子，
+	// 满足架构约定的"在一个数据库事务中写业务状态、任务和 Outbox"。
+	if err := s.recordTaskOutboxEvent(ctx, tx, "task.created", taskEventPayload{
+		OperationID: inserted,
+		ServerID:    serverID,
+		NodeID:      nodeID,
+		TaskType:    taskType,
+		Generation:  generation,
+		Attempt:     0,
+		MaxAttempts: 3,
+		Status:      "queued",
+	}); err != nil {
 		return "", err
 	}
 	return inserted, nil
@@ -1421,10 +1438,66 @@ func (s *Postgres) serverFileSystem(serverID string) (*serverfiles.ServerFS, err
 	return filesystem, nil
 }
 
+// getFileDispatcher 返回当前注入的远程文件调度器（线程安全）。
+func (s *Postgres) getFileDispatcher() FileDispatcher {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fileDispatcher
+}
+
+// fileOpTimeout 是单次远程文件操作的总超时，包含网络往返与容器内执行。
+const fileOpTimeout = 30 * time.Second
+
+// downloadBackupTimeout 覆盖备份下载的完整传输窗口；备份归档可能接近 gRPC
+// 512MiB 消息上限，需要比常规文件操作更宽裕的超时。
+const downloadBackupTimeout = 10 * time.Minute
+
+// mapAgentFileError 将 Agent 返回的稳定错误码映射为 domain.Problem。
+func mapAgentFileError(errorCode string) error {
+	switch errorCode {
+	case "NOT_FOUND":
+		return domain.NewProblem("NOT_FOUND", "文件或目录不存在", false)
+	case "FORBIDDEN":
+		return domain.NewProblem("FORBIDDEN", "文件操作被拒绝", false)
+	case "VALIDATION_FAILED":
+		return domain.NewProblem("VALIDATION_FAILED", "文件路径或参数无效", false)
+	case "PATH_ESCAPE":
+		return domain.NewProblem("PATH_ESCAPE_BLOCKED", "文件路径不安全", false)
+	case "SIZE_LIMIT":
+		return domain.NewProblem("VALIDATION_FAILED", "文件大小超过操作限制", false)
+	case "RUNTIME_UNAVAILABLE":
+		return domain.NewProblem("NODE_OFFLINE", "目标节点未连接或运行时不可用", true)
+	case "TIMEOUT":
+		return domain.NewProblem("GATEWAY_TIMEOUT", "文件操作超时", true)
+	default:
+		return domain.NewProblem("INTERNAL_ERROR", "文件操作失败", true)
+	}
+}
+
+// errorCodeFromDispatcher 从 FileDispatcher 返回的错误中提取 Agent 错误码。
+// 上下文超时/取消映射为 TIMEOUT/CANCELLED；AgentFileError 携带其 Code；
+// 其余错误归为 INTERNAL_ERROR。
+func errorCodeFromDispatcher(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "TIMEOUT"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "CANCELLED"
+	}
+	var afe *AgentFileError
+	if errors.As(err, &afe) {
+		return afe.Code
+	}
+	return "INTERNAL_ERROR"
+}
+
 // beginFileMutation holds the per-server mutation gate while the actor is
-// authorized and the physical filesystem operation runs, mirroring the
+// authorized and the remote file operation is dispatched. It mirrors the
 // in-memory adapter's restore/file mutation exclusion.
-func (s *Postgres) beginFileMutation(serverID string, actorID string) (domain.Server, *serverfiles.ServerFS, domain.User, func(), error) {
+func (s *Postgres) beginFileMutation(serverID string, actorID string) (domain.Server, domain.User, FileDispatcher, func(), error) {
 	gate, _ := s.fileMutationGates.LoadOrStore(serverID, &sync.RWMutex{})
 	gate.(*sync.RWMutex).Lock()
 
@@ -1434,12 +1507,12 @@ func (s *Postgres) beginFileMutation(serverID string, actorID string) (domain.Se
 	actor, err := s.authorizeServer(ctx, actorID, serverID, "servers.files.write")
 	if err != nil {
 		gate.(*sync.RWMutex).Unlock()
-		return domain.Server{}, nil, domain.User{}, nil, err
+		return domain.Server{}, domain.User{}, nil, nil, err
 	}
 	server, err := s.Server(serverID)
 	if err != nil {
 		gate.(*sync.RWMutex).Unlock()
-		return domain.Server{}, nil, domain.User{}, nil, err
+		return domain.Server{}, domain.User{}, nil, nil, err
 	}
 	var restoring bool
 	if err := s.db.QueryRowContext(ctx, `
@@ -1450,22 +1523,26 @@ func (s *Postgres) beginFileMutation(serverID string, actorID string) (domain.Se
 		)
 	`, serverID).Scan(&restoring); err != nil {
 		gate.(*sync.RWMutex).Unlock()
-		return domain.Server{}, nil, domain.User{}, nil, domain.NewProblem("INTERNAL_ERROR", "无法查询恢复任务", true)
+		return domain.Server{}, domain.User{}, nil, nil, domain.NewProblem("INTERNAL_ERROR", "无法查询恢复任务", true)
 	}
 	if restoring {
 		gate.(*sync.RWMutex).Unlock()
 		active, _ := s.activeRestoreOperation(ctx, serverID)
-		return domain.Server{}, nil, domain.User{}, nil, operationInProgress(active)
+		return domain.Server{}, domain.User{}, nil, nil, operationInProgress(active)
 	}
-	filesystem, err := s.serverFileSystem(serverID)
-	if err != nil {
+	fd := s.getFileDispatcher()
+	if fd == nil {
 		gate.(*sync.RWMutex).Unlock()
-		return domain.Server{}, nil, domain.User{}, nil, err
+		return domain.Server{}, domain.User{}, nil, nil, domain.NewProblem("INTERNAL_ERROR", "文件调度器未配置", true)
+	}
+	if server.NodeID == "" {
+		gate.(*sync.RWMutex).Unlock()
+		return domain.Server{}, domain.User{}, nil, nil, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
 	}
 	release := func() {
 		gate.(*sync.RWMutex).Unlock()
 	}
-	return server, filesystem, actor, release, nil
+	return server, actor, fd, release, nil
 }
 
 func (s *Postgres) activeRestoreOperation(ctx context.Context, serverID string) (domain.Operation, bool) {
@@ -1481,65 +1558,61 @@ func (s *Postgres) activeRestoreOperation(ctx context.Context, serverID string) 
 	return operation, true
 }
 
-// Files lists the immediate children of requestedPath.
+// Files lists the immediate children of requestedPath via the Agent.
 func (s *Postgres) Files(serverID string, requestedPath string) ([]domain.FileEntry, error) {
-	if _, err := s.Server(serverID); err != nil {
-		return nil, err
-	}
-	filesystem, err := s.serverFileSystem(serverID)
+	server, err := s.Server(serverID)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := filesystem.List(requestedPath)
+	fd := s.getFileDispatcher()
+	if fd == nil {
+		return nil, domain.NewProblem("INTERNAL_ERROR", "文件调度器未配置", true)
+	}
+	if server.NodeID == "" {
+		return nil, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+	defer cancel()
+	entries, err := fd.ListFiles(ctx, server.NodeID, serverID, requestedPath)
 	if err != nil {
-		return nil, mapFileError(err)
+		return nil, mapAgentFileError(errorCodeFromDispatcher(err))
 	}
-	result := make([]domain.FileEntry, 0, len(entries))
-	for _, entry := range entries {
-		kind := "file"
-		if entry.Directory {
-			kind = "directory"
-		}
-		result = append(result, domain.FileEntry{Name: entry.Name, Path: entry.Path, Kind: kind, SizeBytes: entry.SizeBytes, ModifiedAt: entry.ModifiedAt})
-	}
-	return result, nil
+	return entries, nil
 }
 
-// ReadFile reads one regular file inside the server root.
+// ReadFile reads one regular file inside the server's container /data directory.
 func (s *Postgres) ReadFile(serverID string, requestedPath string) (domain.FileContent, error) {
-	if _, err := s.Server(serverID); err != nil {
-		return domain.FileContent{}, err
-	}
-	filesystem, err := s.serverFileSystem(serverID)
+	server, err := s.Server(serverID)
 	if err != nil {
 		return domain.FileContent{}, err
 	}
-	content, err := filesystem.ReadFile(requestedPath)
+	fd := s.getFileDispatcher()
+	if fd == nil {
+		return domain.FileContent{}, domain.NewProblem("INTERNAL_ERROR", "文件调度器未配置", true)
+	}
+	if server.NodeID == "" {
+		return domain.FileContent{}, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+	defer cancel()
+	content, err := fd.ReadFile(ctx, server.NodeID, serverID, requestedPath)
 	if err != nil {
-		return domain.FileContent{}, mapFileError(err)
+		return domain.FileContent{}, mapAgentFileError(errorCodeFromDispatcher(err))
 	}
-	entry, err := filesystem.Stat(requestedPath)
-	if err != nil {
-		return domain.FileContent{}, mapFileError(err)
-	}
-	encoded := string(content)
-	encoding := "utf-8"
-	if !utf8.Valid(content) {
-		encoded = base64.RawStdEncoding.EncodeToString(content)
-		encoding = "base64"
-	}
-	return domain.FileContent{Path: entry.Path, Content: encoded, Encoding: encoding, SizeBytes: entry.SizeBytes, ModifiedAt: entry.ModifiedAt}, nil
+	return content, nil
 }
 
-// WriteFile atomically writes one file inside the server root.
+// WriteFile writes one file inside the server's container /data directory.
 func (s *Postgres) WriteFile(serverID string, requestedPath string, content []byte, actor domain.User) error {
-	server, filesystem, currentActor, release, err := s.beginFileMutation(serverID, actor.ID)
+	server, currentActor, fd, release, err := s.beginFileMutation(serverID, actor.ID)
 	if err != nil {
 		return err
 	}
-	if err := filesystem.WriteFile(requestedPath, content); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+	defer cancel()
+	if err := fd.WriteFile(ctx, server.NodeID, serverID, requestedPath, content, false); err != nil {
 		release()
-		return mapFileError(err)
+		return mapAgentFileError(errorCodeFromDispatcher(err))
 	}
 	release()
 	if err := s.recordAudit(context.Background(), s.db, currentActor, "file.write", "server", server.Name, "success", id.New()); err != nil {
@@ -1548,15 +1621,17 @@ func (s *Postgres) WriteFile(serverID string, requestedPath string, content []by
 	return nil
 }
 
-// CreateDirectory creates one directory inside the server root.
+// CreateDirectory creates one directory inside the server's container /data.
 func (s *Postgres) CreateDirectory(serverID string, requestedPath string, actor domain.User) error {
-	server, filesystem, currentActor, release, err := s.beginFileMutation(serverID, actor.ID)
+	server, currentActor, fd, release, err := s.beginFileMutation(serverID, actor.ID)
 	if err != nil {
 		return err
 	}
-	if err := filesystem.Mkdir(requestedPath); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+	defer cancel()
+	if err := fd.MakeDirectory(ctx, server.NodeID, serverID, requestedPath); err != nil {
 		release()
-		return mapFileError(err)
+		return mapAgentFileError(errorCodeFromDispatcher(err))
 	}
 	release()
 	if err := s.recordAudit(context.Background(), s.db, currentActor, "file.mkdir", "server", server.Name, "success", id.New()); err != nil {
@@ -1565,15 +1640,17 @@ func (s *Postgres) CreateDirectory(serverID string, requestedPath string, actor 
 	return nil
 }
 
-// MoveFile moves or renames a file inside the server root.
+// MoveFile moves or renames a file inside the server's container /data.
 func (s *Postgres) MoveFile(serverID string, source string, destination string, replace bool, actor domain.User) error {
-	server, filesystem, currentActor, release, err := s.beginFileMutation(serverID, actor.ID)
+	server, currentActor, fd, release, err := s.beginFileMutation(serverID, actor.ID)
 	if err != nil {
 		return err
 	}
-	if err := filesystem.Move(source, destination, replace); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+	defer cancel()
+	if err := fd.MoveFile(ctx, server.NodeID, serverID, source, destination, replace); err != nil {
 		release()
-		return mapFileError(err)
+		return mapAgentFileError(errorCodeFromDispatcher(err))
 	}
 	release()
 	if err := s.recordAudit(context.Background(), s.db, currentActor, "file.move", "server", server.Name, "success", id.New()); err != nil {
@@ -1582,15 +1659,17 @@ func (s *Postgres) MoveFile(serverID string, source string, destination string, 
 	return nil
 }
 
-// DeleteFile removes a file (or directory tree when recursive).
+// DeleteFile removes a file (or directory tree when recursive) in the container.
 func (s *Postgres) DeleteFile(serverID string, requestedPath string, recursive bool, actor domain.User) error {
-	server, filesystem, currentActor, release, err := s.beginFileMutation(serverID, actor.ID)
+	server, currentActor, fd, release, err := s.beginFileMutation(serverID, actor.ID)
 	if err != nil {
 		return err
 	}
-	if err := filesystem.Delete(requestedPath, recursive); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+	defer cancel()
+	if err := fd.RemoveFile(ctx, server.NodeID, serverID, requestedPath, recursive); err != nil {
 		release()
-		return mapFileError(err)
+		return mapAgentFileError(errorCodeFromDispatcher(err))
 	}
 	release()
 	if err := s.recordAudit(context.Background(), s.db, currentActor, "file.delete", "server", server.Name, "success", id.New()); err != nil {
@@ -1889,6 +1968,62 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
 		row.Generation, actor.ID, currentActor, "backup.delete", now, string(checkpoint))
+}
+
+// DownloadBackup 校验备份就绪且节点在线后，从目标节点读取备份归档内容。
+// 下载是只读操作，不推进 generation、不占用互斥操作槽位。
+func (s *Postgres) DownloadBackup(serverID string, backupID string, actor domain.User) (domain.BackupContent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), downloadBackupTimeout)
+	defer cancel()
+
+	if _, err := s.authorizeServer(ctx, actor.ID, serverID, "servers.backups.read"); err != nil {
+		return domain.BackupContent{}, err
+	}
+
+	var nodeID, nodeCondition string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(s.node_id::text, ''), COALESCE(n.condition, 'offline')
+		FROM servers s
+		LEFT JOIN nodes n ON n.id = s.node_id
+		WHERE s.id = $1 AND s.deleted_at IS NULL
+	`, serverID).Scan(&nodeID, &nodeCondition); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "服务器不存在", false)
+		}
+		return domain.BackupContent{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
+	}
+	if nodeCondition != "available" {
+		return domain.BackupContent{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法下载备份", true)
+	}
+	if nodeID == "" {
+		return domain.BackupContent{}, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
+	}
+
+	var backupStatus string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT status FROM backups WHERE id = $1 AND server_id = $2
+	`, backupID, serverID).Scan(&backupStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
+		}
+		return domain.BackupContent{}, domain.NewProblem("INTERNAL_ERROR", "无法查询备份", true)
+	}
+	if backupStatus == "deleted" {
+		return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
+	}
+	if backupStatus != "ready" {
+		return domain.BackupContent{}, domain.NewProblem("RESTORE_LOCKED", "备份当前不可下载", false)
+	}
+
+	fd := s.getFileDispatcher()
+	if fd == nil {
+		return domain.BackupContent{}, domain.NewProblem("INTERNAL_ERROR", "文件调度器未配置", true)
+	}
+	content, err := fd.DownloadBackup(ctx, nodeID, serverID, backupID)
+	if err != nil {
+		return domain.BackupContent{}, mapAgentFileError(errorCodeFromDispatcher(err))
+	}
+	return content, nil
 }
 
 // backupChecksumValid mirrors the in-memory adapter: a checksum is only valid
