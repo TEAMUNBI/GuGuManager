@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -182,10 +184,47 @@ func buildProductionService(ctx context.Context, cfg config.Config, logger *slog
 		return nil, fmt.Errorf("initialize postgres store: %w", err)
 	}
 	pg.SetBootstrapToken(bootstrapToken)
+	if err := configureSecretCipher(pg, cfg); err != nil {
+		return nil, err
+	}
 	// 恢复上次运行期间持久化的控制台日志与指标（启动一次）。
 	pg.RestoreTelemetry(ctx)
 	logger.Info("production service ready", "file_root", fileRoot, "adapter", "postgres")
 	return pg, nil
+}
+
+type secretKeyringFile struct {
+	Active string            `json:"active"`
+	Keys   map[string]string `json:"keys"`
+}
+
+func configureSecretCipher(pg *store.Postgres, cfg config.Config) error {
+	if cfg.EncryptionKeyringFile != "" {
+		contents, err := os.ReadFile(cfg.EncryptionKeyringFile)
+		if err != nil {
+			return fmt.Errorf("read encryption keyring file: %w", err)
+		}
+		var file secretKeyringFile
+		if err := json.Unmarshal(contents, &file); err != nil {
+			return fmt.Errorf("parse encryption keyring file: %w", err)
+		}
+		keys := make(map[string][]byte, len(file.Keys))
+		for keyID, material := range file.Keys {
+			keys[keyID] = []byte(material)
+		}
+		if err := pg.SetSecretKeyring(file.Active, keys); err != nil {
+			return fmt.Errorf("initialize secret keyring: %w", err)
+		}
+		return nil
+	}
+	encryptionKey, err := os.ReadFile(cfg.EncryptionKeyFile)
+	if err != nil {
+		return fmt.Errorf("read encryption key file: %w", err)
+	}
+	if err := pg.SetSecretCipher(bytes.TrimSpace(encryptionKey)); err != nil {
+		return fmt.Errorf("initialize secret cipher: %w", err)
+	}
+	return nil
 }
 
 // buildAgentGRPCServer 构造 Agent 的 mTLS gRPC 服务器（仅 production）。

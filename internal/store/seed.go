@@ -105,10 +105,10 @@ func (m *Memory) seed() error {
 	m.files[m.serverOrder[2]] = []domain.FileEntry{{Name: "data", Path: "data", Kind: "directory", SizeBytes: 0, ModifiedAt: now.Add(-24 * time.Hour)}}
 
 	m.backups[m.serverOrder[0]] = []domain.Backup{
-		{ID: "d1111111-1111-4111-8111-111111111111", Name: "pre-season-04", Status: "ready", SizeBytes: 8_420_000_000, Checksum: "sha256:5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a", CreatedAt: now.Add(-25 * time.Hour)},
-		{ID: "d2222222-2222-4222-8222-222222222222", Name: "before-config-tune", Status: "ready", SizeBytes: 8_190_000_000, Checksum: "sha256:8a028a028a028a028a028a028a028a028a028a028a028a028a028a028a028a02", CreatedAt: now.Add(-day(4))},
+		{ID: "d1111111-1111-4111-8111-111111111111", Name: "pre-season-04", Status: "ready", SizeBytes: valuePointer(int64(8_420_000_000)), Checksum: valuePointer("sha256:5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a5c7a"), CreatedAt: now.Add(-25 * time.Hour)},
+		{ID: "d2222222-2222-4222-8222-222222222222", Name: "before-config-tune", Status: "ready", SizeBytes: valuePointer(int64(8_190_000_000)), Checksum: valuePointer("sha256:8a028a028a028a028a028a028a028a028a028a028a028a028a028a028a028a02"), CreatedAt: now.Add(-day(4))},
 	}
-	m.backups[m.serverOrder[1]] = []domain.Backup{{ID: "d3333333-3333-4333-8333-333333333333", Name: "autosave-2026-08-06", Status: "ready", SizeBytes: 7_420_000_000, Checksum: "sha256:30c230c230c230c230c230c230c230c230c230c230c230c230c230c230c230c2", CreatedAt: now.Add(-20 * time.Hour)}}
+	m.backups[m.serverOrder[1]] = []domain.Backup{{ID: "d3333333-3333-4333-8333-333333333333", Name: "autosave-2026-08-06", Status: "ready", SizeBytes: valuePointer(int64(7_420_000_000)), Checksum: valuePointer("sha256:30c230c230c230c230c230c230c230c230c230c230c230c230c230c230c230c2"), CreatedAt: now.Add(-20 * time.Hour)}}
 	m.backups[m.serverOrder[2]] = nil
 
 	m.audit = []domain.AuditEvent{

@@ -221,7 +221,10 @@ export interface Backup {
   status: "creating" | "ready" | "failed" | "restoring" | "deleting";
   sizeBytes?: number | null;
   checksum?: string | null;
+  storageLocation?: string | null;
+  retentionUntil?: string | null;
   createdAt: string;
+  completedAt?: string | null;
 }
 
 export interface Allocation {

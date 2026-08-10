@@ -1,6 +1,7 @@
 import { expect, test, type Response } from "@playwright/test";
 
-const e2eOrigin = "http://127.0.0.1:18080";
+const e2ePort = process.env.GUGU_E2E_PORT ?? "18080";
+const e2eOrigin = `http://127.0.0.1:${e2ePort}`;
 const e2eEmail = "e2e-admin@gugu.local";
 const e2ePassword = "browser-e2e-only-2026";
 
@@ -45,13 +46,13 @@ test("uses the real Control Plane for deep links, session login, server detail, 
     && response.status === 401)).toBe(true);
 
   await page.getByLabel("Email address").fill(e2eEmail);
-  await page.getByLabel("Passphrase").fill(e2ePassword);
+  await page.getByLabel("Password").fill(e2ePassword);
   const loginResponsePromise = page.waitForResponse((response) => isAPIResponse(response, "POST", "/auth/login"));
-  await page.getByRole("button", { name: "Enter control room" }).click();
+  await page.getByRole("button", { name: "Sign in" }).click();
   const loginResponse = await loginResponsePromise;
   expect(loginResponse.status()).toBe(200);
 
-  await expect(page.getByRole("heading", { name: "Control room" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations overview" })).toBeVisible();
   await page.getByRole("link", { name: "Servers" }).click();
   await expect(page.getByRole("heading", { name: "Servers" })).toBeVisible();
 
@@ -68,7 +69,7 @@ test("uses the real Control Plane for deep links, session login, server detail, 
     && response.status === 200)).toBe(true);
 
   const logoutResponsePromise = page.waitForResponse((response) => isAPIResponse(response, "POST", "/auth/logout"));
-  await page.getByTitle("退出登录").click();
+  await page.getByTitle("Sign out").click();
   const logoutResponse = await logoutResponsePromise;
   expect(logoutResponse.status()).toBe(204);
   await expect(page).toHaveURL(`${e2eOrigin}/login`);

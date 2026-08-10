@@ -318,6 +318,9 @@ export const api = {
   games: () => request<GameDefinition[]>("/game-definitions"),
   audit: () => request<AuditEvent[]>("/audit-events"),
   console: (serverId: string) => request<ConsoleLine[]>(`/servers/${serverId}/console`),
+  // consoleStreamPath 返回控制台实时 WebSocket 的路径（不含协议与 host），
+  // 由调用方按 location.protocol 派生 ws/wss。
+  consoleStreamPath: (serverId: string) => `/servers/${serverId}/console/stream`,
   command: (serverId: string, command: string, csrfToken: string) => request<void>(`/servers/${serverId}/console/commands`, csrfMutation({ command }, csrfToken)),
   files: (serverId: string, path = "") => request<FileEntry[]>(`/servers/${serverId}/files?path=${encodeURIComponent(path)}`),
   fileContent: (serverId: string, path: string) => request<FileContent>(`/servers/${serverId}/files/content?path=${encodeURIComponent(path)}`),

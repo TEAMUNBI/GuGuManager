@@ -66,6 +66,7 @@ type Memory struct {
 	idempotency         map[string]idempotencyRecord
 	audit               []domain.AuditEvent
 	console             map[string][]domain.ConsoleLine
+	consoleHub          *consoleHub
 	files               map[string][]domain.FileEntry
 	fileSystems         map[string]*serverfiles.ServerFS
 	// fileMutationHook is a development/test seam invoked while the Store
@@ -133,6 +134,7 @@ func newMemoryAt(environment string, adminEmail string, adminPassword string, ag
 		operations:          map[string]domain.Operation{},
 		idempotency:         map[string]idempotencyRecord{},
 		console:             map[string][]domain.ConsoleLine{},
+		consoleHub:          newConsoleHub(),
 		files:               map[string][]domain.FileEntry{},
 		fileSystems:         map[string]*serverfiles.ServerFS{},
 		fileRoot:            filepath.Clean(dataRoot),
@@ -385,6 +387,12 @@ func (m *Memory) Console(serverID string) ([]domain.ConsoleLine, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return append([]domain.ConsoleLine{}, m.console[serverID]...), nil
+}
+
+// SubscribeConsoleLines 订阅服务器实时控制台日志（WebSocket 推送用）。
+// 与 Postgres 版语义一致：返回 channel 与取消函数。
+func (m *Memory) SubscribeConsoleLines(serverID string) (<-chan domain.ConsoleLine, func()) {
+	return m.consoleHub.Subscribe(serverID)
 }
 
 func (m *Memory) Files(serverID string, requestedPath string) ([]domain.FileEntry, error) {

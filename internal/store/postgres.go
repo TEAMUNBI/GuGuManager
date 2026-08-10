@@ -50,6 +50,12 @@ type Postgres struct {
 	bufMu          sync.Mutex
 	consoleBuffers map[string]*consoleBuffer
 	metricStates   map[string]*metricState
+	// 实时控制台日志订阅中心（WebSocket 推送）。
+	consoleHub *consoleHub
+	// Secret 启动变量的静态加密器；未注入时加密禁用（明文存储）。
+	secretCipher *secretCipher
+	// secretKeyring is preferred for production writes and supports rotation.
+	secretKeyring *secretKeyring
 }
 
 // NewPostgres creates a new PostgreSQL-backed store.
@@ -82,6 +88,7 @@ func NewPostgres(ctx context.Context, dsn string, environment string, agentToken
 		fileSystems:    map[string]*serverfiles.ServerFS{},
 		consoleBuffers: map[string]*consoleBuffer{},
 		metricStates:   map[string]*metricState{},
+		consoleHub:     newConsoleHub(),
 	}
 
 	return store, nil
@@ -105,6 +112,43 @@ func (s *Postgres) SetFileDispatcher(fd FileDispatcher) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fileDispatcher = fd
+}
+
+// SetSecretCipher 注入 Secret 启动变量的静态加密器。密钥来自
+// GUGU_ENCRYPTION_KEY_FILE（生产必填）；development 不注入则加密禁用。
+// 注入应在任何 Startup 读写之前完成；已落库的明文旧数据（无 enc:v1: 前缀）
+// 仍可正常读取，不会被破坏。
+func (s *Postgres) SetSecretCipher(masterKey []byte) error {
+	if len(masterKey) == 0 {
+		return nil
+	}
+	sealer, err := newSecretCipher(masterKey)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secretCipher = sealer
+	return nil
+}
+
+// SetSecretKeyring injects the production Secret keyring. The active key is
+// used for new writes while all configured keys remain available for reads
+// during rotation. It is safe to call before any Startup operation.
+func (s *Postgres) SetSecretKeyring(activeID string, keys map[string][]byte) error {
+	keyring, err := newSecretKeyring(activeID, keys)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secretKeyring = keyring
+	return nil
+}
+
+// secretCipherLocked 返回当前加密器（无锁调用方持有 mu 时使用）。
+func (s *Postgres) secretCipherLocked() *secretCipher {
+	return s.secretCipher
 }
 
 // Close closes the database connection pool.

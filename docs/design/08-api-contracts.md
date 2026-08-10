@@ -64,17 +64,17 @@
 | Bundle | `/game-definitions` 与版本化 Bundle 资源 | 已实现固定目录持久化与创建时摘要快照；签名验证与可拉取 Bundle 安装未实现 |
 | 服务器 | `/servers`、`/servers/{id}` | 已实现：PostgreSQL 事务、Allocation 关联与 Agent 的 OCI provision |
 | Network | `/servers/{id}/allocations`、`/servers/{id}/allocations/{allocationId}` | 已实现：PostgreSQL 事务、权限与真实端口绑定；`portRef`/多端口 Bundle 映射未实现 |
-| Startup | `/servers/{id}/startup` | 已实现：PostgreSQL 持久化、权限与 Agent 对账；加密 Secret 静态存储与 Secret 句柄未实现 |
+| Startup | `/servers/{id}/startup` | 已实现：PostgreSQL 持久化、权限与 Agent 对账；Secret 使用密钥环密文和一次性 mTLS Handle 下发，API 仍只返回 `hasValue` |
 | 电源 | `/servers/{id}/power` | 已实现：数据库任务表投递 + Agent 真实 Runtime 执行 |
 | Operation | `/operations/{id}` | 已实现：必填 `nodeId` 执行节点快照、数据库任务表、attempt、lease、checkpoint、结构化错误与按 `serverId` 的读取授权；Outbox 与跨副本恢复未实现 |
-| 实时控制台 | `POST /servers/{id}/console-token` 与 WebSocket | 未实现：当前为 REST 快照与命令帧；日志已持久化，重启可恢复 |
+| 实时控制台 | `POST /servers/{id}/console-token` 与 WebSocket | 已有第一版：当前 Session Cookie 握手和进程内 Hub；短期连接 Token、Origin allowlist、sequence 续传和 Redis 多副本广播仍未实现 |
 | 文件 | `/servers/{id}/files` 的读写方法 | 已实现：Agent 传输（list/read/write/mkdir/move/remove）与备份下载；解压上传与磁盘配额未实现 |
 | 备份 | `/servers/{id}/backups` 及 restore/delete/download | 已实现：真实归档创建/恢复/删除/下载与摘要校验；S3/对象存储与保留策略未实现 |
 | 审计 | `/audit-events` | 已实现：PostgreSQL 持久化审计；过滤、分页和保留策略未实现 |
 
 生产目标端点进入 OpenAPI 时必须同时补认证、权限、错误响应、幂等要求和契约测试，不能只增加路由占位符。
 
-备份处于 `creating`、`failed`、`restoring` 或 `deleting` 时，`sizeBytes` 与 `checksum` 可以缺省或为 `null`；只有 `ready` 备份可以用于恢复，且此时二者必须存在、摘要必须是完整 `sha256`。生产模式由 Agent 在创建收敛后回传真实归档的 checksum/size/storageLocation 并持久化到数据库；Store 映射数据库 `NULL` 时必须使用可空表示或省略字段，不能把大小映射为 `0`、把摘要映射为空字符串。
+备份处于 `creating`、`failed`、`restoring` 或 `deleting` 时，`sizeBytes`、`checksum`、`storageLocation` 与 `completedAt` 可以缺省或为 `null`；只有 `ready` 备份可以用于恢复，且此时摘要必须是完整 `sha256`。生产模式由 Agent 在创建收敛后回传真实归档的 checksum/size/storageLocation 并持久化到数据库；Store 映射数据库 `NULL` 时必须使用可空表示或省略字段，不能把大小映射为 `0`、把摘要映射为空字符串。迟到的重复 Agent 回调对已终态任务是幂等 no-op，恢复或删除失败回到可重试的 `ready`。
 
 ## 5. 身份、会话与授权边界
 

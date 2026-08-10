@@ -56,18 +56,23 @@ func (s *Postgres) RecordConsoleLines(ctx context.Context, serverID string, line
 	buf := s.consoleBufferFor(serverID)
 	buf.mu.Lock()
 	rows := make([][]any, 0, len(lines))
+	published := make([]domain.ConsoleLine, 0, len(lines))
 	for _, line := range lines {
 		if line.Sequence <= 0 {
 			line.Sequence = buf.next
 		}
 		buf.next = line.Sequence + 1
 		buf.lines = append(buf.lines, line)
+		published = append(published, line)
 		rows = append(rows, []any{serverID, line.Sequence, line.Stream, line.Message, line.Timestamp})
 	}
 	if len(buf.lines) > consoleBufferLimit {
 		buf.lines = append([]domain.ConsoleLine(nil), buf.lines[len(buf.lines)-consoleBufferLimit:]...)
 	}
 	buf.mu.Unlock()
+
+	// 实时广播给订阅者（WebSocket 推送），再落库；广播非阻塞，失败不影响上报。
+	s.consoleHub.Publish(serverID, published)
 
 	if len(rows) == 0 {
 		return nil

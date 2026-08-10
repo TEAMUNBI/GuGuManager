@@ -26,17 +26,18 @@ type Config struct {
 	OperationLatency  time.Duration
 	DevDataRoot       string
 
-	PublicURL          string
-	DatabaseURL        string
-	RedisURL           string
-	SessionKeyFile     string
-	EncryptionKeyFile  string
-	AgentCACertFile    string
-	AgentCAKeyFile     string
-	BootstrapTokenFile string
-	TLSTerminated      bool
-	LogLevel           string
-	LogFormat          string
+	PublicURL             string
+	DatabaseURL           string
+	RedisURL              string
+	SessionKeyFile        string
+	EncryptionKeyFile     string
+	EncryptionKeyringFile string
+	AgentCACertFile       string
+	AgentCAKeyFile        string
+	BootstrapTokenFile    string
+	TLSTerminated         bool
+	LogLevel              string
+	LogFormat             string
 }
 
 type ValidationProblem struct {
@@ -72,19 +73,20 @@ func Load() (Config, error) {
 func load(lookup func(string) (string, bool)) (Config, error) {
 	environment := lookupTrimmed(lookup, "GUGU_ENVIRONMENT", Development)
 	cfg := Config{
-		Environment:        strings.ToLower(environment),
-		HTTPAddr:           lookupTrimmed(lookup, "GUGU_HTTP_ADDR", "127.0.0.1:8080"),
-		WebRoot:            lookupTrimmed(lookup, "GUGU_WEB_ROOT", "web/dist"),
-		PublicURL:          lookupTrimmed(lookup, "GUGU_PUBLIC_URL", ""),
-		DatabaseURL:        lookupSecret(lookup, "GUGU_DATABASE_URL"),
-		RedisURL:           lookupSecret(lookup, "GUGU_REDIS_URL"),
-		SessionKeyFile:     lookupTrimmed(lookup, "GUGU_SESSION_KEY_FILE", ""),
-		EncryptionKeyFile:  lookupTrimmed(lookup, "GUGU_ENCRYPTION_KEY_FILE", ""),
-		AgentCACertFile:    lookupTrimmed(lookup, "GUGU_AGENT_CA_CERT_FILE", ""),
-		AgentCAKeyFile:     lookupTrimmed(lookup, "GUGU_AGENT_CA_KEY_FILE", ""),
-		BootstrapTokenFile: lookupTrimmed(lookup, "GUGU_BOOTSTRAP_TOKEN_FILE", ""),
-		LogLevel:           strings.ToLower(lookupTrimmed(lookup, "GUGU_LOG_LEVEL", "info")),
-		LogFormat:          strings.ToLower(lookupTrimmed(lookup, "GUGU_LOG_FORMAT", "json")),
+		Environment:           strings.ToLower(environment),
+		HTTPAddr:              lookupTrimmed(lookup, "GUGU_HTTP_ADDR", "127.0.0.1:8080"),
+		WebRoot:               lookupTrimmed(lookup, "GUGU_WEB_ROOT", "web/dist"),
+		PublicURL:             lookupTrimmed(lookup, "GUGU_PUBLIC_URL", ""),
+		DatabaseURL:           lookupSecret(lookup, "GUGU_DATABASE_URL"),
+		RedisURL:              lookupSecret(lookup, "GUGU_REDIS_URL"),
+		SessionKeyFile:        lookupTrimmed(lookup, "GUGU_SESSION_KEY_FILE", ""),
+		EncryptionKeyFile:     lookupTrimmed(lookup, "GUGU_ENCRYPTION_KEY_FILE", ""),
+		EncryptionKeyringFile: lookupTrimmed(lookup, "GUGU_ENCRYPTION_KEYRING_FILE", ""),
+		AgentCACertFile:       lookupTrimmed(lookup, "GUGU_AGENT_CA_CERT_FILE", ""),
+		AgentCAKeyFile:        lookupTrimmed(lookup, "GUGU_AGENT_CA_KEY_FILE", ""),
+		BootstrapTokenFile:    lookupTrimmed(lookup, "GUGU_BOOTSTRAP_TOKEN_FILE", ""),
+		LogLevel:              strings.ToLower(lookupTrimmed(lookup, "GUGU_LOG_LEVEL", "info")),
+		LogFormat:             strings.ToLower(lookupTrimmed(lookup, "GUGU_LOG_FORMAT", "json")),
 	}
 
 	problems := []ValidationProblem{}
@@ -214,13 +216,24 @@ func (cfg Config) validationProblems() []ValidationProblem {
 			path  string
 		}{
 			{field: "GUGU_SESSION_KEY_FILE", path: cfg.SessionKeyFile},
-			{field: "GUGU_ENCRYPTION_KEY_FILE", path: cfg.EncryptionKeyFile},
 			{field: "GUGU_AGENT_CA_CERT_FILE", path: cfg.AgentCACertFile},
 			{field: "GUGU_AGENT_CA_KEY_FILE", path: cfg.AgentCAKeyFile},
 		} {
 			if !validSecretFile(secretFile.path) {
 				problems = appendProblem(problems, secretFile.field, "must reference a readable, non-empty regular file")
 			}
+		}
+		if cfg.EncryptionKeyFile == "" && cfg.EncryptionKeyringFile == "" {
+			problems = appendProblem(problems, "GUGU_ENCRYPTION_KEY_FILE", "or GUGU_ENCRYPTION_KEYRING_FILE must reference a readable, non-empty regular file")
+		}
+		if cfg.EncryptionKeyFile != "" && cfg.EncryptionKeyringFile != "" {
+			problems = appendProblem(problems, "GUGU_ENCRYPTION_KEY_FILE", "must not be combined with GUGU_ENCRYPTION_KEYRING_FILE")
+		}
+		if cfg.EncryptionKeyFile != "" && !validSecretFile(cfg.EncryptionKeyFile) {
+			problems = appendProblem(problems, "GUGU_ENCRYPTION_KEY_FILE", "must reference a readable, non-empty regular file")
+		}
+		if cfg.EncryptionKeyringFile != "" && !validSecretFile(cfg.EncryptionKeyringFile) {
+			problems = appendProblem(problems, "GUGU_ENCRYPTION_KEYRING_FILE", "must reference a readable, non-empty regular file")
 		}
 		if cfg.BootstrapTokenFile != "" && !validSecretFile(cfg.BootstrapTokenFile) {
 			problems = appendProblem(problems, "GUGU_BOOTSTRAP_TOKEN_FILE", "must reference a readable, non-empty regular file")

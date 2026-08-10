@@ -58,7 +58,7 @@ paths:
                 required: [status, adapter]
                 properties:
                   status: {type: string, const: ready}
-                  adapter: {type: string, description: Storage adapter in use, e.g. development-memory.}
+                  adapter: {type: string, description: "Storage adapter in use, e.g. development-memory."}
   /setup/status:
     get:
       tags: [Setup]
@@ -1584,7 +1584,10 @@ components:
         status: {type: string, enum: [creating, ready, failed, restoring, deleting]}
         sizeBytes: {type: [integer, 'null'], minimum: 0}
         checksum: {type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$'}
+        storageLocation: {type: [string, 'null']}
+        retentionUntil: {type: [string, 'null'], format: date-time}
         createdAt: {type: string, format: date-time}
+        completedAt: {type: [string, 'null'], format: date-time}
     AuditEvent:
       type: object
       required: [id, actorName, action, targetType, targetName, result, operationId, createdAt]

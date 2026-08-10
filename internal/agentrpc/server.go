@@ -55,6 +55,10 @@ type TaskStore interface {
 	ApplyServerMetrics(ctx context.Context, metrics []domain.ServerMetrics) error
 }
 
+type secretHandleStore interface {
+	ResolveSecretHandle(ctx context.Context, operationID, serverID, nodeID, handle string) (string, time.Time, error)
+}
+
 // Option 配置 Server。
 type Option func(*Server)
 
@@ -287,6 +291,28 @@ func (s *Server) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agent
 	}, nil
 }
 
+// ResolveSecret exchanges a short-lived, one-time handle for the matching
+// startup value. The mTLS peer identity supplies the node binding; callers
+// cannot select another node by changing the request body.
+func (s *Server) ResolveSecret(ctx context.Context, req *agentv1.ResolveSecretRequest) (*agentv1.ResolveSecretResponse, error) {
+	if req == nil || req.GetOperationId() == "" || req.GetServerId() == "" || req.GetHandle() == "" {
+		return nil, status.Error(codes.InvalidArgument, "operation_id, server_id, and handle are required")
+	}
+	nodeID, err := s.peerNodeID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resolver, ok := s.store.(secretHandleStore)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "secret handles are unavailable")
+	}
+	value, expiresAt, err := resolver.ResolveSecretHandle(ctx, req.GetOperationId(), req.GetServerId(), nodeID, req.GetHandle())
+	if err != nil {
+		return nil, status.Error(codes.PermissionDenied, "secret handle rejected")
+	}
+	return &agentv1.ResolveSecretResponse{Value: value, ExpiresAt: timestamppb.New(expiresAt)}, nil
+}
+
 // ListenAndServe 启动 mTLS gRPC 服务器。tlsCert/tlsKey 为 nil 时自动用 CA
 // 签发一张 CN="control-plane" 的 server auth 证书。ctx 取消时优雅停机。
 func (s *Server) ListenAndServe(ctx context.Context, addr string, tlsCert []byte, tlsKey []byte) error {
@@ -369,22 +395,30 @@ func (s *Server) tlsConfig(addr string, certPEM, keyPEM []byte) (*tls.Config, er
 
 // verifyPeerNode 校验连接对端证书：链由本 CA 签发，且 CN 与声明的 nodeID 一致。
 func (s *Server) verifyPeerNode(ctx context.Context, nodeID string) error {
+	actual, err := s.peerNodeID(ctx)
+	if err != nil {
+		return err
+	}
+	if actual != nodeID {
+		return status.Errorf(codes.PermissionDenied, "certificate CN %q does not match node id %q", actual, nodeID)
+	}
+	return nil
+}
+
+func (s *Server) peerNodeID(ctx context.Context) (string, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.AuthInfo == nil {
-		return status.Error(codes.Unauthenticated, "missing client authentication")
+		return "", status.Error(codes.Unauthenticated, "missing client authentication")
 	}
 	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
 	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
-		return status.Error(codes.Unauthenticated, "client certificate required")
+		return "", status.Error(codes.Unauthenticated, "client certificate required")
 	}
 	cert := tlsInfo.State.PeerCertificates[0]
 	if err := s.ca.VerifyCertificateChain(pemEncodeCert(cert.Raw)); err != nil {
-		return status.Error(codes.Unauthenticated, "client certificate not issued by trusted ca")
+		return "", status.Error(codes.Unauthenticated, "client certificate not issued by trusted ca")
 	}
-	if cert.Subject.CommonName != nodeID {
-		return status.Errorf(codes.PermissionDenied, "certificate CN %q does not match node id %q", cert.Subject.CommonName, nodeID)
-	}
-	return nil
+	return cert.Subject.CommonName, nil
 }
 
 func pemEncodeCert(raw []byte) []byte {

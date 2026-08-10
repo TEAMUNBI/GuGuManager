@@ -192,8 +192,8 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 	var payload struct {
 		GameDefinitionID string `json:"gameDefinitionId"`
 		Allocations      []struct {
-			AllocationID string `json:"allocationId"`
-			HostPort     uint32 `json:"hostPort"`
+			AllocationID  string `json:"allocationId"`
+			HostPort      uint32 `json:"hostPort"`
 			ContainerPort uint32 `json:"containerPort"`
 		} `json:"allocations"`
 	}

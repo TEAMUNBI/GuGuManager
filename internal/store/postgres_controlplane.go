@@ -747,6 +747,9 @@ func (s *Postgres) validateRequiredStartupVariables(ctx context.Context, tx *sql
 	if err != nil {
 		return err
 	}
+	if err := s.decryptSecretValues(startup.Variables, values); err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法解密启动变量", true)
+	}
 	missing := make([]string, 0)
 	for _, variable := range startup.Variables {
 		value, configured := values[variable.Key]
@@ -1134,6 +1137,10 @@ func (s *Postgres) Startup(serverID string) (domain.Startup, error) {
 	if err != nil {
 		return domain.Startup{}, err
 	}
+	// Secret 变量值静态加密存储，读取时先解密，供生成启动命令与展示。
+	if err := s.decryptSecretValues(startup.Variables, values); err != nil {
+		return domain.Startup{}, domain.NewProblem("INTERNAL_ERROR", "无法解密启动变量", true)
+	}
 	result := domain.Startup{
 		ServerID: serverID, Generation: server.Generation,
 		Command:   resolveStartupCommand(startup, values),
@@ -1292,11 +1299,18 @@ func (s *Postgres) UpdateStartup(
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	if err := s.decryptSecretValues(startup.Variables, values); err != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法解密启动变量", true)
+	}
 	for key := range cleared {
 		delete(values, key)
 	}
 	for key, value := range normalized {
 		values[key] = value
+	}
+	// Secret 变量值静态加密后落库；已加密的值保持不变，明文旧数据就地升级。
+	if err := s.encryptSecretValues(startup.Variables, values); err != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法加密启动变量", true)
 	}
 	encoded, err := json.Marshal(values)
 	if err != nil {
@@ -1360,6 +1374,12 @@ func (s *Postgres) Console(serverID string) ([]domain.ConsoleLine, error) {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
 	return append([]domain.ConsoleLine(nil), buf.lines...), nil
+}
+
+// SubscribeConsoleLines 订阅服务器实时控制台日志（WebSocket 推送用）。
+// 返回接收 channel 与取消函数；取消后 channel 关闭，不能再投递。
+func (s *Postgres) SubscribeConsoleLines(serverID string) (<-chan domain.ConsoleLine, func()) {
+	return s.consoleHub.Subscribe(serverID)
 }
 
 // SendConsoleCommand validates the command and records it as an audit event.
@@ -1694,7 +1714,7 @@ func (s *Postgres) Backups(serverID string) ([]domain.Backup, error) {
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id::text, name, status, COALESCE(size_bytes, 0), COALESCE(content_digest, ''), created_at
+		SELECT id::text, name, status, size_bytes, content_digest, storage_location, retention_until, created_at, completed_at
 		FROM backups
 		WHERE server_id = $1 AND status <> 'deleted'
 		ORDER BY created_at DESC
@@ -1707,9 +1727,27 @@ func (s *Postgres) Backups(serverID string) ([]domain.Backup, error) {
 	backups := []domain.Backup{}
 	for rows.Next() {
 		var backup domain.Backup
-		if err := rows.Scan(&backup.ID, &backup.Name, &backup.Status, &backup.SizeBytes,
-			&backup.Checksum, &backup.CreatedAt); err != nil {
+		var sizeBytes sql.NullInt64
+		var checksum, storageLocation sql.NullString
+		var retentionUntil, completedAt sql.NullTime
+		if err := rows.Scan(&backup.ID, &backup.Name, &backup.Status, &sizeBytes,
+			&checksum, &storageLocation, &retentionUntil, &backup.CreatedAt, &completedAt); err != nil {
 			continue
+		}
+		if sizeBytes.Valid {
+			backup.SizeBytes = valuePointer(sizeBytes.Int64)
+		}
+		if checksum.Valid {
+			backup.Checksum = valuePointer(checksum.String)
+		}
+		if storageLocation.Valid {
+			backup.StorageLocation = valuePointer(storageLocation.String)
+		}
+		if retentionUntil.Valid {
+			backup.RetentionUntil = valuePointer(retentionUntil.Time)
+		}
+		if completedAt.Valid {
+			backup.CompletedAt = valuePointer(completedAt.Time)
 		}
 		backups = append(backups, backup)
 	}

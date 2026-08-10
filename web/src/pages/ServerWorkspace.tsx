@@ -453,9 +453,40 @@ function ConsoleTab({ server }: { server: Server }) {
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 1800);
-    return () => window.clearInterval(timer);
-  }, [load]);
+    // 轮询作为 WebSocket 不可用时的兜底：WS 建立后停表，断开后恢复。
+    let timer: number | undefined;
+    const startPolling = () => { if (timer === undefined) timer = window.setInterval(load, 1800); };
+    const stopPolling = () => { if (timer !== undefined) { window.clearInterval(timer); timer = undefined; } };
+    startPolling();
+
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${proto}//${window.location.host}${api.consoleStreamPath(server.id)}`);
+    socket.onopen = () => stopPolling();
+    socket.onmessage = (event) => {
+      let frame: { type?: string; lines?: ConsoleLine[]; line?: ConsoleLine };
+      try {
+        frame = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (frame.type === "history" && Array.isArray(frame.lines)) {
+        const receivedAt = new Date().toISOString();
+        setLines(frame.lines.map((line) => ({ ...line, receivedAt })));
+      } else if (frame.type === "line" && frame.line) {
+        const receivedAt = new Date().toISOString();
+        const { sequence, timestamp, stream, message } = frame.line;
+        setLines((prev) => [...prev.slice(-499), { sequence, timestamp, stream, message, receivedAt }]);
+      }
+    };
+    const fallbackToPolling = () => startPolling();
+    socket.onclose = fallbackToPolling;
+    socket.onerror = fallbackToPolling;
+
+    return () => {
+      stopPolling();
+      socket.close();
+    };
+  }, [load, server.id]);
 
   useEffect(() => {
     if (autoScroll) {

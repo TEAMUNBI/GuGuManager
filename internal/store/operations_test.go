@@ -589,7 +589,7 @@ func TestRestoreBackupRequiresStoppedServerAndValidRecordedChecksum(t *testing.T
 
 	service.mu.Lock()
 	backup := service.backups[stoppedServerID][0]
-	backup.Checksum = "sha256:" + strings.Repeat("0", 64)
+	backup.Checksum = valuePointer("sha256:" + strings.Repeat("0", 64))
 	service.backups[stoppedServerID][0] = backup
 	service.mu.Unlock()
 	_, err = service.RestoreBackup(stoppedServerID, backup.ID, "restore-corrupt-key-01", actor)
@@ -811,7 +811,7 @@ func TestRestoreStaleTargetTakesPrecedenceOverIntegrityFailure(t *testing.T) {
 		t.Fatal("seeded backup is missing")
 	}
 	backup.Status = "restoring"
-	backup.Checksum = "sha256:" + strings.Repeat("0", 64)
+	backup.Checksum = valuePointer("sha256:" + strings.Repeat("0", 64))
 	service.backups[stoppedServerID][backupIndex] = backup
 	service.operations[operationID] = domain.Operation{
 		ID:         operationID,

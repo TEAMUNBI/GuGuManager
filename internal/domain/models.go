@@ -255,12 +255,15 @@ type Startup struct {
 }
 
 type Backup struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	SizeBytes int64     `json:"sizeBytes"`
-	Checksum  string    `json:"checksum"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Status          string     `json:"status"`
+	SizeBytes       *int64     `json:"sizeBytes"`
+	Checksum        *string    `json:"checksum"`
+	StorageLocation *string    `json:"storageLocation"`
+	RetentionUntil  *time.Time `json:"retentionUntil"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	CompletedAt     *time.Time `json:"completedAt"`
 }
 
 // BackupContent 是备份下载的返回内容。Content 按 Base64 标记为原文或 base64 编码。

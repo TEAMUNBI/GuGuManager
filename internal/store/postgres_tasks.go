@@ -3,8 +3,12 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
@@ -128,6 +132,14 @@ func (s *Postgres) ClaimTask(ctx context.Context, nodeID string) (*ClaimedTask, 
 		return nil, domain.NewProblem("INTERNAL_ERROR", "无法领取任务", true)
 	}
 
+	task.Attempt = attempt + 1
+	if payload.Valid {
+		task.PayloadJSON = []byte(payload.String)
+	}
+	if err := s.materializeSecretHandlesTx(ctx, tx, &task); err != nil {
+		return nil, domain.NewProblem("SECRET_HANDLE_FAILED", "unable to prepare one-time Secret handles", true)
+	}
+
 	leaseExpiresAt := time.Now().UTC().Add(taskLeaseDuration)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE server_tasks
@@ -142,10 +154,6 @@ func (s *Postgres) ClaimTask(ctx context.Context, nodeID string) (*ClaimedTask, 
 		return nil, domain.NewProblem("INTERNAL_ERROR", "无法提交事务", true)
 	}
 
-	task.Attempt = attempt + 1
-	if payload.Valid {
-		task.PayloadJSON = []byte(payload.String)
-	}
 	return &task, nil
 }
 
@@ -162,14 +170,14 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	}
 	defer tx.Rollback()
 
-	var serverID, taskType string
+	var serverID, taskType, taskStatus string
 	var taskCheckpoint string
 	var taskGeneration int64
 	err = tx.QueryRowContext(ctx, `
-		SELECT server_id::text, task_type, generation, COALESCE(checkpoint::text, '') FROM server_tasks
+		SELECT server_id::text, task_type, status, generation, COALESCE(checkpoint::text, '') FROM server_tasks
 		WHERE id = $1 AND node_id = $2
 		FOR UPDATE
-	`, operationID, nodeID).Scan(&serverID, &taskType, &taskGeneration, &taskCheckpoint)
+	`, operationID, nodeID).Scan(&serverID, &taskType, &taskStatus, &taskGeneration, &taskCheckpoint)
 	if err == sql.ErrNoRows {
 		return domain.NewProblem("NOT_FOUND", "任务不存在", false)
 	}
@@ -177,16 +185,30 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 		return domain.NewProblem("INTERNAL_ERROR", "无法查询任务", true)
 	}
 
+	if taskStatus == "succeeded" || taskStatus == "failed" || taskStatus == "canceled" {
+		if err := tx.Commit(); err != nil {
+			return domain.NewProblem("INTERNAL_ERROR", "duplicate task callback commit failed", true)
+		}
+		return nil
+	}
+
 	now := time.Now().UTC()
+	effectiveSucceeded := succeeded
+	effectiveErrCode := errCode
+	if succeeded && taskType == "backup" && !validBackupTaskResult(taskCheckpoint, resultJSON) {
+		effectiveSucceeded = false
+		code := "BACKUP_INTEGRITY_FAILED"
+		effectiveErrCode = &code
+	}
 	status := "failed"
 	result := "failure"
-	if succeeded {
+	if effectiveSucceeded {
 		status = "succeeded"
 		result = "success"
 	}
 	var errorCodeValue any
-	if errCode != nil {
-		errorCodeValue = *errCode
+	if effectiveErrCode != nil {
+		errorCodeValue = *effectiveErrCode
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE server_tasks
@@ -200,8 +222,8 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	// 任务终态与 outbox 事件在同一事务内落库：消费方（发布器）只会看到
 	// 已提交的 task.completed，不会出现"任务已成功、事件缺失"的中间态。
 	var completedErrorCode string
-	if errCode != nil {
-		completedErrorCode = *errCode
+	if effectiveErrCode != nil {
+		completedErrorCode = *effectiveErrCode
 	}
 	if err := s.recordTaskOutboxEvent(ctx, tx, "task.completed", taskEventPayload{
 		OperationID: operationID,
@@ -217,7 +239,7 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 
 	// 成功的 provision 把服务器生命周期推进到 ready，之后才能接收电源操作；
 	// 失败的 provision 保持 provisioning 供上层重试/处置。
-	if succeeded && taskType == "provision" {
+	if effectiveSucceeded && taskType == "provision" {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE servers
 			SET lifecycle_state = 'ready', updated_at = now()
@@ -230,7 +252,7 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 	// 成功的备份任务把 backups 元数据推进到终态：创建 → ready（带校验与位置），
 	// 恢复 → 回到 ready，删除 → 标记 deleted。backupId 从 checkpoint 解析，
 	// checksum/size/storageLocation 从 resultJSON（Agent 执行回传）解析。
-	if succeeded {
+	if effectiveSucceeded {
 		switch taskType {
 		case "backup":
 			// 只有 Agent 回传了结果（checksum/size/location）才算成功创建；
@@ -244,7 +266,7 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
 			var res struct {
 				Checksum        string `json:"checksum"`
-				SizeBytes       int64  `json:"sizeBytes"`
+				SizeBytes       *int64 `json:"sizeBytes"`
 				StorageLocation string `json:"storageLocation"`
 			}
 			_ = json.Unmarshal(resultJSON, &res)
@@ -256,8 +278,8 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 					contentDigest = res.Checksum
 				}
 				var sizeBytes any
-				if res.SizeBytes > 0 {
-					sizeBytes = res.SizeBytes
+				if res.SizeBytes != nil {
+					sizeBytes = *res.SizeBytes
 				}
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE backups
@@ -294,6 +316,10 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 				}
 			}
 		}
+	} else if taskType == "backup" || taskType == "restore" || taskType == "backup-delete" {
+		if err := compensateBackupTaskTx(ctx, tx, taskType, taskCheckpoint, serverID); err != nil {
+			return err
+		}
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -306,6 +332,56 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 
 	if err := tx.Commit(); err != nil {
 		return domain.NewProblem("INTERNAL_ERROR", "无法提交事务", true)
+	}
+	return nil
+}
+
+func validBackupTaskResult(checkpoint string, resultJSON []byte) bool {
+	var payload backupTaskPayload
+	var result struct {
+		Checksum        string `json:"checksum"`
+		SizeBytes       *int64 `json:"sizeBytes"`
+		StorageLocation string `json:"storageLocation"`
+	}
+	if json.Unmarshal([]byte(checkpoint), &payload) != nil || payload.BackupID == "" {
+		return false
+	}
+	if json.Unmarshal(resultJSON, &result) != nil || result.SizeBytes == nil || *result.SizeBytes < 0 || result.StorageLocation == "" {
+		return false
+	}
+	if !strings.HasPrefix(result.Checksum, "sha256:") || len(result.Checksum) != len("sha256:")+sha256.Size*2 {
+		return false
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(result.Checksum, "sha256:")); err != nil {
+		return false
+	}
+	clean := path.Clean(result.StorageLocation)
+	if clean != result.StorageLocation || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return false
+	}
+	if payload.StorageObjectKey != "" && clean != path.Clean(payload.StorageObjectKey) {
+		return false
+	}
+	return true
+}
+
+func compensateBackupTaskTx(ctx context.Context, tx *sql.Tx, taskType, checkpoint, serverID string) error {
+	if taskType != "backup" && taskType != "restore" && taskType != "backup-delete" {
+		return nil
+	}
+	var payload backupTaskPayload
+	if err := json.Unmarshal([]byte(checkpoint), &payload); err != nil || payload.BackupID == "" {
+		return nil
+	}
+	status := "failed"
+	if taskType == "restore" || taskType == "backup-delete" {
+		status = "ready"
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE backups SET status = $1, completed_at = CASE WHEN $1 = 'failed' THEN NULL ELSE completed_at END
+		WHERE id = $2 AND server_id = $3 AND status <> 'deleted'
+	`, status, payload.BackupID, serverID); err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法补偿备份终态", true)
 	}
 	return nil
 }
@@ -379,7 +455,7 @@ func (s *Postgres) ReconcileTaskLeases(now time.Time) {
 		SET status = 'failed', error_code = 'MAX_ATTEMPTS', error_retryable = false,
 		    completed_at = now(), updated_at = now()
 		WHERE status = 'leased' AND lease_expires_at < $1 AND attempt >= max_attempts
-		RETURNING id::text, server_id::text
+		RETURNING id::text, server_id::text, task_type, COALESCE(checkpoint::text, '')
 	`, now)
 	if err != nil {
 		return
@@ -387,11 +463,13 @@ func (s *Postgres) ReconcileTaskLeases(now time.Time) {
 	type expiredTask struct {
 		operationID string
 		serverID    string
+		taskType    string
+		checkpoint  string
 	}
 	var expired []expiredTask
 	for rows.Next() {
 		var task expiredTask
-		if err := rows.Scan(&task.operationID, &task.serverID); err != nil {
+		if err := rows.Scan(&task.operationID, &task.serverID, &task.taskType, &task.checkpoint); err != nil {
 			rows.Close()
 			return
 		}
@@ -403,6 +481,18 @@ func (s *Postgres) ReconcileTaskLeases(now time.Time) {
 	}
 
 	for _, task := range expired {
+		if err := compensateBackupTaskTx(ctx, tx, task.taskType, task.checkpoint, task.serverID); err != nil {
+			return
+		}
+		if err := s.recordTaskOutboxEvent(ctx, tx, "task.completed", taskEventPayload{
+			OperationID: task.operationID,
+			ServerID:    task.serverID,
+			TaskType:    task.taskType,
+			Status:      "failed",
+			ErrorCode:   "MAX_ATTEMPTS",
+		}); err != nil {
+			return
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO audit_events (actor_type, action, target_type, target_id, result, operation_id, trace_id, created_at)
 			VALUES ('system', 'task.expired', 'server', $1, 'failed', $2, $3, now())

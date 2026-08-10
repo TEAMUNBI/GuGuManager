@@ -20,6 +20,7 @@ import (
 	"github.com/gugumanager/gugumanager/internal/domain"
 	"github.com/gugumanager/gugumanager/internal/id"
 	"github.com/gugumanager/gugumanager/internal/identity"
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -67,6 +68,7 @@ type ControlPlane interface {
 	GameDefinitions() []domain.GameDefinition
 	AuditEvents() []domain.AuditEvent
 	Console(serverID string) ([]domain.ConsoleLine, error)
+	SubscribeConsoleLines(serverID string) (<-chan domain.ConsoleLine, func())
 	SendConsoleCommand(serverID string, command string, actor domain.User) error
 	Files(serverID string, requestedPath string) ([]domain.FileEntry, error)
 	ReadFile(serverID string, requestedPath string) (domain.FileContent, error)
@@ -163,6 +165,7 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("PUT /api/v1/servers/{serverID}/members/{userID}", h.auth(h.putServerMembership))
 	mux.HandleFunc("DELETE /api/v1/servers/{serverID}/members/{userID}", h.auth(h.deleteServerMembership))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/console", h.auth(h.console))
+	mux.HandleFunc("GET /api/v1/servers/{serverID}/console/stream", h.auth(h.consoleStream))
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/console/commands", h.auth(h.consoleCommand))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/files", h.auth(h.files))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/files/content", h.auth(h.fileContent))
@@ -876,6 +879,81 @@ func (h *Handler) console(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeData(w, http.StatusOK, lines)
+}
+
+// consoleStreamFrame 是控制台 WebSocket 的推送帧：
+//   - {"type":"history","lines":[...]} 连接建立后的历史行快照；
+//   - {"type":"line","line":{...}} 后续实时增量。
+type consoleStreamFrame struct {
+	Type  string               `json:"type"`
+	Lines []domain.ConsoleLine `json:"lines,omitempty"`
+	Line  domain.ConsoleLine   `json:"line,omitempty"`
+}
+
+// consoleStreamUpgrader 把控制台实时流升级为 WebSocket。鉴权沿用会话 Cookie
+// （h.auth 已校验），授权沿用 servers.console；CheckOrigin 用 gorilla 默认的
+// 同源校验，阻止跨站 WebSocket 劫持。
+var consoleStreamUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 4096,
+}
+
+// consoleStream 把服务器控制台日志实时推送给浏览器：先发历史快照，再转发
+// Agent 上报的增量行。客户端断开或订阅取消时退出。心跳用 Ping 帧探测死链。
+func (h *Handler) consoleStream(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.console") {
+		return
+	}
+	serverID := r.PathValue("serverID")
+	conn, err := consoleStreamUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Debug("console stream upgrade", "server", serverID, "error", err)
+		return
+	}
+	defer conn.Close()
+
+	lines, err := h.service.Console(serverID)
+	if err != nil {
+		_ = conn.WriteJSON(consoleStreamFrame{Type: "error", Lines: nil, Line: domain.ConsoleLine{Message: err.Error()}})
+		return
+	}
+	if err := conn.WriteJSON(consoleStreamFrame{Type: "history", Lines: lines}); err != nil {
+		return
+	}
+
+	stream, cancel := h.service.SubscribeConsoleLines(serverID)
+	defer cancel()
+
+	// 读循环：消费客户端帧并探测连接关闭，让写侧及时退出。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, readErr := conn.ReadMessage(); readErr != nil {
+				return
+			}
+		}
+	}()
+
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case line, ok := <-stream:
+			if !ok {
+				return
+			}
+			if err := conn.WriteJSON(consoleStreamFrame{Type: "line", Line: line}); err != nil {
+				return
+			}
+		case <-ping.C:
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		case <-done:
+			return
+		}
+	}
 }
 
 func (h *Handler) consoleCommand(w http.ResponseWriter, r *http.Request) {

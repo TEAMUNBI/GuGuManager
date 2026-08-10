@@ -2,7 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const e2eOrigin = "http://127.0.0.1:18080";
+const e2ePort = process.env.GUGU_E2E_PORT ?? "18080";
+const e2eOrigin = `http://127.0.0.1:${e2ePort}`;
 const webDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(webDirectory, "..");
 
@@ -38,7 +39,7 @@ export default defineConfig({
     env: {
       ...process.env,
       GUGU_ENVIRONMENT: "development",
-      GUGU_HTTP_ADDR: "127.0.0.1:18080",
+      GUGU_HTTP_ADDR: `127.0.0.1:${e2ePort}`,
       GUGU_WEB_ROOT: path.resolve(webDirectory, "dist"),
       GUGU_DEV_ADMIN_EMAIL: "e2e-admin@gugu.local",
       GUGU_DEV_ADMIN_PASSWORD: "browser-e2e-only-2026",

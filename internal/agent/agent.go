@@ -22,6 +22,7 @@ import (
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -352,7 +353,7 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 		}
 		switch p := req.GetPayload().(type) {
 		case *agentv1.ConnectResponse_Task:
-			if err := a.handleTask(ctx, stream, p.Task); err != nil {
+			if err := a.handleTask(ctx, stream, client, p.Task); err != nil {
 				return err
 			}
 		case *agentv1.ConnectResponse_ConsoleCommand:
@@ -374,7 +375,7 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 }
 
 // handleTask 处理下行任务：先回 TaskAck，执行后回 TaskResult（含 Observed）。
-func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, task *agentv1.Task) error {
+func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
 	ack := &agentv1.TaskAck{
 		OperationId: task.GetOperationId(),
 		Accepted:    true,
@@ -384,6 +385,14 @@ func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayServi
 		return fmt.Errorf("send task ack: %w", err)
 	}
 
+	if err := resolveTaskSecretHandles(ctx, gateway, task); err != nil {
+		outcome := &ExecutionOutcome{Succeeded: false, ErrorCode: "SECRET_HANDLE_FAILED", Retryable: true}
+		result := &agentv1.TaskResult{OperationId: task.GetOperationId(), Succeeded: false, ErrorCode: outcome.ErrorCode, Retryable: outcome.Retryable, Attempt: task.GetAttempt()}
+		if sendErr := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); sendErr != nil {
+			return fmt.Errorf("send secret handle failure: %w", sendErr)
+		}
+		return nil
+	}
 	outcome, err := a.executor.ExecuteTask(ctx, task)
 	if err != nil || outcome == nil {
 		outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "EXECUTION_ERROR", Retryable: true}
@@ -403,6 +412,44 @@ func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayServi
 		if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: outcome.Observed}}); err != nil {
 			return fmt.Errorf("send server observed: %w", err)
 		}
+	}
+	return nil
+}
+
+func resolveTaskSecretHandles(ctx context.Context, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
+	if task == nil || task.GetType() != "provision" || gateway == nil {
+		return nil
+	}
+	payload := task.GetProvision()
+	legacy := false
+	if payload == nil && len(task.GetPayloadJson()) > 0 {
+		payload = &agentv1.ProvisionTaskPayload{}
+		if err := protojson.Unmarshal(task.GetPayloadJson(), payload); err != nil {
+			return fmt.Errorf("decode provision payload: %w", err)
+		}
+		legacy = true
+	}
+	if payload == nil {
+		return nil
+	}
+	for key, value := range payload.GetVariables() {
+		if !strings.HasPrefix(value, "sh:v1:") {
+			continue
+		}
+		resolved, err := gateway.ResolveSecret(ctx, &agentv1.ResolveSecretRequest{
+			OperationId: task.GetOperationId(), ServerId: task.GetServerId(), Handle: value,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve startup secret %q: %w", key, err)
+		}
+		payload.Variables[key] = resolved.GetValue()
+	}
+	if legacy {
+		encoded, err := protojson.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("encode resolved provision payload: %w", err)
+		}
+		task.Payload = &agentv1.Task_PayloadJson{PayloadJson: encoded}
 	}
 	return nil
 }

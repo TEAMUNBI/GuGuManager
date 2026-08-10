@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentGatewayService_Connect_FullMethodName = "/gugumanager.agent.v1.AgentGatewayService/Connect"
-	AgentGatewayService_Enroll_FullMethodName  = "/gugumanager.agent.v1.AgentGatewayService/Enroll"
+	AgentGatewayService_Connect_FullMethodName       = "/gugumanager.agent.v1.AgentGatewayService/Connect"
+	AgentGatewayService_Enroll_FullMethodName        = "/gugumanager.agent.v1.AgentGatewayService/Enroll"
+	AgentGatewayService_ResolveSecret_FullMethodName = "/gugumanager.agent.v1.AgentGatewayService/ResolveSecret"
 )
 
 // AgentGatewayServiceClient is the client API for AgentGatewayService service.
@@ -29,6 +30,7 @@ const (
 type AgentGatewayServiceClient interface {
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ConnectRequest, ConnectResponse], error)
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
+	ResolveSecret(ctx context.Context, in *ResolveSecretRequest, opts ...grpc.CallOption) (*ResolveSecretResponse, error)
 }
 
 type agentGatewayServiceClient struct {
@@ -62,12 +64,23 @@ func (c *agentGatewayServiceClient) Enroll(ctx context.Context, in *EnrollReques
 	return out, nil
 }
 
+func (c *agentGatewayServiceClient) ResolveSecret(ctx context.Context, in *ResolveSecretRequest, opts ...grpc.CallOption) (*ResolveSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveSecretResponse)
+	err := c.cc.Invoke(ctx, AgentGatewayService_ResolveSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentGatewayServiceServer is the server API for AgentGatewayService service.
 // All implementations must embed UnimplementedAgentGatewayServiceServer
 // for forward compatibility.
 type AgentGatewayServiceServer interface {
 	Connect(grpc.BidiStreamingServer[ConnectRequest, ConnectResponse]) error
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
+	ResolveSecret(context.Context, *ResolveSecretRequest) (*ResolveSecretResponse, error)
 	mustEmbedUnimplementedAgentGatewayServiceServer()
 }
 
@@ -83,6 +96,9 @@ func (UnimplementedAgentGatewayServiceServer) Connect(grpc.BidiStreamingServer[C
 }
 func (UnimplementedAgentGatewayServiceServer) Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Enroll not implemented")
+}
+func (UnimplementedAgentGatewayServiceServer) ResolveSecret(context.Context, *ResolveSecretRequest) (*ResolveSecretResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveSecret not implemented")
 }
 func (UnimplementedAgentGatewayServiceServer) mustEmbedUnimplementedAgentGatewayServiceServer() {}
 func (UnimplementedAgentGatewayServiceServer) testEmbeddedByValue()                             {}
@@ -130,6 +146,24 @@ func _AgentGatewayService_Enroll_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentGatewayService_ResolveSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentGatewayServiceServer).ResolveSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentGatewayService_ResolveSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentGatewayServiceServer).ResolveSecret(ctx, req.(*ResolveSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentGatewayService_ServiceDesc is the grpc.ServiceDesc for AgentGatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -140,6 +174,10 @@ var AgentGatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Enroll",
 			Handler:    _AgentGatewayService_Enroll_Handler,
+		},
+		{
+			MethodName: "ResolveSecret",
+			Handler:    _AgentGatewayService_ResolveSecret_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

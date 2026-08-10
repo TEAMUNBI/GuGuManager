@@ -197,6 +197,36 @@ func TestProductionValidationNeverIncludesSecretValues(t *testing.T) {
 	}
 }
 
+func TestProductionValidationAcceptsKeyringWithoutLegacyKeyFile(t *testing.T) {
+	env := completeProductionEnv(t)
+	delete(env, "GUGU_ENCRYPTION_KEY_FILE")
+	keyring := filepath.Join(t.TempDir(), "keyring.json")
+	if err := os.WriteFile(keyring, []byte(`{"active":"current","keys":{"current":"secret"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env["GUGU_ENCRYPTION_KEYRING_FILE"] = keyring
+	if _, err := load(mapLookup(env)); err != nil {
+		t.Fatalf("keyring-only production config rejected: %v", err)
+	}
+}
+
+func TestProductionValidationRejectsAmbiguousEncryptionKeyConfiguration(t *testing.T) {
+	env := completeProductionEnv(t)
+	keyring := filepath.Join(t.TempDir(), "keyring.json")
+	if err := os.WriteFile(keyring, []byte(`{"active":"current","keys":{"current":"secret"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env["GUGU_ENCRYPTION_KEYRING_FILE"] = keyring
+	_, err := load(mapLookup(env))
+	if err == nil {
+		t.Fatal("expected both encryption key mechanisms to be rejected")
+	}
+	validation, ok := err.(*ValidationError)
+	if !ok || !validation.Has("GUGU_ENCRYPTION_KEY_FILE") {
+		t.Fatalf("expected encryption key conflict validation, got %v", err)
+	}
+}
+
 func completeProductionEnv(t *testing.T) map[string]string {
 	t.Helper()
 	directory := t.TempDir()

@@ -9,6 +9,18 @@ option go_package = "github.com/gugumanager/gugumanager/api/proto/gugumanager/ag
 service AgentGatewayService {
   rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc ResolveSecret(ResolveSecretRequest) returns (ResolveSecretResponse);
+}
+
+message ResolveSecretRequest {
+  string operation_id = 1;
+  string server_id = 2;
+  string handle = 3;
+}
+
+message ResolveSecretResponse {
+  string value = 1;
+  google.protobuf.Timestamp expires_at = 2;
 }
 
 message ConnectRequest {

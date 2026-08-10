@@ -81,15 +81,17 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		"server_metrics",
 		"server_metric_history",
 		"console_logs",
+		"secret_handles",
 	} {
 		assertPublicTableExists(t, db, table, true)
 	}
+	assertPublicColumnExists(t, db, "secret_handles", "encrypted_value", true)
 	var applied int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if applied != 6 {
-		t.Fatalf("schema_migrations rows = %d, want 6", applied)
+	if applied != 7 {
+		t.Fatalf("schema_migrations rows = %d, want 7", applied)
 	}
 
 	// Idempotency: a repeated up must be a no-op without error.
@@ -109,9 +111,11 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		"server_tasks",
 		"password_reset_tokens",
 		"audit_events",
+		"secret_handles",
 	} {
 		assertPublicTableExists(t, db, table, false)
 	}
+	assertPublicColumnExists(t, db, "secret_handles", "encrypted_value", false)
 	if err := RunMigrations(ctx, db, dir, "down_all"); err != nil {
 		t.Fatalf("idempotent down_all: %v", err)
 	}
@@ -131,5 +135,22 @@ func assertPublicTableExists(t *testing.T, db *sql.DB, table string, want bool) 
 	}
 	if exists != want {
 		t.Fatalf("table %s exists = %t, want %t", table, exists, want)
+	}
+}
+
+func assertPublicColumnExists(t *testing.T, db *sql.DB, table, column string, want bool) {
+	t.Helper()
+	var exists bool
+	err := db.QueryRowContext(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+		)`, table, column).Scan(&exists)
+	if err != nil {
+		t.Fatalf("inspect column %s.%s: %v", table, column, err)
+	}
+	if exists != want {
+		t.Fatalf("column %s.%s exists = %t, want %t", table, column, exists, want)
 	}
 }

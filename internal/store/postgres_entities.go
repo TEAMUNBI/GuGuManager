@@ -404,6 +404,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	// no startup_values row is written and Startup() reports them as
 	// PACKAGE_INCOMPATIBLE.
 	var startupValues map[string]any
+	var startupDefinitions []domain.StartupVariable
 	if game, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil {
 		serverForStartup := domain.Server{
 			ID: serverID, GameID: input.GameDefinitionID, GameBundleDigest: input.GameBundleDigest,
@@ -423,7 +424,12 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 			break
 		}
 		startupValues = values
-		encoded, marshalErr := json.Marshal(values)
+		startupDefinitions = startup.Variables
+		storedValues, storageErr := s.startupValuesForStorage(startup.Variables, values)
+		if storageErr != nil {
+			return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法加密启动变量", true)
+		}
+		encoded, marshalErr := json.Marshal(storedValues)
 		if marshalErr != nil {
 			return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法保存启动变量", true)
 		}
@@ -441,10 +447,11 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	// the provision payload must be materialized here. Previously it was left
 	// empty and every provision failed on the agent with PROVISION_FAILED.
 	payloadJSON, marshalErr := json.Marshal(provisionTaskPayload{
-		GameDefinitionID:   input.GameDefinitionID,
-		ResourceLimits:     provisionResourceLimits{MemoryBytes: uint64(memoryBytes), DiskBytes: uint64(diskBytes)},
-		Allocations:        []provisionTaskAllocation{{AllocationID: allocationID, BindIP: bindIP, HostPort: uint32(port), ContainerPort: uint32(port), Protocol: provisionProtocolName(protocol)}},
-		Variables:          stringifiedStartupValues(startupValues),
+		GameDefinitionID:    input.GameDefinitionID,
+		ResourceLimits:      provisionResourceLimits{MemoryBytes: uint64(memoryBytes), DiskBytes: uint64(diskBytes)},
+		Allocations:         []provisionTaskAllocation{{AllocationID: allocationID, BindIP: bindIP, HostPort: uint32(port), ContainerPort: uint32(port), Protocol: provisionProtocolName(protocol)}},
+		Variables:           stringifiedNonSecretStartupValues(startupDefinitions, startupValues),
+		SecretKeys:          secretStartupKeys(startupDefinitions),
 		StartAfterProvision: false,
 	})
 	if marshalErr != nil {
@@ -636,18 +643,19 @@ func (s *Postgres) nextAvailablePort(ctx context.Context, nodeID string, protoco
 // 反序列化后执行 Docker provision）。该负载在 CreateServer 时落库到
 // server_tasks.checkpoint，ClaimTask 将其作为 PayloadJSON 下发给 Agent。
 type provisionTaskPayload struct {
-	GameDefinitionID    string                     `json:"gameDefinitionId"`
-	ResourceLimits      provisionResourceLimits    `json:"resourceLimits,omitempty"`
-	Allocations         []provisionTaskAllocation  `json:"allocations,omitempty"`
-	Variables           map[string]string          `json:"variables,omitempty"`
-	StartAfterProvision bool                       `json:"startAfterProvision"`
+	GameDefinitionID    string                    `json:"gameDefinitionId"`
+	ResourceLimits      provisionResourceLimits   `json:"resourceLimits,omitempty"`
+	Allocations         []provisionTaskAllocation `json:"allocations,omitempty"`
+	Variables           map[string]string         `json:"variables,omitempty"`
+	SecretKeys          []string                  `json:"secretKeys,omitempty"`
+	StartAfterProvision bool                      `json:"startAfterProvision"`
 }
 
 type provisionResourceLimits struct {
-	MemoryBytes uint64 `json:"memoryBytes,omitempty"`
-	DiskBytes   uint64 `json:"diskBytes,omitempty"`
+	MemoryBytes   uint64 `json:"memoryBytes,omitempty"`
+	DiskBytes     uint64 `json:"diskBytes,omitempty"`
 	CPUMillicores uint32 `json:"cpuMillicores,omitempty"`
-	PIDs        uint32 `json:"pids,omitempty"`
+	PIDs          uint32 `json:"pids,omitempty"`
 }
 
 type provisionTaskAllocation struct {
@@ -680,6 +688,32 @@ func stringifiedStartupValues(values map[string]any) map[string]string {
 		}
 	}
 	return result
+}
+
+func stringifiedNonSecretStartupValues(definitions []domain.StartupVariable, values map[string]any) map[string]string {
+	secret := make(map[string]struct{}, len(definitions))
+	for _, definition := range definitions {
+		if definition.Secret {
+			secret[definition.Key] = struct{}{}
+		}
+	}
+	filtered := make(map[string]any, len(values))
+	for key, value := range values {
+		if _, isSecret := secret[key]; !isSecret {
+			filtered[key] = value
+		}
+	}
+	return stringifiedStartupValues(filtered)
+}
+
+func secretStartupKeys(definitions []domain.StartupVariable) []string {
+	keys := make([]string, 0)
+	for _, definition := range definitions {
+		if definition.Secret {
+			keys = append(keys, definition.Key)
+		}
+	}
+	return keys
 }
 
 // provisionProtocolName 把 store 内部的 tcp/udp 协议名映射为 proto 枚举名。

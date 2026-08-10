@@ -239,9 +239,14 @@ func (m *Memory) SendConsoleCommand(serverID string, command string, actor domai
 		sequence = lines[len(lines)-1].Sequence + 1
 	}
 	now := time.Now().UTC()
-	m.console[serverID] = append(lines, domain.ConsoleLine{Sequence: sequence, Timestamp: now, Stream: "command", Message: "> " + command})
-	m.console[serverID] = append(m.console[serverID], domain.ConsoleLine{Sequence: sequence + 1, Timestamp: now.Add(20 * time.Millisecond), Stream: "stdout", Message: "[panel] command accepted by development adapter"})
+	commandLines := []domain.ConsoleLine{
+		{Sequence: sequence, Timestamp: now, Stream: "command", Message: "> " + command},
+		{Sequence: sequence + 1, Timestamp: now.Add(20 * time.Millisecond), Stream: "stdout", Message: "[panel] command accepted by development adapter"},
+	}
+	m.console[serverID] = append(m.console[serverID], commandLines...)
 	m.mu.Unlock()
+	// 实时广播给 WebSocket 订阅者（发布在锁外，避免占用 Store 写锁）。
+	m.consoleHub.Publish(serverID, commandLines)
 	m.recordAudit(currentActor.DisplayName, "console.command", "server", server.Name, "success", id.New())
 	return nil
 }

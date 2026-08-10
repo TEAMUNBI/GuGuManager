@@ -14,7 +14,9 @@ import (
 func (m *Memory) initializeBackupChecksums() {
 	for _, backups := range m.backups {
 		for _, backup := range backups {
-			m.backupChecksums[backup.ID] = backup.Checksum
+			if backup.Checksum != nil {
+				m.backupChecksums[backup.ID] = *backup.Checksum
+			}
 		}
 	}
 }
@@ -202,9 +204,9 @@ func (m *Memory) finishBackup(operationID string, serverID string, actor string)
 		backupID := id.New()
 		checksumBytes := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d:%d", backupID, server.GameBundleDigest, server.Metrics.DiskBytes, now.UnixNano())))
 		checksum := "sha256:" + hex.EncodeToString(checksumBytes[:])
-		backup := domain.Backup{ID: backupID, Name: "manual-" + now.Format("20060102-150405"), Status: "ready", SizeBytes: server.Metrics.DiskBytes, Checksum: checksum, CreatedAt: now}
+		backup := domain.Backup{ID: backupID, Name: "manual-" + now.Format("20060102-150405"), Status: "ready", SizeBytes: valuePointer(server.Metrics.DiskBytes), Checksum: valuePointer(checksum), CreatedAt: now}
 		m.backups[serverID] = append([]domain.Backup{backup}, m.backups[serverID]...)
-		m.backupChecksums[backup.ID] = backup.Checksum
+		m.backupChecksums[backup.ID] = *backup.Checksum
 	}
 	m.mu.Unlock()
 	if finished {
@@ -232,13 +234,11 @@ func (m *Memory) finishRestoreBackup(operationID string, serverID string, backup
 	backupIndex, backup, backupOK := m.backupLocked(serverID, backupID)
 	succeeded := false
 	completed := false
-	integrityFailed := false
 	if operationOK {
 		if !operationTargetsCurrentServer(operation, server, serverOK) {
 			failure := domain.OperationError{Code: "OPERATION_STALE", Message: "恢复操作对应的服务器状态已变化", Retryable: false}
 			completed = failOperationLocked(&operation, failure, now)
 		} else if !backupOK || !m.backupChecksumValidLocked(backup) {
-			integrityFailed = true
 			completed = failOperationLocked(&operation, domain.OperationError{Code: "BACKUP_INTEGRITY_FAILED", Message: "恢复期间备份摘要校验失败", Retryable: false}, now)
 		} else {
 			completed = completeOperationLocked(&operation, now)
@@ -249,11 +249,9 @@ func (m *Memory) finishRestoreBackup(operationID string, serverID string, backup
 		}
 	}
 	if backupOK && completed {
-		if integrityFailed {
-			backup.Status = "failed"
-		} else {
-			backup.Status = "ready"
-		}
+		// A restore failure is compensatable: preserve the last known-good
+		// recovery point so operators can retry without destructive metadata.
+		backup.Status = "ready"
 		m.backups[serverID][backupIndex] = backup
 	}
 	if succeeded && completed {
@@ -353,10 +351,17 @@ func (m *Memory) backupLocked(serverID string, backupID string) (int, domain.Bac
 }
 
 func (m *Memory) backupChecksumValidLocked(backup domain.Backup) bool {
-	expected, ok := m.backupChecksums[backup.ID]
-	if !ok || expected != backup.Checksum || !strings.HasPrefix(backup.Checksum, "sha256:") {
+	if backup.Checksum == nil {
 		return false
 	}
-	digest, err := hex.DecodeString(strings.TrimPrefix(backup.Checksum, "sha256:"))
+	expected, ok := m.backupChecksums[backup.ID]
+	if !ok || expected != *backup.Checksum || !strings.HasPrefix(*backup.Checksum, "sha256:") {
+		return false
+	}
+	digest, err := hex.DecodeString(strings.TrimPrefix(*backup.Checksum, "sha256:"))
 	return err == nil && len(digest) == sha256.Size
+}
+
+func valuePointer[T any](value T) *T {
+	return &value
 }
