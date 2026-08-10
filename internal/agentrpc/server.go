@@ -36,6 +36,9 @@ const (
 	heartbeatInterval  = 10 * time.Second
 	maxInFlightTasks   = 3
 	defaultClaimPeriod = 2 * time.Second
+	// maxAgentMessageBytes 放宽单帧消息上限，容纳备份下载等大 payload
+	// （备份归档以 base64 回传时体积约为原始大小的 4/3）。
+	maxAgentMessageBytes = 512 << 20
 )
 
 // TaskStore 是 gRPC server 依赖的 Store 最小接口。
@@ -82,6 +85,10 @@ func WithServerIPs(ips []net.IP) Option {
 type nodeStream struct {
 	nodeID string
 	send   func(*agentv1.ConnectResponse) error
+
+	// 文件操作请求-响应关联：request_id → 响应通道。
+	fileMu      sync.Mutex
+	filePending map[string]chan *agentv1.FileOperationResponse
 }
 
 // Server 是 AgentGatewayService 的实现。
@@ -139,6 +146,74 @@ func (s *Server) SendConsoleCommand(nodeID, serverID, command string) error {
 	return stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_ConsoleCommand{
 		ConsoleCommand: &agentv1.ConsoleCommand{RequestId: id.New(), ServerId: serverID, Command: command},
 	}})
+}
+
+// DispatchFileOperation 在指定节点的 Connect 流上发送文件操作请求并等待结构化响应。
+// 请求必须设置 ServerId；若 RequestId 为空则自动生成。调用方通过 ctx 控制超时。
+func (s *Server) DispatchFileOperation(ctx context.Context, nodeID string, req *agentv1.FileOperationRequest) (*agentv1.FileOperationResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("file operation request is nil")
+	}
+	s.streamMu.Lock()
+	stream := s.streams[nodeID]
+	s.streamMu.Unlock()
+	if stream == nil {
+		return nil, fmt.Errorf("node %s has no active connect stream", nodeID)
+	}
+
+	requestID := req.GetRequestId()
+	if requestID == "" {
+		requestID = id.New()
+		req.RequestId = requestID
+	}
+
+	ch := make(chan *agentv1.FileOperationResponse, 1)
+	stream.fileMu.Lock()
+	if stream.filePending == nil {
+		stream.filePending = make(map[string]chan *agentv1.FileOperationResponse)
+	}
+	stream.filePending[requestID] = ch
+	stream.fileMu.Unlock()
+	defer func() {
+		stream.fileMu.Lock()
+		delete(stream.filePending, requestID)
+		stream.fileMu.Unlock()
+	}()
+
+	if err := stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_FileOperationRequest{
+		FileOperationRequest: req,
+	}}); err != nil {
+		return nil, fmt.Errorf("send file operation request: %w", err)
+	}
+
+	select {
+	case resp := <-ch:
+		return resp, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// completeFileOperation 将 Agent 回发的文件操作响应投递给等待中的 DispatchFileOperation 调用。
+func (s *Server) completeFileOperation(nodeID string, resp *agentv1.FileOperationResponse) {
+	if resp == nil {
+		return
+	}
+	s.streamMu.Lock()
+	stream := s.streams[nodeID]
+	s.streamMu.Unlock()
+	if stream == nil {
+		return
+	}
+	stream.fileMu.Lock()
+	ch, ok := stream.filePending[resp.GetRequestId()]
+	stream.fileMu.Unlock()
+	if ok {
+		select {
+		case ch <- resp:
+		default:
+		}
+	}
 }
 
 // Enroll 校验注册令牌、注册节点，并为其签发 24h 的 client auth 证书。
@@ -245,9 +320,14 @@ func (s *Server) register(gs grpc.ServiceRegistrar) {
 	agentv1.RegisterAgentGatewayServiceServer(gs, s)
 }
 
-// newGRPCServer 构造带 mTLS 凭证的 grpc.Server。
+// newGRPCServer 构造带 mTLS 凭证的 grpc.Server。消息大小上限放宽到
+// maxAgentMessageBytes，支撑备份下载等大帧双向传输。
 func (s *Server) newGRPCServer(tlsConfig *tls.Config) *grpc.Server {
-	return grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
+	return grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsConfig)),
+		grpc.MaxRecvMsgSize(maxAgentMessageBytes),
+		grpc.MaxSendMsgSize(maxAgentMessageBytes),
+	)
 }
 
 // tlsConfig 组装 mTLS 配置：服务端证书（缺省自动签发）+ 要求并校验客户端证书

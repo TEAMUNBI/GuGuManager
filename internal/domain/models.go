@@ -263,6 +263,14 @@ type Backup struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// BackupContent 是备份下载的返回内容。Content 按 Base64 标记为原文或 base64 编码。
+type BackupContent struct {
+	Content   []byte
+	Base64    bool
+	SizeBytes int64
+	Filename  string
+}
+
 type Overview struct {
 	Environment          string       `json:"environment"`
 	ServerCount          int          `json:"serverCount"`

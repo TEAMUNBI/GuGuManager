@@ -266,7 +266,15 @@ func (a *agent) rootPool() *x509.CertPool {
 
 // dial 建立带 TLS 的 gRPC 客户端连接；测试通过 opts.dialer 注入 bufconn。
 func (a *agent) dial(ctx context.Context, tlsCfg *tls.Config, opts runOptions) (*grpc.ClientConn, error) {
-	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))}
+	// maxAgentMessageBytes 与服务端对应：放宽单帧上限以支撑备份下载等大帧。
+	const maxAgentMessageBytes = 512 << 20
+	dialOpts := []grpc.DialOption{
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxAgentMessageBytes),
+			grpc.MaxCallSendMsgSize(maxAgentMessageBytes),
+		),
+	}
 	target := a.cfg.PanelAddr
 	if opts.dialer != nil {
 		dialOpts = append(dialOpts, grpc.WithContextDialer(opts.dialer))
@@ -359,6 +367,8 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 			if err := a.applyCertificateResponse(p.CertificateResponse); err != nil {
 				a.logger.Warn("failed to apply rotated certificate", "error", err)
 			}
+		case *agentv1.ConnectResponse_FileOperationRequest:
+			a.handleFileOperation(ctx, stream, p.FileOperationRequest)
 		}
 	}
 }
@@ -524,6 +534,34 @@ func (a *agent) handleConsoleCommand(ctx context.Context, stream agentv1.AgentGa
 		ServerId: cmd.GetServerId(), FirstSequence: uint64(a.nextSequence(cmd.GetServerId())), Lines: []string{"> " + cmd.GetCommand(), echo},
 	}}}); err != nil {
 		a.logger.Warn("send console echo", "error", err)
+	}
+}
+
+// fileOperator 是执行器可选实现的文件操作能力。DockerExecutor 实现此接口；
+// 测试 fake 可选择不实现，此时文件请求返回 UNSUPPORTED。
+type fileOperator interface {
+	ExecuteFileOperation(ctx context.Context, req *agentv1.FileOperationRequest) *agentv1.FileOperationResponse
+}
+
+// handleFileOperation 执行容器内文件操作并回发结构化响应。
+func (a *agent) handleFileOperation(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, req *agentv1.FileOperationRequest) {
+	if req == nil {
+		return
+	}
+	var resp *agentv1.FileOperationResponse
+	fop, ok := a.executor.(fileOperator)
+	if !ok {
+		resp = &agentv1.FileOperationResponse{RequestId: req.GetRequestId(), Succeeded: false, ErrorCode: "UNSUPPORTED"}
+	} else {
+		resp = fop.ExecuteFileOperation(ctx, req)
+		if resp == nil {
+			resp = &agentv1.FileOperationResponse{RequestId: req.GetRequestId(), Succeeded: false, ErrorCode: "FILE_OPERATION_FAILED"}
+		}
+		resp.RequestId = req.GetRequestId()
+	}
+
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_FileOperationResponse{FileOperationResponse: resp}}); err != nil {
+		a.logger.Warn("send file operation response", "request", req.GetRequestId(), "error", err)
 	}
 }
 

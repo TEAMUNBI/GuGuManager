@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"net"
 	"net/mail"
 	"net/url"
@@ -15,8 +14,6 @@ const (
 	Development = "development"
 	Production  = "production"
 )
-
-var ErrProductionAdapterUnavailable = errors.New("production adapter is not implemented")
 
 type Config struct {
 	Environment       string

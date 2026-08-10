@@ -78,6 +78,7 @@ type ControlPlane interface {
 	CreateBackup(serverID string, idempotencyKey string, actor domain.User) (domain.Operation, error)
 	RestoreBackup(serverID string, backupID string, idempotencyKey string, actor domain.User) (domain.Operation, error)
 	DeleteBackup(serverID string, backupID string, idempotencyKey string, actor domain.User) (domain.Operation, error)
+	DownloadBackup(serverID string, backupID string, actor domain.User) (domain.BackupContent, error)
 	Heartbeat(nodeName string, agentVersion string) error
 }
 
@@ -95,12 +96,18 @@ func WithCommandDispatcher(d CommandDispatcher) Option {
 	return func(h *Handler) { h.dispatcher = d }
 }
 
+// WithEnvironment 注入运行环境（development/production），供 readyz 探针报告适配器。
+func WithEnvironment(environment string) Option {
+	return func(h *Handler) { h.environment = environment }
+}
+
 type Handler struct {
 	service          ControlPlane
 	logger           *slog.Logger
 	dispatcher       CommandDispatcher
 	loginLimiter     *identity.AttemptLimiter
 	sensitiveLimiter *identity.AttemptLimiter
+	environment      string
 }
 
 type principal struct {
@@ -167,12 +174,12 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/backups", h.auth(h.createBackup))
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/backups/{backupID}/restore", h.auth(h.restoreBackup))
 	mux.HandleFunc("DELETE /api/v1/servers/{serverID}/backups/{backupID}", h.auth(h.deleteBackup))
+	mux.HandleFunc("GET /api/v1/servers/{serverID}/backups/{backupID}/download", h.auth(h.downloadBackup))
 	mux.HandleFunc("GET /api/v1/nodes", h.auth(h.nodes))
 	mux.HandleFunc("GET /api/v1/game-definitions", h.auth(h.games))
 	mux.HandleFunc("GET /api/v1/operations", h.auth(h.operations))
 	mux.HandleFunc("GET /api/v1/operations/{operationID}", h.auth(h.operation))
 	mux.HandleFunc("GET /api/v1/audit-events", h.auth(h.audit))
-	mux.HandleFunc("POST /api/v1/dev/agent/heartbeat", h.agentHeartbeat)
 	return h.middleware(mux)
 }
 
@@ -257,7 +264,11 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) ready(w http.ResponseWriter, _ *http.Request) {
-	h.writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "adapter": "development-memory"})
+	adapter := h.environment
+	if adapter == "" {
+		adapter = "development-memory"
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "adapter": adapter})
 }
 
 func (h *Handler) setupStatus(w http.ResponseWriter, _ *http.Request) {
@@ -792,7 +803,7 @@ func (h *Handler) operations(w http.ResponseWriter, r *http.Request) {
 	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
 		parsed, err := strconv.Atoi(rawLimit)
 		if err != nil || parsed < 1 || parsed > 100 {
-			h.writeError(w, traceID(r), domain.NewProblem("VALIDATION_FAILED", "limit 蹇呴』鍦?1 鍒?100 涔嬮棿", false))
+			h.writeError(w, traceID(r), domain.NewProblem("VALIDATION_FAILED", "limit 必须在 1 到 100 之间", false))
 			return
 		}
 		limit = parsed
@@ -814,7 +825,7 @@ func paginateOperations(items []domain.Operation, cursor string, limit int) ([]d
 	if cursor != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 		if err != nil {
-			return nil, nil, domain.NewProblem("VALIDATION_FAILED", "cursor 鏃犳晥", false)
+			return nil, nil, domain.NewProblem("VALIDATION_FAILED", "cursor 无效", false)
 		}
 		found := false
 		for index, item := range items {
@@ -825,7 +836,7 @@ func paginateOperations(items []domain.Operation, cursor string, limit int) ([]d
 			}
 		}
 		if !found {
-			return nil, nil, domain.NewProblem("VALIDATION_FAILED", "cursor 宸茶繃鏈熸垨涓嶅睘浜庡綋鍓嶇粨鏋滈泦", false)
+			return nil, nil, domain.NewProblem("VALIDATION_FAILED", "cursor 已过期或不属于当前结果集", false)
 		}
 	}
 	end := min(start+limit, len(items))
@@ -1084,25 +1095,35 @@ func (h *Handler) deleteBackup(w http.ResponseWriter, r *http.Request) {
 	h.writeData(w, http.StatusAccepted, operation)
 }
 
-func (h *Handler) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == "" || !h.service.ValidateAgentToken(token) {
-		h.writeError(w, traceID(r), domain.NewProblem("AUTH_REQUIRED", "Agent 凭据无效", false))
+func (h *Handler) downloadBackup(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.backups.read") {
 		return
 	}
-	var request struct {
-		NodeName     string `json:"nodeName"`
-		AgentVersion string `json:"agentVersion"`
-	}
-	if err := decodeJSON(r, &request); err != nil {
-		h.writeJSONDecodeError(w, r, err, "心跳格式无效")
-		return
-	}
-	if err := h.service.Heartbeat(request.NodeName, request.AgentVersion); err != nil {
+	content, err := h.service.DownloadBackup(r.PathValue("serverID"), r.PathValue("backupID"), principalFrom(r).Session.User)
+	if err != nil {
 		h.writeError(w, traceID(r), err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	payload := content.Content
+	if content.Base64 {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(string(payload))
+		if decodeErr != nil {
+			h.writeError(w, traceID(r), domain.NewProblem("INTERNAL_ERROR", "备份内容解码失败", true))
+			return
+		}
+		payload = decoded
+	}
+	filename := content.Filename
+	if filename == "" {
+		filename = r.PathValue("backupID") + ".tar.gz"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(payload); err != nil {
+		h.logger.Warn("backup download: write response", "traceId", traceID(r), "error", err)
+	}
 }
 
 func (h *Handler) writeData(w http.ResponseWriter, status int, data any) {

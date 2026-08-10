@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1097,6 +1099,96 @@ func TestBackupRestoreAndDeleteEndpointsReturnOperations(t *testing.T) {
 	defer deleted.Body.Close()
 	if deleted.StatusCode != http.StatusAccepted {
 		t.Fatalf("delete backup status = %d", deleted.StatusCode)
+	}
+}
+
+// backupDownloadService 包装 Memory，注入可下载的备份内容以覆盖成功路径。
+type backupDownloadService struct {
+	*store.Memory
+	content domain.BackupContent
+}
+
+func (s *backupDownloadService) DownloadBackup(serverID string, backupID string, actor domain.User) (domain.BackupContent, error) {
+	return s.content, nil
+}
+
+func TestBackupDownloadEndpointStreamsDecodedArchive(t *testing.T) {
+	const serverID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	const backupID = "d3333333-3333-4333-8333-333333333333"
+	raw := []byte("fake-gzip-archive-bytes")
+	base := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Second)
+	defer func() { _ = base.Close() }()
+	service := &backupDownloadService{Memory: base, content: domain.BackupContent{
+		Content:   []byte(base64.StdEncoding.EncodeToString(raw)),
+		Base64:    true,
+		SizeBytes: int64(len(raw)),
+		Filename:  backupID + ".tar.gz",
+	}}
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, _ := authenticatedClient(t, testServer.URL)
+
+	response, err := client.Get(testServer.URL + "/api/v1/servers/" + serverID + "/backups/" + backupID + "/download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, want 200", response.StatusCode)
+	}
+	if ct := response.Header.Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("Content-Type = %q, want application/gzip", ct)
+	}
+	wantDisposition := `attachment; filename="` + backupID + `.tar.gz"`
+	if cd := response.Header.Get("Content-Disposition"); cd != wantDisposition {
+		t.Fatalf("Content-Disposition = %q, want %q", cd, wantDisposition)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, raw) {
+		t.Fatalf("download body = %q, want %q", body, raw)
+	}
+}
+
+func TestBackupDownloadEndpointMemoryStoreReturnsNotFound(t *testing.T) {
+	const serverID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	const backupID = "d3333333-3333-4333-8333-333333333333"
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, _ := authenticatedClient(t, testServer.URL)
+
+	response, err := client.Get(testServer.URL + "/api/v1/servers/" + serverID + "/backups/" + backupID + "/download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("download status = %d, want 404", response.StatusCode)
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	decodeResponse(t, response, &payload)
+	if payload.Error.Code != "NOT_FOUND" {
+		t.Fatalf("error code = %q, want NOT_FOUND", payload.Error.Code)
+	}
+
+	anonymous := &http.Client{}
+	unauthorized, err := anonymous.Get(testServer.URL + "/api/v1/servers/" + serverID + "/backups/" + backupID + "/download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous download status = %d, want 401", unauthorized.StatusCode)
 	}
 }
 

@@ -334,6 +334,15 @@ func (m *Memory) finishDeleteBackup(operationID string, serverID string, backupI
 	}
 }
 
+// DownloadBackup 在内存模式下不可用：开发环境不落盘真实备份归档，
+// 仅保留备份元数据，无法提供可下载的文件内容。
+func (m *Memory) DownloadBackup(serverID string, backupID string, actor domain.User) (domain.BackupContent, error) {
+	if err := m.AuthorizeServer(actor.ID, serverID, "servers.backups.read"); err != nil {
+		return domain.BackupContent{}, err
+	}
+	return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "备份文件在内存模式下不可下载", false)
+}
+
 func (m *Memory) backupLocked(serverID string, backupID string) (int, domain.Backup, bool) {
 	for index, backup := range m.backups[serverID] {
 		if backup.ID == backupID {

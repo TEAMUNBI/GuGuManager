@@ -23,6 +23,7 @@ message ConnectRequest {
     RunningTaskHeartbeat running_task_heartbeat = 8;
     MetricsBatch metrics_batch = 9;
     CertificateSigningRequest certificate_signing_request = 10;
+    FileOperationResponse file_operation_response = 11;
   }
 }
 
@@ -34,6 +35,7 @@ message ConnectResponse {
     Drain drain = 4;
     CertificateResponse certificate_response = 5;
     ConsoleCommand console_command = 6;
+    FileOperationRequest file_operation_request = 7;
   }
 }
 
@@ -318,4 +320,92 @@ message CertificateResponse {
 
 message Drain {
   string reason = 1;
+}
+
+// 文件操作请求（Control Plane → Agent）。通过 Connect 双向流下发，
+// Agent 在容器内执行后回发 FileOperationResponse（相同 request_id）。
+message FileOperationRequest {
+  string request_id = 1;
+  string server_id = 2;
+
+  oneof operation {
+    ListFilesInput list = 3;
+    ReadFileInput read = 4;
+    WriteFileInput write = 5;
+    MakeDirectoryInput mkdir = 6;
+    MoveFileInput move = 7;
+    RemoveFileInput remove = 8;
+    DownloadBackupInput download_backup = 9;
+  }
+
+  message ListFilesInput {
+    string path = 1;
+  }
+  message ReadFileInput {
+    string path = 1;
+  }
+  message WriteFileInput {
+    string path = 1;
+    bytes content = 2;
+    bool base64 = 3;
+  }
+  message MakeDirectoryInput {
+    string path = 1;
+  }
+  message MoveFileInput {
+    string source = 1;
+    string destination = 2;
+    bool replace = 3;
+  }
+  message RemoveFileInput {
+    string path = 1;
+    bool recursive = 2;
+  }
+  message DownloadBackupInput {
+    string backup_id = 1;
+  }
+}
+
+// 文件操作响应（Agent → Control Plane）。request_id 与请求对应。
+message FileOperationResponse {
+  string request_id = 1;
+  bool succeeded = 2;
+  string error_code = 3;
+
+  oneof result {
+    ListFilesResult list = 4;
+    ReadFileResult read = 5;
+    WriteFileResult write = 6;
+    MakeDirectoryResult mkdir = 7;
+    MoveFileResult move = 8;
+    RemoveFileResult remove = 9;
+    DownloadBackupResult download_backup = 10;
+  }
+
+  message FileEntry {
+    string name = 1;
+    string path = 2;
+    bool directory = 3;
+    uint64 size_bytes = 4;
+    google.protobuf.Timestamp modified_at = 5;
+  }
+  message ListFilesResult {
+    repeated FileEntry entries = 1;
+  }
+  message ReadFileResult {
+    bytes content = 1;
+    bool base64 = 2;
+    uint64 size_bytes = 3;
+    google.protobuf.Timestamp modified_at = 4;
+  }
+  message WriteFileResult {}
+  message MakeDirectoryResult {}
+  message MoveFileResult {}
+  message RemoveFileResult {}
+  message DownloadBackupResult {
+    bytes content = 1;
+    bool base64 = 2;
+    uint64 size_bytes = 3;
+    string filename = 4;
+  }
 }

@@ -79,9 +79,6 @@ func TestLoadRejectsMalformedDevelopmentValues(t *testing.T) {
 
 func TestProductionValidationReportsAllRequiredGateFields(t *testing.T) {
 	_, err := load(mapLookup(map[string]string{"GUGU_ENVIRONMENT": Production}))
-	if errors.Is(err, ErrProductionAdapterUnavailable) {
-		t.Fatalf("error = %v; adapter gate must run after field validation", err)
-	}
 
 	var validation *ValidationError
 	if !errors.As(err, &validation) {
@@ -122,9 +119,6 @@ func TestProductionConfigRejectsDevelopmentCredentials(t *testing.T) {
 	var validation *ValidationError
 	if !errors.As(err, &validation) || !validation.Has("GUGU_DEV_ADMIN_PASSWORD") {
 		t.Fatalf("error = %v, want development credential validation error", err)
-	}
-	if errors.Is(err, ErrProductionAdapterUnavailable) {
-		t.Fatal("adapter gate ran before rejecting development credentials")
 	}
 }
 
