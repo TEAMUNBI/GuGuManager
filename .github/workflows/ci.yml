@@ -210,8 +210,8 @@ jobs:
             fi
             sleep 1
           done
-          grep --fixed-strings '"status":"ready"' "$evidence_dir/ready.json"
-          grep --fixed-strings '"adapter":"development-memory"' "$evidence_dir/ready.json"
+          jq --exit-status '(.status == "ready") and (.adapter == "development")' \
+            "$evidence_dir/ready.json"
           curl --fail --silent --show-error --connect-timeout 2 --max-time 3 http://127.0.0.1:18081/ \
             --output "$evidence_dir/index.html"
           grep --fixed-strings '<title>GuGuManager / Control</title>' "$evidence_dir/index.html"
