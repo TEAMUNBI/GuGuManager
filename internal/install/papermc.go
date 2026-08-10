@@ -42,7 +42,7 @@ type paperMCBuildsPayload struct {
 }
 
 type paperMCBuild struct {
-	Build     int               `json:"build"`
+	Build     int              `json:"build"`
 	Downloads paperMCDownloads `json:"downloads"`
 }
 

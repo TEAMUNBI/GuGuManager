@@ -24,17 +24,17 @@ import (
 // carries every field the Agent needs to run and maintain a server, together
 // with the identity fields the control plane persists in game_bundles.
 type Bundle struct {
-	GameDefinitionID string            `json:"gameDefinitionId"`
+	GameDefinitionID  string            `json:"gameDefinitionId"`
 	DefinitionVersion string            `json:"definitionVersion"`
 	GameVersion       string            `json:"gameVersion"`
-	Digest            string            `json:"digest"`        // sha256:<hex>
+	Digest            string            `json:"digest"` // sha256:<hex>
 	SchemaVersion     string            `json:"schemaVersion"`
 	License           string            `json:"license"`
 	Compatibility     map[string]string `json:"compatibility"` // panel/agent/platforms 等
 	Capabilities      []string          `json:"capabilities"`
-	Image             string            `json:"image"`       // 运行时镜像（含 digest）
-	Command           json.RawMessage   `json:"command"`     // 启动命令模板
-	Variables         json.RawMessage   `json:"variables"`   // schema + secrets + bindings
+	Image             string            `json:"image"`     // 运行时镜像（含 digest）
+	Command           json.RawMessage   `json:"command"`   // 启动命令模板
+	Variables         json.RawMessage   `json:"variables"` // schema + secrets + bindings
 	Stop              json.RawMessage   `json:"stop"`
 	Health            json.RawMessage   `json:"health"`
 	Ports             json.RawMessage   `json:"ports"`
@@ -57,8 +57,8 @@ type bundleSourceDefinition struct {
 			Version string `json:"version"`
 		} `json:"release"`
 		Compatibility map[string]json.RawMessage `json:"compatibility"`
-		Capabilities  []string                  `json:"capabilities"`
-		Variables     json.RawMessage           `json:"variables"`
+		Capabilities  []string                   `json:"capabilities"`
+		Variables     json.RawMessage            `json:"variables"`
 		Runtime       struct {
 			Image   string          `json:"image"`
 			Command json.RawMessage `json:"command"`
@@ -103,7 +103,7 @@ func buildBundle(inputPath string) (*Bundle, error) {
 		return nil, err
 	}
 	bundle := &Bundle{
-		GameDefinitionID: definition.Metadata.ID,
+		GameDefinitionID:  definition.Metadata.ID,
 		DefinitionVersion: definition.Metadata.Version,
 		GameVersion:       definition.Spec.Release.Version,
 		SchemaVersion:     definition.APIVersion,

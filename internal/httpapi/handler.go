@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/gugumanager/gugumanager/internal/domain"
 	"github.com/gugumanager/gugumanager/internal/id"
 	"github.com/gugumanager/gugumanager/internal/identity"
-	"github.com/gorilla/websocket"
 )
 
 const (

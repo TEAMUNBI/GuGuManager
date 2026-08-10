@@ -370,7 +370,9 @@ func TestAgentEnrollsAndConnects(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: &fakeExecutor{}}) }()
+	go func() {
+		errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: &fakeExecutor{}})
+	}()
 
 	waitFor(t, "enroll", 10*time.Second, func() bool { return cp.enrollCount() == 1 })
 
@@ -455,7 +457,9 @@ func TestAgentExecutesPowerTask(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: exec}) }()
+	go func() {
+		errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: exec})
+	}()
 
 	waitFor(t, "executor call", 10*time.Second, func() bool { return exec.callCount() == 1 })
 	task := exec.receivedTask()

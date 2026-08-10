@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gugumanager/gugumanager/internal/store"
 	"github.com/gorilla/websocket"
+	"github.com/gugumanager/gugumanager/internal/store"
 )
 
 // wsDial 用已登录客户端的会话 cookie 建立控制台实时流连接。

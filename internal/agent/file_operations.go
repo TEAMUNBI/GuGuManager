@@ -21,8 +21,8 @@ import (
 
 const (
 	containerDataDir = "/data"
-	maxReadBytes     = 10 << 20  // 10 MiB
-	maxWriteBytes    = 10 << 20  // 10 MiB
+	maxReadBytes     = 10 << 20 // 10 MiB
+	maxWriteBytes    = 10 << 20 // 10 MiB
 )
 
 // FileEntry is a single entry in a directory listing result.

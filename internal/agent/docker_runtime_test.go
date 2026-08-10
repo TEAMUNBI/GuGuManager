@@ -21,26 +21,26 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeDocker struct {
-	mu         sync.Mutex
-	created    []runtime.ContainerConfig
-	started    []string
-	stopped    []string
-	restarted  []string
-	removed    []string
-	inspected  []string
-	status     runtime.ContainerStatus
-	statusErr  error
-	createID   string
-	createErr  error
-	actionErr  error
+	mu        sync.Mutex
+	created   []runtime.ContainerConfig
+	started   []string
+	stopped   []string
+	restarted []string
+	removed   []string
+	inspected []string
+	status    runtime.ContainerStatus
+	statusErr error
+	createID  string
+	createErr error
+	actionErr error
 
-	execOut   string
-	execErr   error
-	execArgv  [][]string
-	stats     runtime.ContainerStats
-	statsErr  error
-	env       map[string]string
-	envErr    error
+	execOut    string
+	execErr    error
+	execArgv   [][]string
+	stats      runtime.ContainerStats
+	statsErr   error
+	env        map[string]string
+	envErr     error
 	containers []string
 	listErr    error
 	logReader  io.ReadCloser
@@ -49,8 +49,8 @@ type fakeDocker struct {
 }
 
 type archiveOp struct {
-	ContainerID string
-	HostPath    string
+	ContainerID   string
+	HostPath      string
 	ContainerPath string
 }
 

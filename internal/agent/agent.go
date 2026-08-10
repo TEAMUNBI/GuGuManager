@@ -717,12 +717,12 @@ func (a *agent) collectServerMetrics(ctx context.Context, serverID string) *agen
 		return nil
 	}
 	m := &agentv1.ServerMetrics{
-		ServerId:          serverID,
-		CpuPercent:        stats.CPUPercent,
-		MemoryBytes:       stats.MemoryBytes,
-		MemoryLimitBytes:  stats.MemoryLimitBytes,
-		NetworkRxBytes:    stats.NetworkRxBytes,
-		NetworkTxBytes:    stats.NetworkTxBytes,
+		ServerId:         serverID,
+		CpuPercent:       stats.CPUPercent,
+		MemoryBytes:      stats.MemoryBytes,
+		MemoryLimitBytes: stats.MemoryLimitBytes,
+		NetworkRxBytes:   stats.NetworkRxBytes,
+		NetworkTxBytes:   stats.NetworkTxBytes,
 	}
 	if password := env["RCON_PASSWORD"]; password != "" {
 		if output, execErr := rt.ExecInContainer(ctx, containerName, []string{"rcon-cli", "--host", "127.0.0.1", "--port", "25575", "--password", password, "list"}); execErr == nil {

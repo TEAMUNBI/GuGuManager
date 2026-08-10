@@ -32,14 +32,14 @@ import (
 
 // fakeStore 是 TaskStore 接口的内存实现，用于集成测试。
 type fakeStore struct {
-	mu         sync.Mutex
-	nodes      map[string]domain.Node
-	nextNode   int
-	heartbeats []domain.Heartbeat
-	observed   []domain.ServerObserved
-	completed  []taskCompleted
-	queued     []*store.ClaimedTask
-	audits     []domain.AuditEvent
+	mu           sync.Mutex
+	nodes        map[string]domain.Node
+	nextNode     int
+	heartbeats   []domain.Heartbeat
+	observed     []domain.ServerObserved
+	completed    []taskCompleted
+	queued       []*store.ClaimedTask
+	audits       []domain.AuditEvent
 	consoleLines []domain.ConsoleLine
 	metrics      []domain.ServerMetrics
 }
