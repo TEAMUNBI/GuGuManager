@@ -117,8 +117,14 @@ func (s *Postgres) Session(token string) (domain.SessionView, error) {
 	// Update last_seen_at
 	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = $1 WHERE token_digest = $2`, time.Now().UTC(), digest[:])
 
-	// Reconstruct CSRF token from digest (we can't, so we need to store it differently)
-	// For now, return empty CSRF - we need to adjust the schema to store CSRF token in plaintext or separately
+	// csrf_digest 是不可逆摘要，无法从库中还原明文。会话恢复时轮换 CSRF
+	// token：生成新随机值并更新摘要，把明文返回给前端。这样页面刷新后
+	// 仍能继续携带有效的 X-CSRF-Token，写操作不被拦截。
+	csrf := randomToken()
+	csrfDigestValue := tokenDigest(csrf)
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET csrf_digest = $1 WHERE token_digest = $2`, csrfDigestValue[:], digest[:]); err != nil {
+		return domain.SessionView{}, domain.NewProblem("INTERNAL_ERROR", "无法恢复会话安全令牌", true)
+	}
 
 	user := domain.User{
 		ID:          userID,
@@ -128,7 +134,7 @@ func (s *Postgres) Session(token string) (domain.SessionView, error) {
 		Status:      status,
 	}
 
-	return domain.SessionView{User: user, CSRFToken: "", Environment: s.environment}, nil
+	return domain.SessionView{User: user, CSRFToken: csrf, Environment: s.environment}, nil
 }
 
 // Logout revokes a session.
