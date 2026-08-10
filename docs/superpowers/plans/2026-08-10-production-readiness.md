@@ -16,7 +16,7 @@
 
 | # | 里程碑 | 状态 | 提交 |
 | ---: | --- | --- | --- |
-| 1 | Secret 生命周期闭环 | 本地实现与回归完成，待提交/推送/CI | `feat(security): 完成 Secret 存储、投递与轮换闭环` |
+| 1 | Secret 生命周期闭环 | 本地实现与回归完成，远程 CI 已通过；真实 PostgreSQL/mTLS 集成待环境 | `feat(security): 完成 Secret 存储、投递与轮换闭环`；`fix(ci): 修复 Go 格式与容器构建门禁`；`fix(ci): 迁移 Moby 客户端并修复镜像构建`；`fix(ci): 修复容器健康检查断言` |
 | 2 | 备份状态机、完整性与失败补偿 | 待实施 | `fix(backup): 完善备份终态、空值语义与失败补偿` |
 | 3 | 可恢复、多副本实时控制台 | 待实施 | `feat(console): 增加可恢复的多副本实时控制台` |
 | 4 | 可靠 Outbox、租约恢复与跨副本一致性 | 待实施 | `feat(tasks): 实现可靠 Outbox 与多副本任务恢复` |
@@ -40,7 +40,7 @@
 - [x] Agent checkpoint、任务结果、Outbox、审计和前端状态不保存 Secret 明文。
 - [x] README、设计文档、配置示例和轮换说明同步。
 - [ ] 在真实 PostgreSQL 与 mTLS Agent 环境中执行一次创建、轮换、过期和错误节点解析集成验收。
-- [ ] 推送并确认远程 SHA 与 GitHub CI。
+- [x] 推送并确认远程 SHA 与 GitHub CI（`c7b592b`，run `31360440694` 全部实际 job 通过）。
 
 ## 2. 备份状态机、完整性与失败补偿
 
@@ -176,7 +176,7 @@ npm run e2e
 
 ## 当前已知验证边界
 
-- `go test ./...`、`go vet ./...`、Buf lint/breaking、Web 206 个单元测试、OpenAPI、类型检查、构建和 Chromium E2E 已在本地执行。
-- `govulncheck v1.6.0` 当前因旧模块路径 `github.com/docker/docker` 命中 GO-2026-5668、GO-2026-4887、GO-2026-4883。Go 官方漏洞库只在 `github.com/moby/moby/v2` 提供修复版本，Runtime 必须迁移到至少 `v2.0.0-beta.14` 后才能关闭该门禁。
-- 本机未配置 `GUGU_TEST_DATABASE_URL`、`GUGU_REDIS_URL` 或 Docker Engine；真实 PostgreSQL、Redis、Docker 和多副本验收尚未执行，不得标记为已通过。
+- `go test ./...`、`go vet ./...`、Buf lint/breaking、Web 206 个单元测试、OpenAPI、类型检查、构建和 Chromium E2E 已在本地执行；远程 CI run `31360440694` 的 Go、容器构建与 smoke、Web、PostgreSQL migrations 和 Chromium E2E 全部通过。
+- Runtime 已迁移到拆分的 `github.com/moby/moby/api v1.55.0` 与 `github.com/moby/moby/client v0.5.1`；`govulncheck v1.6.0` reachable scan 为 0 个漏洞，关闭旧 `github.com/docker/docker` 的三项门禁告警。
+- 本机未配置 `GUGU_TEST_DATABASE_URL`、`GUGU_REDIS_URL` 或 Docker Engine；真实 PostgreSQL、Redis、多副本和 Agent Docker 生命周期验收尚未执行，不得标记为已通过。
 - 当前构建存在既有 Vite chunk 警告：主 JS 约 568.70 kB、CSS 约 320.59 kB，后续发布门禁应完成代码分割和预算治理。
