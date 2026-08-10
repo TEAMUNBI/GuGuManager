@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { FileEntry, Operation, Server, ServerPermission } from "../lib/types";
+import type { Backup, FileEntry, Operation, Server, ServerPermission } from "../lib/types";
 import { ServerWorkspace } from "./ServerWorkspace";
 
 const mocks = vi.hoisted(() => ({
+  backups: vi.fn(),
+  downloadBackup: vi.fn(),
   files: vi.fn(),
   operation: vi.fn(),
   operations: vi.fn(),
@@ -17,6 +19,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../lib/api", () => ({
   ApiError: class ApiError extends Error {},
   api: {
+    backups: mocks.backups,
+    downloadBackup: mocks.downloadBackup,
     files: mocks.files,
     operation: mocks.operation,
     operations: mocks.operations,
@@ -429,5 +433,47 @@ describe("ServerWorkspace file listings", () => {
     expect(screen.queryByRole("button", { name: "Start" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Force terminate" })).not.toBeInTheDocument();
     expect(mocks.power).not.toHaveBeenCalled();
+  });
+
+  it("downloads a ready backup archive from the backup row", async () => {
+    mocks.backups.mockResolvedValue([
+      { id: "backup-1", name: "manual", status: "ready", sizeBytes: 1024, checksum: "sha256:abcd", createdAt: "2026-08-08T08:00:00Z" } satisfies Backup,
+    ]);
+    mocks.downloadBackup.mockResolvedValue(undefined);
+
+    render(
+      <MemoryRouter initialEntries={[`/servers/${server.id}/backups`]}>
+        <Routes>
+          <Route path="/servers/:serverId/*" element={<ServerWorkspace />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const downloadButton = await screen.findByRole("button", { name: "Download backup" });
+    expect(downloadButton).toBeEnabled();
+
+    fireEvent.click(downloadButton);
+
+    await waitFor(() => expect(mocks.downloadBackup).toHaveBeenCalledWith(server.id, "backup-1"));
+  });
+
+  it("reports a failed backup download through the toast", async () => {
+    mocks.backups.mockResolvedValue([
+      { id: "backup-2", name: "manual", status: "ready", sizeBytes: 1024, checksum: "sha256:abcd", createdAt: "2026-08-08T08:00:00Z" } satisfies Backup,
+    ]);
+    mocks.downloadBackup.mockRejectedValue(new Error("download unavailable"));
+
+    render(
+      <MemoryRouter initialEntries={[`/servers/${server.id}/backups`]}>
+        <Routes>
+          <Route path="/servers/:serverId/*" element={<ServerWorkspace />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const downloadButton = await screen.findByRole("button", { name: "Download backup" });
+    fireEvent.click(downloadButton);
+
+    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("download unavailable", "danger"));
   });
 });

@@ -166,6 +166,31 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload.data as T;
 }
 
+async function downloadBackup(serverId: string, backupId: string): Promise<void> {
+  const response = await globalThis.fetch(`/api/v1/servers/${serverId}/backups/${backupId}/download`, { credentials: "include" });
+  if (!response.ok) {
+    let code = "INTERNAL_ERROR";
+    let message = apiFallback().requestFailed;
+    try {
+      const payload = JSON.parse(await response.text()) as { error?: { code?: string; message?: string } };
+      if (payload.error?.code) code = payload.error.code;
+      if (payload.error?.message) message = payload.error.message;
+    } catch {
+      // Non-JSON error body; fall back to the generic message.
+    }
+    throw new ApiError(response.status, code, message);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${backupId}.tar.gz`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function listServers(query: string): Promise<Server[]> {
   const servers: Server[] = [];
   let cursor: string | null = null;
@@ -210,7 +235,6 @@ async function mockRequest<T>(path: string, init: RequestInit): Promise<T> {
   if (pathname === "/users" && method === "GET") return mock.listUsers() as Promise<T>;
   if (pathname === "/users" && method === "POST") return mock.createUser(JSON.parse(String(init.body))) as Promise<T>;
   if (/^\/users\/[^/]+\/password-reset-tokens$/.test(pathname) && method === "POST") return mock.issuePasswordResetToken(pathname.split("/")[2]) as Promise<T>;
-  if (/^\/users\/[^/]+$/.test(pathname) && method === "GET") return mock.getUser(pathname.split("/")[2]) as Promise<T>;
   if (/^\/users\/[^/]+$/.test(pathname) && method === "PATCH") return mock.updateUser(pathname.split("/")[2], JSON.parse(String(init.body))) as Promise<T>;
   if (pathname === "/overview") return mock.getOverview() as Promise<T>;
   if (pathname === "/servers" && method === "GET") return mock.listServers(new URLSearchParams(queryString).get("query") ?? "") as Promise<T>;
@@ -280,7 +304,6 @@ export const api = {
   session: () => request<Session>("/auth/session"),
   logout: (csrfToken: string) => request<void>("/auth/logout", bodylessMutation(csrfToken)),
   users: () => request<User[]>("/users"),
-  user: (userId: string) => request<User>(`/users/${userId}`),
   createUser: (input: CreateUserInput, csrfToken: string) => request<User>("/users", csrfMutation(input, csrfToken)),
   updateUser: (userId: string, input: UpdateUserInput, csrfToken: string) => request<User>(`/users/${userId}`, { ...csrfMutation(input, csrfToken), method: "PATCH" }),
   issuePasswordResetToken: (userId: string, csrfToken: string) => request<PasswordResetToken>(`/users/${userId}/password-reset-tokens`, bodylessMutation(csrfToken)),
@@ -306,6 +329,7 @@ export const api = {
   createBackup: (serverId: string, csrfToken: string) => request<Operation>(`/servers/${serverId}/backups`, bodylessMutation(csrfToken, `backup-${serverId}-${crypto.randomUUID()}`)),
   restoreBackup: (serverId: string, backupId: string, csrfToken: string) => request<Operation>(`/servers/${serverId}/backups/${backupId}/restore`, bodylessMutation(csrfToken, `restore-${backupId}-${crypto.randomUUID()}`)),
   deleteBackup: (serverId: string, backupId: string, csrfToken: string) => request<Operation>(`/servers/${serverId}/backups/${backupId}`, csrfDelete(csrfToken, `delete-${backupId}-${crypto.randomUUID()}`)),
+  downloadBackup: (serverId: string, backupId: string) => downloadBackup(serverId, backupId),
   allocations: (serverId: string) => request<Allocation[]>(`/servers/${serverId}/allocations`),
   createAllocation: (serverId: string, input: CreateAllocationInput, generation: number, csrfToken: string) => request<Operation>(`/servers/${serverId}/allocations`, generationMutation("POST", input, csrfToken, `allocation-create-${serverId}-${crypto.randomUUID()}`, generation)),
   setPrimaryAllocation: (serverId: string, allocationId: string, generation: number, csrfToken: string) => request<Operation>(`/servers/${serverId}/allocations/${allocationId}`, generationMutation("PATCH", { primary: true }, csrfToken, `allocation-primary-${allocationId}-${crypto.randomUUID()}`, generation)),

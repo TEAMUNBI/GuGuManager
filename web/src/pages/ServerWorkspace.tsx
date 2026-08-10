@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Archive, ArrowLeft, Braces, Check, ChevronRight, CircleAlert, Clipboard, File, FileCode2, FilePlus2, FileText, Folder, FolderPlus, Gauge, HardDrive, KeyRound, LockKeyhole, MemoryStick, Move, Network, Plus, Play, Power, RefreshCw, RotateCcw, Save, Send, Server as ServerIcon, Settings2, ShieldCheck, Square, Star, TerminalSquare, Trash2, Users } from "lucide-react";
+import { Activity, Archive, ArrowDownToLine, ArrowLeft, Braces, Check, ChevronRight, Circle, CircleAlert, Clipboard, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderPlus, Gauge, HardDrive, KeyRound, LockKeyhole, MemoryStick, Move, Network, Plus, Play, Power, RefreshCw, RotateCcw, Save, Send, Server as ServerIcon, Settings2, ShieldCheck, Square, Star, TerminalSquare, Trash2, Users } from "lucide-react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Allocation, Backup, ConsoleLine, FileEntry, Operation, Server, ServerPermission, Startup, StartupValue, StartupVariable } from "../lib/types";
@@ -9,6 +9,7 @@ import { ErrorState, LoadingState } from "../components/PageState";
 import { MetricBars } from "../components/MetricBars";
 import { StatusBadge, toneForNode, toneForPower } from "../components/StatusBadge";
 import { Modal } from "../components/Modal";
+import { FileEditor } from "../components/FileEditor";
 import { useAppContext } from "../app/App";
 import { isPowerControlLocked } from "../domain/power";
 import { type LocalizedCopy, type Locale, useCopy, useI18n } from "../i18n/I18n";
@@ -46,6 +47,13 @@ function localizedRelativeTime(value: string, locale: Locale): string {
   const hours = Math.round(minutes / 60);
   if (Math.abs(hours) < 24) return formatter.format(hours, "hour");
   return formatter.format(Math.round(hours / 24), "day");
+}
+
+function formatConsoleTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "--:--:--";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 const shellCopy = defineCopy({
@@ -176,19 +184,19 @@ const overviewCopy = defineCopy({
 
 const consoleCopy = defineCopy({
   "zh-CN": {
-    sendFailed: "命令发送失败", stream: "控制台流", sequence: "序号", waiting: "正在等待控制台输出…", commandPlaceholder: "输入服务器命令", stoppedPlaceholder: "服务器必须处于运行状态", commandAria: "控制台命令", send: "发送命令",
+    sendFailed: "命令发送失败", stream: "控制台流", sequence: "序号", waiting: "正在等待控制台输出…", commandPlaceholder: "输入服务器命令", stoppedPlaceholder: "服务器必须处于运行状态", commandAria: "控制台命令", send: "发送命令", autoScroll: "自动滚动", clearConsole: "清空控制台",
     eyebrow: "实时输出", connection: "连接状态", transport: "传输方式", transportValue: "实时（Agent 日志流）", lastSequence: "最后序号", snapshot: "快照", lineCount: (count: number) => `${count} 行`, inputLimit: "输入上限", characterCount: (count: number) => `${count} 个字符`, scoped: "命令输入受当前权限范围限制。", authorization: "管理服务会在发送时再次检查操作权限。",
   },
   en: {
-    sendFailed: "Command could not be sent", stream: "console stream", sequence: "seq", waiting: "Waiting for console output...", commandPlaceholder: "Enter a server command", stoppedPlaceholder: "Server must be running", commandAria: "Console command", send: "Send command",
+    sendFailed: "Command could not be sent", stream: "console stream", sequence: "seq", waiting: "Waiting for console output...", commandPlaceholder: "Enter a server command", stoppedPlaceholder: "Server must be running", commandAria: "Console command", send: "Send command", autoScroll: "Auto-scroll", clearConsole: "Clear console",
     eyebrow: "LIVE OUTPUT", connection: "Connection", transport: "Transport", transportValue: "Realtime (agent log stream)", lastSequence: "Last sequence", snapshot: "Snapshot", lineCount: (count: number) => `${count} ${count === 1 ? "line" : "lines"}`, inputLimit: "Input limit", characterCount: (count: number) => `${count} characters`, scoped: "Command input is restricted to your current permissions.", authorization: "The control plane checks authorization again before sending.",
   },
   ja: {
-    sendFailed: "コマンドを送信できません", stream: "コンソールストリーム", sequence: "連番", waiting: "コンソール出力を待機しています…", commandPlaceholder: "サーバーコマンドを入力", stoppedPlaceholder: "サーバーを起動してください", commandAria: "コンソールコマンド", send: "コマンドを送信",
+    sendFailed: "コマンドを送信できません", stream: "コンソールストリーム", sequence: "連番", waiting: "コンソール出力を待機しています…", commandPlaceholder: "サーバーコマンドを入力", stoppedPlaceholder: "サーバーを起動してください", commandAria: "コンソールコマンド", send: "コマンドを送信", autoScroll: "自動スクロール", clearConsole: "コンソールをクリア",
     eyebrow: "リアルタイム出力", connection: "接続状態", transport: "転送方式", transportValue: "リアルタイム（Agent ログストリーム）", lastSequence: "最終連番", snapshot: "スナップショット", lineCount: (count: number) => `${count} 行`, inputLimit: "入力上限", characterCount: (count: number) => `${count} 文字`, scoped: "コマンド入力は現在の権限範囲に限定されます。", authorization: "管理サービスが送信時に操作権限を再確認します。",
   },
   ko: {
-    sendFailed: "명령을 전송할 수 없습니다", stream: "콘솔 스트림", sequence: "순번", waiting: "콘솔 출력을 기다리는 중…", commandPlaceholder: "서버 명령 입력", stoppedPlaceholder: "서버가 실행 중이어야 합니다", commandAria: "콘솔 명령", send: "명령 전송",
+    sendFailed: "명령을 전송할 수 없습니다", stream: "콘솔 스트림", sequence: "순번", waiting: "콘솔 출력을 기다리는 중…", commandPlaceholder: "서버 명령 입력", stoppedPlaceholder: "서버가 실행 중이어야 합니다", commandAria: "콘솔 명령", send: "명령 전송", autoScroll: "자동 스크롤", clearConsole: "콘솔 지우기",
     eyebrow: "실시간 출력", connection: "연결 상태", transport: "전송 방식", transportValue: "실시간 (Agent 로그 스트림)", lastSequence: "마지막 순번", snapshot: "스냅샷", lineCount: (count: number) => `${count}줄`, inputLimit: "입력 제한", characterCount: (count: number) => `${count}자`, scoped: "명령 입력은 현재 권한 범위로 제한됩니다.", authorization: "관리 서비스가 전송 전에 작업 권한을 다시 확인합니다.",
   },
 });
@@ -201,6 +209,7 @@ const filesCopy = defineCopy({
     unableDirectory: "无法加载此目录。", retry: "重试", emptyDirectory: "此目录为空。", emptyDetail: "此路径下没有文件。", entries: (count: number) => `${count} 个项目`, pathBoundary: "限定路径 / server-data",
     createDirectory: "新建目录", createFile: "新建文件", location: "位置", cancel: "取消", create: "创建", editor: "文件编辑器", close: "关闭", save: "保存", binaryFile: "二进制文件", binaryDetail: "此文件可以 Base64 形式读取，但不能在文本编辑器中修改。", contentAria: "文件内容",
     moveOrRename: "移动或重命名", current: "当前位置", move: "移动", destination: "目标路径", deleteEntry: "删除项目？", deleteDescription: "这会从服务器目录中移除数据，且无法撤销。", andChildren: "及其所有子项目",
+    unsaved: "未保存", saved: "已保存",
   },
   en: {
     loadError: "Unable to load the file list", readFailed: "Unable to read the file", duplicate: "The name is empty or the destination already exists", directoryCreated: "Directory created", fileCreated: "File created", createFailed: "Unable to create the entry", fileSaved: "File saved", saveFailed: "Unable to save the file", entryMoved: "Entry moved", moveFailed: "Unable to move the entry", entryDeleted: "Entry deleted", deleteFailed: "Unable to delete the entry",
@@ -209,6 +218,7 @@ const filesCopy = defineCopy({
     unableDirectory: "Unable to load this directory.", retry: "Retry", emptyDirectory: "This directory is empty.", emptyDetail: "No files are present at this path.", entries: (count: number) => `${count} entries`, pathBoundary: "Allowed path / server-data",
     createDirectory: "Create directory", createFile: "Create file", location: "Location", cancel: "Cancel", create: "Create", editor: "File editor", close: "Close", save: "Save", binaryFile: "Binary file", binaryDetail: "This file is readable as base64 but cannot be edited in the text editor.", contentAria: "File content",
     moveOrRename: "Move or rename", current: "Current", move: "Move", destination: "Destination path", deleteEntry: "Delete entry?", deleteDescription: "This removes data from the server directory and cannot be undone.", andChildren: " and all children",
+    unsaved: "Unsaved", saved: "Saved",
   },
   ja: {
     loadError: "ファイル一覧を読み込めません", readFailed: "ファイルを読み込めません", duplicate: "名前が空か、移動先がすでに存在します", directoryCreated: "ディレクトリを作成しました", fileCreated: "ファイルを作成しました", createFailed: "項目を作成できません", fileSaved: "ファイルを保存しました", saveFailed: "ファイルを保存できません", entryMoved: "項目を移動しました", moveFailed: "項目を移動できません", entryDeleted: "項目を削除しました", deleteFailed: "項目を削除できません",
@@ -217,6 +227,7 @@ const filesCopy = defineCopy({
     unableDirectory: "このディレクトリを読み込めません。", retry: "再試行", emptyDirectory: "このディレクトリは空です。", emptyDetail: "このパスにファイルはありません。", entries: (count: number) => `${count} 件`, pathBoundary: "許可パス / server-data",
     createDirectory: "ディレクトリを作成", createFile: "ファイルを作成", location: "場所", cancel: "キャンセル", create: "作成", editor: "ファイルエディター", close: "閉じる", save: "保存", binaryFile: "バイナリファイル", binaryDetail: "このファイルは Base64 で読み取れますが、テキストエディターでは編集できません。", contentAria: "ファイル内容",
     moveOrRename: "移動または名前変更", current: "現在", move: "移動", destination: "移動先パス", deleteEntry: "項目を削除しますか？", deleteDescription: "サーバーディレクトリからデータが削除され、元に戻せません。", andChildren: " とすべての子項目",
+    unsaved: "未保存", saved: "保存済み",
   },
   ko: {
     loadError: "파일 목록을 불러올 수 없습니다", readFailed: "파일을 읽을 수 없습니다", duplicate: "이름이 비어 있거나 대상이 이미 존재합니다", directoryCreated: "디렉터리를 만들었습니다", fileCreated: "파일을 만들었습니다", createFailed: "항목을 만들 수 없습니다", fileSaved: "파일을 저장했습니다", saveFailed: "파일을 저장할 수 없습니다", entryMoved: "항목을 이동했습니다", moveFailed: "항목을 이동할 수 없습니다", entryDeleted: "항목을 삭제했습니다", deleteFailed: "항목을 삭제할 수 없습니다",
@@ -225,30 +236,31 @@ const filesCopy = defineCopy({
     unableDirectory: "이 디렉터리를 불러올 수 없습니다.", retry: "다시 시도", emptyDirectory: "이 디렉터리는 비어 있습니다.", emptyDetail: "이 경로에 파일이 없습니다.", entries: (count: number) => `${count}개 항목`, pathBoundary: "허용 경로 / server-data",
     createDirectory: "디렉터리 만들기", createFile: "파일 만들기", location: "위치", cancel: "취소", create: "만들기", editor: "파일 편집기", close: "닫기", save: "저장", binaryFile: "바이너리 파일", binaryDetail: "이 파일은 Base64로 읽을 수 있지만 텍스트 편집기에서 수정할 수 없습니다.", contentAria: "파일 내용",
     moveOrRename: "이동 또는 이름 변경", current: "현재", move: "이동", destination: "대상 경로", deleteEntry: "항목을 삭제할까요?", deleteDescription: "서버 디렉터리에서 데이터가 삭제되며 되돌릴 수 없습니다.", andChildren: " 및 모든 하위 항목",
+    unsaved: "저장되지 않음", saved: "저장됨",
   },
 });
 
 const backupsCopy = defineCopy({
   "zh-CN": {
-    loadError: "无法加载备份", operationUnavailable: "暂时无法获取任务状态。请先重试状态检查，再执行其他备份操作。", terminal: (status: string) => `备份任务状态：${status}`, operationName: { backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份" }, operationStatus: { queued: "等待中", leased: "已领取", dispatched: "已下发", running: "执行中", succeeded: "已完成", failed: "失败", canceled: "已取消" }, acceptedCreate: "创建备份任务已受理", created: "备份已创建", requestFailed: "无法提交备份任务", acceptedRestore: "恢复备份任务已受理", restored: "备份已恢复", restoreFailed: "无法提交恢复任务", acceptedDelete: "删除备份任务已受理", deleted: "备份已删除", deleteFailed: "无法删除备份", statusFailed: "无法查询任务状态", checksumCopied: "校验摘要已复制", checksumCopyFailed: "无法复制校验摘要",
+    loadError: "无法加载备份", downloadBackup: "下载备份", downloading: "下载中…", downloadFailed: "无法下载备份", operationUnavailable: "暂时无法获取任务状态。请先重试状态检查，再执行其他备份操作。", terminal: (status: string) => `备份任务状态：${status}`, operationName: { backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份" }, operationStatus: { queued: "等待中", leased: "已领取", dispatched: "已下发", running: "执行中", succeeded: "已完成", failed: "失败", canceled: "已取消" }, acceptedCreate: "创建备份任务已受理", created: "备份已创建", requestFailed: "无法提交备份任务", acceptedRestore: "恢复备份任务已受理", restored: "备份已恢复", restoreFailed: "无法提交恢复任务", acceptedDelete: "删除备份任务已受理", deleted: "备份已删除", deleteFailed: "无法删除备份", statusFailed: "无法查询任务状态", checksumCopied: "校验摘要已复制", checksumCopyFailed: "无法复制校验摘要",
     eyebrow: "恢复点", title: "备份", count: (count: number) => `此服务器记录了 ${count} 个快照。`, stopBeforeRestore: "恢复前请先停止服务器。", attempt: "尝试", retryStatus: "重试状态", transitionRunning: "已有备份转换操作仍在运行。", creating: (progress: number) => `创建中 · ${progress}%`, createBackup: "创建备份",
     checksumPending: "摘要待生成", copyChecksum: (name: string) => `复制 ${name} 的摘要`, status: { creating: "创建中", ready: "就绪", failed: "失败", restoring: "恢复中", deleting: "删除中" }, pending: "待处理", restoreAria: (name: string) => `恢复 ${name}`, deleteAria: (name: string) => `删除 ${name}`, stopServer: "先停止服务器", restoreBackup: "恢复备份", deleteBackup: "删除备份",
     emptyTitle: "还没有恢复点。", emptyDetail: "进行高风险更改前，请先创建手动备份。", creatingShort: "创建中…", restoreTitle: "恢复此备份？", restoreDescription: "恢复操作到达终态前，服务器必须保持停止。", cancel: "取消", restore: "恢复", checksumUnavailable: "摘要不可用", deleteTitle: "删除此备份？", deleteDescription: "删除操作完成后，此恢复点将被移除。",
   },
   en: {
-    loadError: "Unable to load backups", operationUnavailable: "Operation status is unavailable. Retry the status check before starting another backup action.", terminal: (status: string) => `Backup operation status: ${status}`, operationName: { backup: "Create backup", restore: "Restore backup", "backup-delete": "Delete backup" }, operationStatus: { queued: "Queued", leased: "Claimed", dispatched: "Dispatched", running: "Running", succeeded: "Succeeded", failed: "Failed", canceled: "Canceled" }, acceptedCreate: "Backup operation accepted", created: "Backup created", requestFailed: "Backup request failed", acceptedRestore: "Restore operation accepted", restored: "Backup restored", restoreFailed: "Restore request failed", acceptedDelete: "Backup deletion accepted", deleted: "Backup deleted", deleteFailed: "Backup deletion failed", statusFailed: "Status check failed", checksumCopied: "Checksum copied", checksumCopyFailed: "Unable to copy checksum",
+    loadError: "Unable to load backups", downloadBackup: "Download backup", downloading: "Downloading...", downloadFailed: "Unable to download backup", operationUnavailable: "Operation status is unavailable. Retry the status check before starting another backup action.", terminal: (status: string) => `Backup operation status: ${status}`, operationName: { backup: "Create backup", restore: "Restore backup", "backup-delete": "Delete backup" }, operationStatus: { queued: "Queued", leased: "Claimed", dispatched: "Dispatched", running: "Running", succeeded: "Succeeded", failed: "Failed", canceled: "Canceled" }, acceptedCreate: "Backup operation accepted", created: "Backup created", requestFailed: "Backup request failed", acceptedRestore: "Restore operation accepted", restored: "Backup restored", restoreFailed: "Restore request failed", acceptedDelete: "Backup deletion accepted", deleted: "Backup deleted", deleteFailed: "Backup deletion failed", statusFailed: "Status check failed", checksumCopied: "Checksum copied", checksumCopyFailed: "Unable to copy checksum",
     eyebrow: "RECOVERY POINTS", title: "Backups", count: (count: number) => `${count} ${count === 1 ? "snapshot" : "snapshots"} recorded for this server.`, stopBeforeRestore: "Stop the server before restoring a recovery point.", attempt: "attempt", retryStatus: "Retry status", transitionRunning: "An existing backup transition is still running.", creating: (progress: number) => `Creating · ${progress}%`, createBackup: "Create backup",
     checksumPending: "Checksum pending", copyChecksum: (name: string) => `Copy checksum for ${name}`, status: { creating: "Creating", ready: "Ready", failed: "Failed", restoring: "Restoring", deleting: "Deleting" }, pending: "Pending", restoreAria: (name: string) => `Restore ${name}`, deleteAria: (name: string) => `Delete ${name}`, stopServer: "Stop the server first", restoreBackup: "Restore backup", deleteBackup: "Delete backup",
     emptyTitle: "No recovery points yet.", emptyDetail: "Create a manual backup before risky changes.", creatingShort: "Creating...", restoreTitle: "Restore this backup?", restoreDescription: "The server must remain stopped until the restore operation reaches a terminal state.", cancel: "Cancel", restore: "Restore", checksumUnavailable: "Checksum unavailable", deleteTitle: "Delete this backup?", deleteDescription: "The recovery point will be removed after the deletion operation completes.",
   },
   ja: {
-    loadError: "バックアップを読み込めません", operationUnavailable: "操作状態を確認できません。別のバックアップ操作を始める前に、状態確認を再試行してください。", terminal: (status: string) => `バックアップ操作の状態：${status}`, operationName: { backup: "バックアップを作成", restore: "バックアップを復元", "backup-delete": "バックアップを削除" }, operationStatus: { queued: "待機中", leased: "取得済み", dispatched: "送信済み", running: "実行中", succeeded: "成功", failed: "失敗", canceled: "キャンセル済み" }, acceptedCreate: "バックアップ操作を受け付けました", created: "バックアップを作成しました", requestFailed: "バックアップ要求に失敗しました", acceptedRestore: "復元操作を受け付けました", restored: "バックアップを復元しました", restoreFailed: "復元要求に失敗しました", acceptedDelete: "バックアップ削除を受け付けました", deleted: "バックアップを削除しました", deleteFailed: "バックアップを削除できません", statusFailed: "状態を確認できません", checksumCopied: "チェックサムをコピーしました", checksumCopyFailed: "チェックサムをコピーできません",
+    loadError: "バックアップを読み込めません", downloadBackup: "バックアップをダウンロード", downloading: "ダウンロード中…", downloadFailed: "バックアップをダウンロードできません", operationUnavailable: "操作状態を確認できません。別のバックアップ操作を始める前に、状態確認を再試行してください。", terminal: (status: string) => `バックアップ操作の状態：${status}`, operationName: { backup: "バックアップを作成", restore: "バックアップを復元", "backup-delete": "バックアップを削除" }, operationStatus: { queued: "待機中", leased: "取得済み", dispatched: "送信済み", running: "実行中", succeeded: "成功", failed: "失敗", canceled: "キャンセル済み" }, acceptedCreate: "バックアップ操作を受け付けました", created: "バックアップを作成しました", requestFailed: "バックアップ要求に失敗しました", acceptedRestore: "復元操作を受け付けました", restored: "バックアップを復元しました", restoreFailed: "復元要求に失敗しました", acceptedDelete: "バックアップ削除を受け付けました", deleted: "バックアップを削除しました", deleteFailed: "バックアップを削除できません", statusFailed: "状態を確認できません", checksumCopied: "チェックサムをコピーしました", checksumCopyFailed: "チェックサムをコピーできません",
     eyebrow: "復元ポイント", title: "バックアップ", count: (count: number) => `このサーバーには ${count} 件のスナップショットがあります。`, stopBeforeRestore: "復元する前にサーバーを停止してください。", attempt: "試行", retryStatus: "状態を再確認", transitionRunning: "既存のバックアップ処理がまだ実行中です。", creating: (progress: number) => `作成中 · ${progress}%`, createBackup: "バックアップを作成",
     checksumPending: "チェックサム待機中", copyChecksum: (name: string) => `${name} のチェックサムをコピー`, status: { creating: "作成中", ready: "準備完了", failed: "失敗", restoring: "復元中", deleting: "削除中" }, pending: "処理待ち", restoreAria: (name: string) => `${name} を復元`, deleteAria: (name: string) => `${name} を削除`, stopServer: "先にサーバーを停止", restoreBackup: "バックアップを復元", deleteBackup: "バックアップを削除",
     emptyTitle: "復元ポイントはまだありません。", emptyDetail: "危険な変更の前に手動バックアップを作成してください。", creatingShort: "作成中…", restoreTitle: "このバックアップを復元しますか？", restoreDescription: "復元操作が完了するまでサーバーを停止したままにしてください。", cancel: "キャンセル", restore: "復元", checksumUnavailable: "チェックサムは利用できません", deleteTitle: "このバックアップを削除しますか？", deleteDescription: "削除操作が完了すると、この復元ポイントは削除されます。",
   },
   ko: {
-    loadError: "백업을 불러올 수 없습니다", operationUnavailable: "작업 상태를 확인할 수 없습니다. 다른 백업 작업을 시작하기 전에 상태 확인을 다시 시도하세요.", terminal: (status: string) => `백업 작업 상태: ${status}`, operationName: { backup: "백업 만들기", restore: "백업 복원", "backup-delete": "백업 삭제" }, operationStatus: { queued: "대기 중", leased: "할당됨", dispatched: "전송됨", running: "실행 중", succeeded: "성공", failed: "실패", canceled: "취소됨" }, acceptedCreate: "백업 작업이 접수되었습니다", created: "백업을 만들었습니다", requestFailed: "백업 요청에 실패했습니다", acceptedRestore: "복원 작업이 접수되었습니다", restored: "백업을 복원했습니다", restoreFailed: "복원 요청에 실패했습니다", acceptedDelete: "백업 삭제가 접수되었습니다", deleted: "백업을 삭제했습니다", deleteFailed: "백업을 삭제할 수 없습니다", statusFailed: "상태를 확인할 수 없습니다", checksumCopied: "체크섬을 복사했습니다", checksumCopyFailed: "체크섬을 복사할 수 없습니다",
+    loadError: "백업을 불러올 수 없습니다", downloadBackup: "백업 다운로드", downloading: "다운로드 중…", downloadFailed: "백업을 다운로드할 수 없습니다", operationUnavailable: "작업 상태를 확인할 수 없습니다. 다른 백업 작업을 시작하기 전에 상태 확인을 다시 시도하세요.", terminal: (status: string) => `백업 작업 상태: ${status}`, operationName: { backup: "백업 만들기", restore: "백업 복원", "backup-delete": "백업 삭제" }, operationStatus: { queued: "대기 중", leased: "할당됨", dispatched: "전송됨", running: "실행 중", succeeded: "성공", failed: "실패", canceled: "취소됨" }, acceptedCreate: "백업 작업이 접수되었습니다", created: "백업을 만들었습니다", requestFailed: "백업 요청에 실패했습니다", acceptedRestore: "복원 작업이 접수되었습니다", restored: "백업을 복원했습니다", restoreFailed: "복원 요청에 실패했습니다", acceptedDelete: "백업 삭제가 접수되었습니다", deleted: "백업을 삭제했습니다", deleteFailed: "백업을 삭제할 수 없습니다", statusFailed: "상태를 확인할 수 없습니다", checksumCopied: "체크섬을 복사했습니다", checksumCopyFailed: "체크섬을 복사할 수 없습니다",
     eyebrow: "복원 지점", title: "백업", count: (count: number) => `이 서버에 ${count}개의 스냅샷이 기록되어 있습니다.`, stopBeforeRestore: "복원하기 전에 서버를 중지하세요.", attempt: "시도", retryStatus: "상태 다시 확인", transitionRunning: "기존 백업 전환 작업이 아직 실행 중입니다.", creating: (progress: number) => `생성 중 · ${progress}%`, createBackup: "백업 만들기",
     checksumPending: "체크섬 대기 중", copyChecksum: (name: string) => `${name} 체크섬 복사`, status: { creating: "생성 중", ready: "준비됨", failed: "실패", restoring: "복원 중", deleting: "삭제 중" }, pending: "대기 중", restoreAria: (name: string) => `${name} 복원`, deleteAria: (name: string) => `${name} 삭제`, stopServer: "먼저 서버 중지", restoreBackup: "백업 복원", deleteBackup: "백업 삭제",
     emptyTitle: "아직 복원 지점이 없습니다.", emptyDetail: "위험한 변경 전에 수동 백업을 만드세요.", creatingShort: "생성 중…", restoreTitle: "이 백업을 복원할까요?", restoreDescription: "복원 작업이 완료될 때까지 서버를 중지 상태로 유지해야 합니다.", cancel: "취소", restore: "복원", checksumUnavailable: "체크섬을 사용할 수 없습니다", deleteTitle: "이 백업을 삭제할까요?", deleteDescription: "삭제 작업이 완료되면 이 복원 지점이 제거됩니다.",
@@ -418,19 +430,217 @@ function ServerOverview({ server }: { server: Server }) {
 
 function ResourceLine({ icon, label, used, detail, percent, blue = false }: { icon: React.ReactNode; label: string; used: string; detail: string; percent: number; blue?: boolean }) { return <div className="resource-line"><div className="resource-line-top"><span>{icon}{label}</span><strong>{used} <small>{detail}</small></strong></div><div className={`resource-track${blue ? " track-blue" : ""}`}><i style={{ width: `${Math.min(100, percent)}%` }} /></div></div>; }
 
+interface ReceivedConsoleLine extends ConsoleLine {
+  receivedAt: string;
+}
+
 function ConsoleTab({ server }: { server: Server }) {
   const copy = useCopy(consoleCopy);
-  const { locale } = useI18n();
   const { session, toast } = useAppContext();
-  const [lines, setLines] = useState<ConsoleLine[]>([]);
+  const [lines, setLines] = useState<ReceivedConsoleLine[]>([]);
   const [command, setCommand] = useState("");
   const [sending, setSending] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
   const consoleRef = useRef<HTMLDivElement>(null);
-  const load = useCallback(() => api.console(server.id).then(setLines).catch(() => undefined), [server.id]);
-  useEffect(() => { load(); const timer = window.setInterval(load, 1800); return () => window.clearInterval(timer); }, [load]);
-  useEffect(() => { consoleRef.current?.scrollTo({ top: consoleRef.current.scrollHeight }); }, [lines]);
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!command.trim()) return; setSending(true); try { await api.command(server.id, command, session.csrfToken); setCommand(""); await load(); } catch (reason) { toast(reason instanceof Error ? reason.message : copy.sendFailed, "danger"); } finally { setSending(false); } };
-  return <div className="console-layout"><div className="terminal-panel"><div className="terminal-head"><div><span className="terminal-light red" /><span className="terminal-light amber" /><span className="terminal-light green" /></div><span>{server.name} / {copy.stream}</span><span className="console-sequence">{copy.sequence} {lines.at(-1)?.sequence ?? 0}</span></div><div className="terminal-output" ref={consoleRef} translate="no">{lines.map((line) => <div className={`terminal-line line-${line.stream}`} key={line.sequence}><time>{new Date(line.timestamp).toLocaleTimeString(intlLocales[locale], { hour12: false })}</time><span>{line.message}</span></div>)}{!lines.length && <div className="terminal-empty">{copy.waiting}</div>}</div><form className="console-command" onSubmit={submit}><span>&gt;</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder={server.observedPower === "running" ? copy.commandPlaceholder : copy.stoppedPlaceholder} disabled={server.observedPower !== "running" || sending} aria-label={copy.commandAria} name="console-command" autoComplete="off" spellCheck={false} /><button className="icon-button" disabled={server.observedPower !== "running" || sending || !command.trim()} aria-label={copy.send} title={copy.send}><Send size={17} /></button></form></div><aside className="console-side"><div className="panel"><div className="panel-heading"><div><p className="eyebrow">{copy.eyebrow}</p><h2>{copy.connection}</h2></div><span className="live-dot" /></div><dl className="detail-list compact-list"><div><dt>{copy.transport}</dt><dd>{copy.transportValue}</dd></div><div><dt>{copy.lastSequence}</dt><dd translate="no">{lines.at(-1)?.sequence ?? "—"}</dd></div><div><dt>{copy.snapshot}</dt><dd>{copy.lineCount(lines.length)}</dd></div><div><dt>{copy.inputLimit}</dt><dd>{copy.characterCount(512)}</dd></div></dl></div><div className="console-tip"><ShieldCheck size={17} /><span><strong>{copy.scoped}</strong><small>{copy.authorization}</small></span></div></aside></div>;
+  const draftRef = useRef("");
+
+  const load = useCallback(() => api.console(server.id).then((next) => {
+    const receivedAt = new Date().toISOString();
+    setLines(next.map((line) => ({ ...line, receivedAt })));
+  }).catch(() => undefined), [server.id]);
+
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(load, 1800);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  useEffect(() => {
+    if (autoScroll) {
+      const el = consoleRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [lines, autoScroll]);
+
+  const handleScroll = useCallback(() => {
+    const el = consoleRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    setAutoScroll(atBottom);
+  }, []);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const trimmed = command.trim();
+    if (!trimmed) return;
+    setSending(true);
+    try {
+      await api.command(server.id, trimmed, session.csrfToken);
+      setHistory((prev) => {
+        if (prev.length > 0 && prev[prev.length - 1] === trimmed) return prev;
+        const next = [...prev, trimmed];
+        if (next.length > 50) next.shift();
+        return next;
+      });
+      setHistoryIndex(-1);
+      setCommand("");
+      await load();
+    } catch (reason) {
+      toast(reason instanceof Error ? reason.message : copy.sendFailed, "danger");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (history.length === 0) return;
+      if (historyIndex === -1) {
+        draftRef.current = command;
+        const next = history.length - 1;
+        setHistoryIndex(next);
+        setCommand(history[next]);
+      } else if (historyIndex > 0) {
+        const next = historyIndex - 1;
+        setHistoryIndex(next);
+        setCommand(history[next]);
+      }
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (historyIndex === -1) return;
+      if (historyIndex < history.length - 1) {
+        const next = historyIndex + 1;
+        setHistoryIndex(next);
+        setCommand(history[next]);
+      } else {
+        setHistoryIndex(-1);
+        setCommand(draftRef.current);
+      }
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setHistoryIndex(-1);
+      setCommand("");
+    }
+  };
+
+  const handleCommandChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setCommand(event.target.value);
+    if (historyIndex !== -1) setHistoryIndex(-1);
+  };
+
+  const toggleAutoScroll = () => {
+    setAutoScroll((prev) => {
+      const next = !prev;
+      if (next) {
+        const el = consoleRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+      return next;
+    });
+  };
+
+  const clear = () => setLines([]);
+
+  const inputDisabled = server.observedPower !== "running" || sending;
+
+  return (
+    <div className="console-layout">
+      <div className="terminal-panel">
+        <div className="terminal-head">
+          <div className="terminal-lights">
+            <span className="terminal-light red" />
+            <span className="terminal-light amber" />
+            <span className="terminal-light green" />
+          </div>
+          <span>{server.name} / {copy.stream}</span>
+          <div className="terminal-actions">
+            <span className="console-sequence">{copy.sequence} {lines.at(-1)?.sequence ?? 0}</span>
+            <button
+              type="button"
+              className={`terminal-tool${autoScroll ? " active" : ""}`}
+              onClick={toggleAutoScroll}
+              aria-pressed={autoScroll}
+              title={copy.autoScroll}
+              aria-label={copy.autoScroll}
+            >
+              <ArrowDownToLine size={14} />
+            </button>
+            <button
+              type="button"
+              className="terminal-tool"
+              onClick={clear}
+              title={copy.clearConsole}
+              aria-label={copy.clearConsole}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
+        <div className="terminal-output" ref={consoleRef} onScroll={handleScroll} translate="no">
+          {lines.map((line) => (
+            <div className={`terminal-line line-${line.stream}`} key={line.sequence}>
+              <time>{formatConsoleTime(line.timestamp || line.receivedAt)}</time>
+              <span>{line.message}</span>
+            </div>
+          ))}
+          {!lines.length && <div className="terminal-empty">{copy.waiting}</div>}
+        </div>
+        <form className="console-command" onSubmit={submit}>
+          <span>&gt;</span>
+          <input
+            value={command}
+            onChange={handleCommandChange}
+            onKeyDown={handleKeyDown}
+            placeholder={server.observedPower === "running" ? copy.commandPlaceholder : copy.stoppedPlaceholder}
+            disabled={inputDisabled}
+            aria-label={copy.commandAria}
+            name="console-command"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button className="icon-button" disabled={inputDisabled || !command.trim()} aria-label={copy.send} title={copy.send}>
+            <Send size={17} />
+          </button>
+        </form>
+      </div>
+      <aside className="console-side">
+        <div className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{copy.eyebrow}</p>
+              <h2>{copy.connection}</h2>
+            </div>
+            <span className="live-dot" />
+          </div>
+          <dl className="detail-list compact-list">
+            <div><dt>{copy.transport}</dt><dd>{copy.transportValue}</dd></div>
+            <div><dt>{copy.lastSequence}</dt><dd translate="no">{lines.at(-1)?.sequence ?? "—"}</dd></div>
+            <div><dt>{copy.snapshot}</dt><dd>{copy.lineCount(lines.length)}</dd></div>
+            <div><dt>{copy.inputLimit}</dt><dd>{copy.characterCount(512)}</dd></div>
+          </dl>
+        </div>
+        <div className="console-tip">
+          <ShieldCheck size={17} />
+          <span>
+            <strong>{copy.scoped}</strong>
+            <small>{copy.authorization}</small>
+          </span>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function fileTypeIcon(name: string): React.ReactNode {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".json")) return <Braces size={17} />;
+  if (lower.endsWith(".yaml") || lower.endsWith(".yml") || lower.endsWith(".properties")) return <Settings2 size={17} />;
+  if (lower.endsWith(".txt") || lower.endsWith(".log") || lower.endsWith(".md")) return <FileText size={17} />;
+  if (lower.endsWith(".sh") || lower.endsWith(".js") || lower.endsWith(".ts") || lower.endsWith(".py") || lower.endsWith(".conf") || lower.endsWith(".cfg")) return <FileCode2 size={17} />;
+  return <File size={17} />;
 }
 
 function FilesTab({ server, canWrite = true }: { server: Server; canWrite?: boolean }) {
@@ -442,7 +652,7 @@ function FilesTab({ server, canWrite = true }: { server: Server; canWrite?: bool
   const [loadedPath, setLoadedPath] = useState("");
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [editor, setEditor] = useState<{ path: string; content: string; encoding: "utf-8" | "base64" } | null>(null);
+  const [editor, setEditor] = useState<{ path: string; content: string; originalContent: string; encoding: "utf-8" | "base64"; sizeBytes: number; modifiedAt: string } | null>(null);
   const [createMode, setCreateMode] = useState<"file" | "directory" | null>(null);
   const [entryName, setEntryName] = useState("");
   const [moveEntry, setMoveEntry] = useState<FileEntry | null>(null);
@@ -492,7 +702,7 @@ function FilesTab({ server, canWrite = true }: { server: Server; canWrite?: bool
     setBusy(true);
     try {
       const content = await api.fileContent(server.id, entry.path);
-      setEditor({ path: content.path, content: content.content, encoding: content.encoding });
+      setEditor({ path: content.path, content: content.content, originalContent: content.content, encoding: content.encoding, sizeBytes: content.sizeBytes, modifiedAt: content.modifiedAt });
     } catch (reason) {
       toast(reason instanceof Error ? reason.message : copy.readFailed, "danger");
     } finally { setBusy(false); }
@@ -531,6 +741,9 @@ function FilesTab({ server, canWrite = true }: { server: Server; canWrite?: bool
     catch (reason) { toast(reason instanceof Error ? reason.message : copy.deleteFailed, "danger"); }
     finally { setBusy(false); }
   };
+  const isDirty = editor !== null && editor.content !== editor.originalContent;
+  const editorName = editor?.path.split("/").at(-1) ?? "";
+  const editorParts = editor ? editor.path.split("/") : [];
   return <>
     <div className="panel file-panel" aria-busy={controlsLocked}>
       <div className="file-toolbar">
@@ -548,7 +761,7 @@ function FilesTab({ server, canWrite = true }: { server: Server; canWrite?: bool
       <div className="file-list">
         {entries.map((entry) => <div className="file-row" key={entry.path}>
           <button type="button" className="file-open" onClick={() => void openFile(entry)} disabled={controlsLocked || loadError !== ""}>
-            <span className={`file-icon file-${entry.kind}`}>{entry.kind === "directory" ? <Folder size={17} fill="currentColor" /> : entry.name.endsWith(".txt") ? <FileText size={17} /> : entry.name.endsWith(".yml") || entry.name.endsWith(".json") ? <FileCode2 size={17} /> : <File size={17} />}</span>
+            <span className={`file-icon file-${entry.kind}`}>{entry.kind === "directory" ? <Folder size={17} fill="currentColor" /> : fileTypeIcon(entry.name)}</span>
             <span className="file-name" translate="no"><strong>{entry.name}</strong><small title={entry.path}>{entry.path}</small></span>
           </button>
           <span>{entry.kind === "directory" ? "—" : formatBytes(entry.sizeBytes)}</span>
@@ -565,7 +778,7 @@ function FilesTab({ server, canWrite = true }: { server: Server; canWrite?: bool
       <footer className="file-foot"><span>{copy.entries(entries.length)}</span><span>{copy.pathBoundary}</span></footer>
     </div>
     <Modal open={createMode !== null && canWrite} title={createMode === "directory" ? copy.createDirectory : copy.createFile} description={`${copy.location}: /${path}`} onClose={() => setCreateMode(null)} dismissible={!busy} footer={<><button type="button" className="button secondary" onClick={() => setCreateMode(null)} disabled={busy}>{copy.cancel}</button><button type="button" className="button primary" onClick={() => void create()} disabled={busy || !entryName.trim() || !canWrite}>{createMode === "directory" ? <FolderPlus size={16} /> : <FilePlus2 size={16} />}{copy.create}</button></>}><div className="modal-form"><label>{copy.name}<input value={entryName} onChange={(event) => setEntryName(event.target.value)} autoFocus maxLength={128} disabled={busy || !canWrite} /></label></div></Modal>
-    <Modal open={editor !== null} title={editor?.path.split("/").at(-1) ?? copy.editor} description={editor ? `/${editor.path}` : ""} onClose={() => setEditor(null)} dismissible={!busy} footer={<><button type="button" className="button secondary" onClick={() => setEditor(null)} disabled={busy}>{copy.close}</button><button type="button" className="button primary" onClick={() => void save()} disabled={busy || !canWrite || editor?.encoding !== "utf-8"}><Save size={16} />{copy.save}</button></>}>{editor?.encoding === "base64" ? <div className="binary-file-note"><ShieldCheck size={20} /><div><strong>{copy.binaryFile}</strong><span>{copy.binaryDetail}</span></div></div> : <textarea className="file-editor" value={editor?.content ?? ""} onChange={(event) => setEditor((current) => current ? { ...current, content: event.target.value } : current)} spellCheck={false} aria-label={copy.contentAria} autoFocus disabled={busy || !canWrite} />}</Modal>
+    <Modal open={editor !== null} title={editorName || copy.editor} description={editor ? `/${editor.path}` : ""} onClose={() => setEditor(null)} dismissible={!busy} footer={<><button type="button" className="button secondary" onClick={() => setEditor(null)} disabled={busy}>{copy.close}</button><button type="button" className="button primary" onClick={() => void save()} disabled={busy || !canWrite || editor?.encoding !== "utf-8" || !isDirty}><Save size={16} />{copy.save}</button></>}>{editor?.encoding === "base64" ? <div className="binary-file-note"><ShieldCheck size={20} /><div><strong>{copy.binaryFile}</strong><span>{copy.binaryDetail}</span></div></div> : editor && <div className="editor-wrapper"><div className="editor-breadcrumb" translate="no">{editorParts.slice(0, -1).map((part, index) => <span key={index}><span className="editor-breadcrumb-part">{part}</span><ChevronRight size={12} /></span>)}<span className="editor-breadcrumb-current">{isDirty && <span className="editor-dirty-dot" title={copy.unsaved} aria-label={copy.unsaved}><Circle size={8} fill="currentColor" /></span>}{editorName}</span></div><div className="editor-meta"><span>{formatBytes(editor.sizeBytes)}</span><i /><span>{localizedDateTime(editor.modifiedAt, locale)}</span><i /><span className={isDirty ? "editor-status-dirty" : "editor-status-saved"}>{isDirty ? copy.unsaved : copy.saved}</span></div><FileEditor value={editor.content} onChange={(next) => setEditor((current) => current ? { ...current, content: next } : current)} fileName={editorName} readOnly={busy || !canWrite} ariaLabel={copy.contentAria} /></div>}</Modal>
     <Modal open={moveEntry !== null && canWrite} title={copy.moveOrRename} description={moveEntry ? `${copy.current}: /${moveEntry.path}` : ""} onClose={() => setMoveEntry(null)} dismissible={!busy} footer={<><button type="button" className="button secondary" onClick={() => setMoveEntry(null)} disabled={busy}>{copy.cancel}</button><button type="button" className="button primary" onClick={() => void move()} disabled={busy || !canWrite || !destination.trim() || destination.trim() === moveEntry?.path}><Move size={16} />{copy.move}</button></>}><div className="modal-form"><label>{copy.destination}<input value={destination} onChange={(event) => setDestination(event.target.value)} autoFocus disabled={busy || !canWrite} /></label></div></Modal>
     <Modal open={deleteEntry !== null && canWrite} title={copy.deleteEntry} description={copy.deleteDescription} onClose={() => setDeleteEntry(null)} dismissible={!busy} footer={<><button type="button" className="button secondary" onClick={() => setDeleteEntry(null)} disabled={busy}>{copy.cancel}</button><button type="button" className="button danger-solid" onClick={() => void remove()} disabled={busy || !canWrite}><Trash2 size={16} />{copy.deleteTitle}</button></>}><div className="danger-confirm"><CircleAlert size={22} /><div><strong>{deleteEntry?.name}</strong><span>/{deleteEntry?.path}{deleteEntry?.kind === "directory" ? copy.andChildren : ""}</span></div></div></Modal>
   </>;
@@ -577,6 +790,7 @@ function BackupsTab({ server, canCreate = true, canRestore = true, canDelete = t
   const { session, toast } = useAppContext();
   const [backups, setBackups] = useState<Backup[]>([]);
   const [busy, setBusy] = useState("");
+  const [downloadingId, setDownloadingId] = useState("");
   const [activeOperation, setActiveOperation] = useState<Operation | null>(null);
   const [operationError, setOperationError] = useState("");
   const [restoreTarget, setRestoreTarget] = useState<Backup | null>(null);
@@ -682,6 +896,17 @@ function BackupsTab({ server, canCreate = true, canRestore = true, canDelete = t
       toast(copy.checksumCopyFailed, "danger");
     }
   };
+  const download = async (backup: Backup) => {
+    if (backup.status !== "ready" || downloadingId !== "") return;
+    setDownloadingId(backup.id);
+    try {
+      await api.downloadBackup(server.id, backup.id);
+    } catch (reason) {
+      toast(reason instanceof Error ? reason.message : copy.downloadFailed, "danger");
+    } finally {
+      setDownloadingId("");
+    }
+  };
   const restoreBlocked = server.observedPower !== "stopped";
   return <>
     <div className="backup-toolbar">
@@ -710,6 +935,7 @@ function BackupsTab({ server, canCreate = true, canRestore = true, canDelete = t
         <StatusBadge tone={backup.status === "ready" ? "success" : backup.status === "failed" ? "danger" : "warning"}>{copy.status[backup.status]}</StatusBadge>
         <div className="backup-meta"><span>{backup.sizeBytes == null ? copy.pending : formatBytes(backup.sizeBytes)}</span><small>{localizedDateTime(backup.createdAt, locale)}</small></div>
         <div className="backup-actions">
+          <button type="button" className="icon-button" onClick={() => void download(backup)} disabled={locked || backup.status !== "ready" || downloadingId !== ""} aria-label={copy.downloadBackup} title={downloadingId === backup.id ? copy.downloading : copy.downloadBackup}><Download size={15} className={downloadingId === backup.id ? "spin" : ""} /></button>
           {canRestore && <button type="button" className="icon-button" onClick={() => setRestoreTarget(backup)} disabled={locked || backup.status !== "ready" || restoreBlocked} aria-label={copy.restoreAria(backup.name)} aria-describedby={restoreBlocked ? "backup-restore-help" : undefined} title={restoreBlocked ? copy.stopServer : copy.restoreBackup}><RotateCcw size={15} /></button>}
           {canDelete && <button type="button" className="icon-button danger-button" onClick={() => setDeleteTarget(backup)} disabled={locked || backup.status !== "ready"} aria-label={copy.deleteAria(backup.name)} title={copy.deleteBackup}><Trash2 size={15} /></button>}
         </div>

@@ -367,13 +367,6 @@ export class MockClient {
     return this.userOrder.map((userId) => cloneMockUser(this.users.get(userId)!.user));
   }
 
-  async getUser(userId: string): Promise<User> {
-    this.requirePlatformAdmin();
-    const record = this.users.get(userId);
-    if (!record) throw new Error("NOT_FOUND");
-    return cloneMockUser(record.user);
-  }
-
   async createUser(input: CreateUserInput): Promise<User> {
     this.requirePlatformAdmin();
     const email = normalizeMockEmail(input.email);
