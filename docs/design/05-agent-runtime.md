@@ -16,6 +16,8 @@ Agent 主动向 Control Plane 建立出站 mTLS 双向 gRPC 流，以适应 NAT 
 
 私钥从不离开节点。注册、轮换、吊销和失败尝试写入审计。
 
+该注册与证书轮换流程已在生产模式落地：Agent 经 gRPC `Enroll` 注册并消费一次性令牌，`RotateCertificate` 在现有连接上轮换短期证书；节点被吊销后连接与未领取任务立即失效。
+
 ## 3. Proto 互操作约定
 
 - `Task.payload` 的 `payload_json`、`provision`、`power`、`backup` 和 `extension` 同属一个 `oneof`。`payload_json` 仅用于旧协议兼容；新协议必须选择对应的 typed arm，不得发送或回退到 `payload_json`。
@@ -31,6 +33,8 @@ Agent 主动向 Control Plane 建立出站 mTLS 双向 gRPC 流，以适应 NAT 
 - 重连采用有上限的指数退避与随机抖动；Control Plane 根据 operation ID 补发未完成任务。
 - Agent 启动后盘点带 GuGuManager 标签的容器、端口和数据目录，先回报差异再接受新破坏性任务。
 - 日志与指标通道有界；背压时优先保留任务确认和结果，日志允许产生带计数的丢弃事件。
+
+当前控制台日志与指标由 Agent 通过 `LogBatch`/`MetricsBatch` 帧上报，Control Plane 双写内存缓冲（热读缓存）与 PostgreSQL：日志写入 `console_logs`（每服务器保留最近 500 行），指标 upsert 到 `server_metrics` 并追加 `server_metric_history`（每服务器保留最近 60 点）；控制面启动时 `RestoreTelemetry` 从 DB 恢复，重启后数据不丢失。
 
 ## 5. 节点布局
 
@@ -67,8 +71,12 @@ Agent 主动向 Control Plane 建立出站 mTLS 双向 gRPC 流，以适应 NAT 
 - 压缩包先扫描条目数量、展开总大小、压缩比、绝对路径和链接，再解压到隔离目录并原子提交。
 - 下载、删除、覆盖、移动和解压均重新授权；删除与解压写入审计。
 
+文件操作已通过 gRPC `FileOperation` 帧在 Agent 上真实执行：list/read/mkdir/move/remove 在容器停止时短暂启动、操作完成后恢复原运行状态；write 使用 `CopyArchiveToContainer`（docker cp 语义），在停止容器上直接工作，不要求容器启动。
+
 ## 8. 备份与恢复
 
 备份记录包含格式版本、Bundle 摘要、文件清单摘要、内容摘要、大小和一致性方式。恢复流程为：停服、获取恢复锁、校验摘要、暂存解包、原子切换、启动与健康检查、提交或回滚。
 
 控制面数据库备份与游戏数据备份是两个独立运维对象。生产恢复演练必须同时覆盖二者和对象存储凭据轮换。
+
+备份创建已由 Agent 在容器内打包数据卷并回传 checksum/size/storageLocation，归档保存在节点本地备份目录；备份下载通过 REST `GET /api/v1/servers/{serverID}/backups/{backupID}/download` 或 gRPC `DownloadBackup` 从节点本地归档回传内容。

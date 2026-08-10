@@ -28,6 +28,7 @@ web/.vite/
 web/coverage/
 web/playwright-report/
 web/test-results/
+web/*.tsbuildinfo
 
 # IDE and operating system
 .idea/

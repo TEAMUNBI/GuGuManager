@@ -25,9 +25,40 @@ tags:
     description: Approved GameDefinition and Bundle catalog entries.
   - name: Audit
     description: Append-only development audit events.
-  - name: Agent
-    description: Development-only agent heartbeat authenticated by the development agent token.
 paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Liveness probe
+      description: Returns 200 whenever the process is up. No authentication.
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: ok}
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness probe
+      description: Returns 200 once the control plane is ready to accept traffic. No authentication.
+      security: []
+      responses:
+        '200':
+          description: Service is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, adapter]
+                properties:
+                  status: {type: string, const: ready}
+                  adapter: {type: string, description: Storage adapter in use, e.g. development-memory.}
   /setup/status:
     get:
       tags: [Setup]
@@ -848,6 +879,29 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/backups/{backupId}/download:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - $ref: '#/components/parameters/BackupId'
+    get:
+      tags: [Servers]
+      operationId: downloadServerBackup
+      summary: 下载备份归档
+      description: Streams the verified backup archive as an attachment. Requires the servers.backups.read permission on the server.
+      responses:
+        '200':
+          description: 备份归档二进制流
+          headers:
+            Content-Disposition:
+              description: attachment; filename="<backupId>.tar.gz"
+              schema: {type: string}
+          content:
+            application/gzip:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /nodes:
     get:
       tags: [Nodes]
@@ -943,41 +997,12 @@ paths:
                     items: {$ref: '#/components/schemas/AuditEvent'}
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
-  /dev/agent/heartbeat:
-    post:
-      tags: [Agent]
-      operationId: developmentAgentHeartbeat
-      summary: Mark a development node as available
-      description: Development adapter endpoint. Production Agent transport will use mTLS and gRPC instead of this bearer-token HTTP route.
-      security:
-        - agentToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [nodeName, agentVersion]
-              properties:
-                nodeName: {type: string}
-                agentVersion: {type: string}
-      responses:
-        '204': {description: Node heartbeat recorded}
-        '401': {$ref: '#/components/responses/Error'}
-        '404': {$ref: '#/components/responses/Error'}
-        '415': {$ref: '#/components/responses/Error'}
-        '422': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     cookieAuth:
       type: apiKey
       in: cookie
       name: gugu_session
-    agentToken:
-      type: http
-      scheme: bearer
-      bearerFormat: development agent token
   parameters:
     ServerId:
       name: serverId

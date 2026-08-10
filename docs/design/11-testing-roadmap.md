@@ -12,7 +12,7 @@
 - 端到端：初始化/登录、节点注册、服务器创建、电源、控制台、文件、备份和审计。
 - 安全测试：越权、CSRF、路径与链接逃逸、恶意包、Secret 泄露、重放和资源耗尽。
 
-上述层级是目标矩阵，不代表当前仓库已经具有对应测试。
+上述层级是目标矩阵。当前已具备的测试：Go 侧 18 个包全绿（含 Postgres store 的 ControlPlane 契约断言、000006 指标/日志持久化与跨重启恢复、迁移集成、Agent 执行器与 60+ 文件操作测试）、前端 206 个单元测试与 Chromium E2E；尚未具备真实 Docker 节点上的游戏生命周期一致性、跨浏览器矩阵与 Outbox/多副本恢复测试。
 
 ## 2. 当前本地与 CI 门禁
 
@@ -25,12 +25,13 @@
 - Redocly OpenAPI 3.1 lint、`openapi-typescript --check` 生成漂移检查；PR 由 oasdiff 与目标分支比较 breaking changes。
 - `npm audit --audit-level=high`、`npm test`、`npm run typecheck` 与 `npm run build`。
 - PostgreSQL 17 service 中的 `000001_core`/`000002_identity`/`000003_membership_permissions` 顺序 up、关键约束断言、逆序 down 与对象移除测试；`000003` 会覆盖 legacy 空权限 membership 的回填，并拒绝缺少 `servers.read`、未知、重复或 `NULL` permission。测试使用唯一 Schema，且连接前要求显式 URL 和以 `_test` 结尾的数据库名。
+- Agent 与 Postgres store：`internal/agent` 的 Docker 任务执行器（provision/power/backup）与 60+ 文件操作测试（含备份下载、停止态容器写入、容器状态保持），`internal/store` 的 Postgres ControlPlane 契约测试（编译期断言覆盖全部契约方法）、000006 指标/日志持久化与跨重启恢复测试（`TestPostgresMetricsAndConsolePersistAcrossRestart`：在真实 PG 上经 `NewPostgres` 执行全部迁移后写入，再以新 store 实例 `RestoreTelemetry` 恢复断言）与迁移集成测试。
 - Chromium E2E 使用构建后的 SPA 和同源真实 Go Control Plane，验证未登录深链、登录、固定服务器详情与退出，并要求观察真实 API 响应。
 - 对同一 `github.sha` 开发 Control Plane 镜像执行回环 `/readyz` 与 SPA 烟雾测试，生成 Trivy 漏洞 JSON 和 CycloneDX SBOM，并阻断存在修复版本的 HIGH/CRITICAL 漏洞。
 
 本地没有 PostgreSQL 时迁移集成测试会明确 `Skip`；这只验证跳过路径，真实 SQL 结果必须来自 PostgreSQL job。Protobuf/OpenAPI 的 PR 目标分支比较需要 Git 历史，本工作区没有 `.git`，因此本地只能执行仓库基线比较和工作流静态检查。
 
-当前 CI 尚未声明：真实数据库并发初始化/租约测试、Docker Agent、游戏生命周期一致性、跨浏览器矩阵、镜像签名、来源证明与通用仓库 Secret/IaC 扫描。浏览器 E2E、容器启动、Trivy 和 SBOM 已进入工作流，但本工作区没有 `.git` 或 Docker，只有本机 Chromium E2E 具有真实运行证据；其余仍需 GitHub run 证明。未真实执行的检查不得在 PR 或发布记录中写成已通过。
+当前 CI 尚未声明：真实数据库并发初始化/租约测试、真实 Docker 节点上的游戏生命周期一致性、跨浏览器矩阵、镜像签名、来源证明与通用仓库 Secret/IaC 扫描。浏览器 E2E、容器启动、Trivy 和 SBOM 已进入工作流；本工作区没有 `.git` 或 Docker，本机已真实运行 Go 18 个包（含 Agent 文件操作与 Postgres store 契约测试）、前端 206 个测试和 Chromium E2E，CI 步骤本身仍需 GitHub run 证明。未真实执行的检查不得在 PR 或发布记录中写成已通过。
 
 ## 3. 目标 CI 与发布门禁
 
@@ -83,13 +84,13 @@
 
 ## 6. 当前阶段 1 状态
 
-- `1A Identity`：完成开发 Argon2id 口令、Session Token 摘要、受控 Bootstrap setup、本地用户管理页面、单次密码重置页面、用户停用/重置会话与 reset token 撤销、membership 资源授权、in-flight reservation 限流、Argon2 并发门、写入提交前重新授权和 production 配置硬门禁；PostgreSQL/Redis 适配器、持久会话、多副本与实时连接撤销未完成。
-- `1B Node`：完成开发心跳与 30 秒离线对账；一次性注册令牌、CSR、mTLS/gRPC、证书轮换和吊销未完成。
-- `1C Catalog`：保留阶段 0 的 Schema 与固定摘要校验；签名、审核持久化和可拉取 PaperMC Bundle 未完成。
-- `1D Provisioning`：开发服务器可创建数据根、内存 Allocation/Startup 期望状态和 operation；OCI 安装、数据库端口事务、持久任务与 Outbox 未完成。
-- `1E Operations`：开发电源收敛和状态对账可用；真实 Runtime、日志流和资源指标未完成。
+- `1A Identity`：已完成开发 Argon2id 口令、受控 Bootstrap setup、本地用户管理页面、单次密码重置页面、用户停用/重置会话与 reset token 撤销、membership 资源授权、in-flight reservation 限流、Argon2 并发门、写入提交前重新授权、production 配置硬门禁，以及 PostgreSQL 持久会话（token 摘要 + `csrf_digest`，会话恢复时轮换 CSRF）；Redis 协调、多副本与实时连接撤销未完成。
+- `1B Node`：已完成一次性注册令牌、CSR、mTLS/gRPC Enroll/Connect 双向流、证书轮换、吊销、心跳与 30 秒离线判定。
+- `1C Catalog`：保留 Schema 与固定摘要校验，固定目录已持久化到 PostgreSQL；签名、审核工作流和可拉取 PaperMC Bundle 未完成。
+- `1D Provisioning`：已完成 PostgreSQL 事务、Allocation 关联、持久任务表与 Agent 的 OCI provision；Outbox 投递与自动放置未完成。
+- `1E Operations`：已完成真实 Runtime 电源收敛、控制台命令帧、备份创建/恢复/删除/下载与文件操作，指标与控制台日志已持久化到 PostgreSQL（000006 迁移，控制面重启经 `RestoreTelemetry` 恢复）；实时控制台 WebSocket 未完成。
 
-因此阶段 1 的整体完成信号仍未达到。
+因此阶段 1 的真实垂直能力已基本完成；剩余未闭合项为实时控制台 WebSocket、加密 Secret 静态存储、Outbox/多副本恢复与真实 Docker 节点上的游戏生命周期一致性测试。
 
 ## 7. 阶段 1：首个真实垂直能力
 
@@ -101,7 +102,7 @@
 4. `1D Provisioning`：单节点、单端口服务器创建、OCI 安装和持久幂等任务。
 5. `1E Operations`：启动、停止、只读日志、基础指标和状态对账。
 
-完成信号：全新受支持环境可在 15 分钟内接入节点并创建可运行的 PaperMC 服务器；重复操作不产生重复容器或端口。为控制首个真实切片的范围，重启、文件、备份恢复和多节点调度可以延后到阶段 2。
+完成信号：全新受支持环境可在 15 分钟内接入节点并创建可运行的 PaperMC 服务器；重复操作不产生重复容器或端口。重启、文件、备份恢复已随真实 Agent 落地；多节点调度和实时控制台流延后到阶段 2。
 
 ## 8. 阶段 2：可用生产 MVP
 

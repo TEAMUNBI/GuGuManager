@@ -13,8 +13,12 @@ services:
       GUGU_DEV_ADMIN_PASSWORD: ${GUGU_DEV_ADMIN_PASSWORD:-gugu-dev-2026}
       GUGU_DEV_AGENT_TOKEN: ${GUGU_DEV_AGENT_TOKEN:-gugu-agent-dev-token}
       GUGU_DEV_DATA_ROOT: /var/lib/gugumanager/servers
+      # Agent mTLS gRPC 网关仅在 GUGU_ENVIRONMENT=production 时启动；
+      # 此处预留监听地址与端口，切换为 production 后 agent 服务即可注册。
+      GUGU_AGENT_GRPC_ADDR: 0.0.0.0:8443
     ports:
       - "127.0.0.1:${GUGU_HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${GUGU_AGENT_GRPC_PORT:-8443}:8443"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
       interval: 10s
@@ -22,6 +26,29 @@ services:
       retries: 5
     volumes:
       - server-data:/var/lib/gugumanager/servers
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # 镜像 ENTRYPOINT 默认运行 control-plane，agent 服务显式覆盖入口。
+    entrypoint: ["/usr/local/bin/gugu-agent"]
+    environment:
+      GUGU_AGENT_PANEL_ADDR: control-plane:8443
+      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_DEV_AGENT_TOKEN:-gugu-agent-dev-token}
+      GUGU_AGENT_NODE_NAME: ${GUGU_AGENT_NODE_NAME:-dev-node-01}
+      GUGU_AGENT_VERSION: 0.1.0-dev
+      GUGU_AGENT_DATA_ROOT: /var/lib/gugumanager/servers
+      GUGU_AGENT_CERT_DIR: /var/lib/gugumanager/agent/certs
+    volumes:
+      # 挂载宿主 Docker socket，agent 通过 Docker Engine API 创建/管理游戏服务器容器。
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 服务器数据与 agent 证书（agent.crt/agent.key/node-id/ca.crt）持久化。
+      - agent-data:/var/lib/gugumanager
+    depends_on:
+      control-plane:
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -37,6 +64,9 @@ services:
       - ../migrations/000001_core.up.sql:/docker-entrypoint-initdb.d/000001_core.sql:ro
       - ../migrations/000002_identity.up.sql:/docker-entrypoint-initdb.d/000002_identity.sql:ro
       - ../migrations/000003_membership_permissions.up.sql:/docker-entrypoint-initdb.d/000003_membership_permissions.sql:ro
+      - ../migrations/000004_password_reset.up.sql:/docker-entrypoint-initdb.d/000004_password_reset.sql:ro
+      - ../migrations/000005_controlplane_stage1.up.sql:/docker-entrypoint-initdb.d/000005_controlplane_stage1.sql:ro
+      - ../migrations/000006_telemetry_persistence.up.sql:/docker-entrypoint-initdb.d/000006_telemetry_persistence.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -58,5 +88,6 @@ services:
 
 volumes:
   server-data:
+  agent-data:
   postgres-data:
   redis-data:

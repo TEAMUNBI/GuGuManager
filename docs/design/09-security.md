@@ -14,7 +14,9 @@
 
 当前开发适配器已经使用带随机盐和参数记录的 Argon2id PHC 口令，并只把 Session Token 的 SHA-256 摘要放入内存。退出与过期会撤销内存会话，过期会话不能通过 CSRF 校验。登录按规范化账号和直接来源 IP 两个维度执行 5 分钟窗口、5 次失败和 15 分钟阻断，返回 `429` 与 `Retry-After`；reservation 会把 in-flight 尝试计入阈值，避免并发请求在第一轮 Argon2 完成前绕过限流。setup 与 reset 使用独立来源 IP reservation；登录成功只清除账号维度状态，不抹去来源 IP 失败历史。Argon2id 派生在进程内最多同时执行 2 个任务；它不信任未经配置的代理转发头，也不是 Redis 分布式限流。限流表默认最多保留 4096 个维度，达到容量时先清理过期条目，再只淘汰最旧的未阻断且没有 in-flight reservation 的条目。
 
-1A Identity 开发适配器还实现了 setup、本地用户、密码重置和 membership API，并提供对应的首次 setup、用户与访问管理及匿名密码重置页面。Bootstrap/reset 明文不会持久保存；setup 与 reset 在 Argon2 前和提交前都校验 Token 摘要、TTL 与消费状态。密码重置和用户停用会撤销目标用户全部内存会话；停用还会撤销未消费 reset token，因此“停用后重新启用”不会使旧 token 复活。setup、签发、消费、用户变更和 membership 变更写入开发审计。用户、令牌、会话和授权仍未接入 PostgreSQL/Redis；持久撤销、分布式限流、全局代理来源策略、密钥轮换、多副本一致性和实时连接撤销仍未完成。
+生产模式（PostgreSQL store）对会话与 CSRF 都只保存不可逆摘要（`csrf_digest`）。由于无法从库中还原 CSRF 明文，Session(token) 恢复时会轮换 CSRF Token、更新数据库摘要并把新明文返回给前端，因此页面刷新后写操作不再被拦截。
+
+1A Identity 开发适配器还实现了 setup、本地用户、密码重置和 membership API，并提供对应的首次 setup、用户与访问管理及匿名密码重置页面。Bootstrap/reset 明文不会持久保存；setup 与 reset 在 Argon2 前和提交前都校验 Token 摘要、TTL 与消费状态。密码重置和用户停用会撤销目标用户全部会话；停用还会撤销未消费 reset token，因此“停用后重新启用”不会使旧 token 复活。setup、签发、消费、用户变更和 membership 变更写入审计。生产模式已把用户、令牌、会话、setup 与 membership 接入 PostgreSQL（只保存摘要）；Redis 协调、分布式限流、全局代理来源策略、密钥轮换、多副本一致性和实时连接撤销仍未完成。
 
 ## 2. RBAC
 
@@ -36,9 +38,9 @@
 - 控制台 token 短时、单服务器、可撤销并限流；Origin 与当前 membership 都必须验证。
 - 用户可见错误、日志和审计正文不包含 Secret、宿主绝对路径、凭据或完整敏感命令。
 
-开发 `ServerFS` 已阻止绝对路径、任何 `..` 组件、NUL、Windows 设备名、NTFS ADS 风格冒号、符号链接、非常规文件和根目录变更；写入通过同目录临时文件、同步和原子替换完成，读写各有 8 MiB 上限，递归删除会先完整预检再删除。文件写入、建目录、移动和删除会在物理操作完成前持有服务器门控和 Store 写锁，因而与用户停用、角色降级和 membership 撤销互斥。该边界尚未包含 Agent 目录句柄协议、磁盘配额、流式传输、压缩包解压或跨平台真实节点测试。
+开发 `ServerFS` 已阻止绝对路径、任何 `..` 组件、NUL、Windows 设备名、NTFS ADS 风格冒号、符号链接、非常规文件和根目录变更；写入通过同目录临时文件、同步和原子替换完成，读写各有 8 MiB 上限，递归删除会先完整预检再删除。文件写入、建目录、移动和删除会在物理操作完成前持有服务器门控和 Store 写锁，因而与用户停用、角色降级和 membership 撤销互斥。生产模式由 Agent 在容器内执行 `FileOperation`（list/read/write/mkdir/move/remove/下载备份），路径解析同样拒绝越界；磁盘配额、流式上传、压缩包解压和跨平台真实节点测试仍待补齐。
 
-开发备份恢复只比对内存登记的完整 SHA-256 元数据并验证格式，用于测试恢复锁和状态机；每服务器门控会阻止恢复登记期间并发的文件写入、建目录、移动和删除。它没有读取、散列或恢复真实归档内容，门控也不跨进程或副本，不得描述为生产备份完整性或分布式锁验证。
+开发备份恢复只比对内存登记的完整 SHA-256 元数据并验证格式，用于测试恢复锁和状态机；每服务器门控会阻止恢复登记期间并发的文件写入、建目录、移动和删除。它没有读取、散列或恢复真实归档内容，门控也不跨进程或副本，不得描述为生产备份完整性或分布式锁验证。生产模式由 Agent 创建/恢复/删除/下载真实归档，Agent 回传并校验 `sha256` 摘要；恢复完整性最终依赖 Agent 执行结果与恢复后健康检查。
 
 ## 5. Secret 与供应链
 
@@ -53,7 +55,7 @@
 
 首次 setup、用户创建/更新/停用、密码重置签发/消费、membership 变化、创建/删除服务器、电源、文件删除或覆盖、备份恢复、节点注册/吊销和包审核必须写只追加审计。审计包含操作者、动作、目标、结果、时间、客户端上下文和 operation ID。
 
-当前 setup、用户、密码重置、membership、文件写入/建目录/移动/删除、备份创建/恢复/删除以及 Network/Startup 的受理和模拟完成已经产生开发内存审计；进程退出后记录丢失，且文件同步操作尚未关联持久 operation，因此仍不满足只追加持久审计要求。
+当前 setup、用户、密码重置、membership、文件写入/建目录/移动/删除、备份创建/恢复/删除以及 Network/Startup 的受理和完成均产生审计；开发模式为进程内记录（退出丢失），生产模式持久化到 PostgreSQL 审计表。文件同步操作尚未关联持久 operation，只追加持久审计的保留与查询策略仍需补齐。
 
 威胁模型至少维护：管理员初始化抢注、会话劫持、CSRF、越权、SSRF、恶意镜像、供应链替换、端口竞态、磁盘耗尽、容器逃逸、链接/压缩包逃逸、备份泄露、Agent 私钥泄露和任务重放。
 
@@ -61,4 +63,4 @@
 
 生产模式缺少数据库、会话签名密钥、公开 URL、TLS 终止声明、Agent CA 或加密密钥时必须启动失败。默认凭据、开发种子数据、调试错误和宽松 CORS 不允许出现在生产构建配置中。
 
-当前配置加载器会聚合校验生产 URL、PostgreSQL URL、TLS 终止声明和 Secret/Agent CA 文件，并拒绝 `GUGU_DEV_ADMIN_EMAIL`、`GUGU_DEV_ADMIN_PASSWORD`、`GUGU_DEV_AGENT_TOKEN` 与 `GUGU_DEV_BOOTSTRAP_TOKEN`。`Config.Validate()` 与环境加载走同一 production 禁止项校验；字段全部有效后仍返回 `ErrProductionAdapterUnavailable`。这是防止生产配置退化到内存适配器的硬门禁，不表示生产适配器已经完成。
+当前配置加载器会聚合校验生产 URL、PostgreSQL URL、TLS 终止声明和 Secret/Agent CA 文件，并拒绝 `GUGU_DEV_ADMIN_EMAIL`、`GUGU_DEV_ADMIN_PASSWORD`、`GUGU_DEV_AGENT_TOKEN` 与 `GUGU_DEV_BOOTSTRAP_TOKEN`。`Config.Validate()` 与环境加载走同一 production 禁止项校验；字段全部有效后正常启动生产适配器（PostgreSQL store 与 mTLS gRPC Agent），不再返回 `ErrProductionAdapterUnavailable`。

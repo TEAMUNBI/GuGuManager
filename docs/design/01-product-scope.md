@@ -69,15 +69,17 @@ GUI 游戏、主机平台游戏和强依赖客户端反作弊的游戏不在首�
 
 | 能力 | 开发垂直切片 | 首个可用 MVP | 后续 |
 | --- | --- | --- | --- |
-| 管理员登录和会话 | 种子管理员或受控内存初始化、Cookie 会话、CSRF、限流与撤销 | PostgreSQL 持久会话、多副本一致撤销与密钥轮换 | 外部身份源 |
-| 用户与服务器成员 | 本地用户管理页面、停用、单次密码重置、membership 与即时 REST 授权 | 持久用户/令牌/membership、生产管理页面与实时连接撤销 | 邮件邀请、外部身份源 |
-| 节点 | 模拟注册和心跳 | mTLS、能力协商、真实 OCI | 自动放置、排空 |
-| 服务器 | 创建、列表、幂等电源任务 | 真实安装、启停、日志、指标 | 迁移和定时任务 |
-| Network 与 Startup | 内存 Allocation、主端口切换、固定 Bundle Schema 变量编辑和模拟 reconcile | PostgreSQL 端口事务、真实绑定、加密 Secret、Agent 对账和资源级授权 | 自动端口策略、批量编排、多端口映射 |
-| 文件与备份 | 安全路径和交互演示 | Agent 文件服务、本地一致性备份 | S3、保留策略 |
+| 管理员登录和会话 | 种子管理员或受控内存初始化、Cookie 会话、CSRF、限流与撤销 | PostgreSQL 持久会话与 CSRF 会话恢复（已实现）、多副本一致撤销与密钥轮换 | 外部身份源 |
+| 用户与服务器成员 | 本地用户管理页面、停用、单次密码重置、membership 与即时 REST 授权 | PostgreSQL 持久用户/令牌/membership 与资源授权（已实现）、生产管理页面与实时连接撤销 | 邮件邀请、外部身份源 |
+| 节点 | 模拟注册和心跳 | mTLS 注册、证书轮换、能力协商、心跳与离线判定（已实现）、真实 OCI | 自动放置、排空 |
+| 服务器 | 创建、列表、幂等电源任务 | 真实安装、启停、控制台命令与备份下载（已实现）；日志/指标经 PostgreSQL 持久化（000006 迁移），控制面重启可恢复 | 迁移和定时任务 |
+| Network 与 Startup | 内存 Allocation、主端口切换、固定 Bundle Schema 变量编辑和模拟 reconcile | PostgreSQL Allocation 事务、真实端口绑定、Agent 对账和资源级授权（已实现）；加密 Secret 与多端口映射 | 自动端口策略、批量编排 |
+| 文件与备份 | 安全路径和交互演示 | Agent 文件服务（含停止态容器写入与状态保持）和本地一致性备份/下载（已实现） | S3、保留策略 |
 | 游戏包 | Schema 与声明式示例 | PaperMC、Factorio 一致性测试 | 官方 Catalog |
 | Extension | 仅保留契约章节 | 不作为 MVP 示例依赖 | WASI/隔离 OCI Runner |
 
 “开发实现”必须在配置和界面中有明确标识，不能用于互联网生产部署。
 
 当前 Identity 开发适配器的用户、Bootstrap/reset 令牌摘要、会话和 membership 均保存在单进程内存中。它可以验证协议、安全状态迁移和资源授权，但不能替代 PostgreSQL 事务、Redis 协调、多副本撤销或长期运维恢复。
+
+生产模式使用 PostgreSQL store 承载同一领域接口（编译期断言覆盖 Control Plane 全部契约方法），节点任务由真实 mTLS gRPC Agent 执行；开发模式仍保持上述内存/模拟边界，详见 [本地开发](../development/LOCAL_DEVELOPMENT.md)。概览页 CPU 与实时内存用量已由 PostgreSQL 聚合（`server_metrics` 表的 AVG/SUM），不再恒为 0；控制台日志与指标经 Agent `LogBatch`/`MetricsBatch` 帧双写内存缓冲与 PostgreSQL（日志每服务器保留最近 500 行、指标每服务器保留最近 60 点），控制面启动时从 DB 恢复，重启不丢失。生产模式其余已知限制：加密 Secret 静态存储、实时控制台 WebSocket、Outbox/多副本恢复尚未实现。

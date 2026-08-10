@@ -4,7 +4,7 @@
 
 - Go 1.26 或更高的 1.x 补丁版本。
 - Node.js 24+ 与 npm。
-- Docker Desktop 可选，仅用于 Compose 和后续真实 Runtime 测试。
+- Docker Desktop 可选：默认开发模式不依赖 Docker；调用 `EnableRealRuntime` 后 Memory store 的 provision/power 会使用本地 Docker，运行生产 Compose 或真实 Agent 也需要 Docker。
 
 ## 2. 前后端联合运行
 
@@ -53,6 +53,8 @@ go run ./cmd/agent --once --node harbor-lab-03 --token gugu-agent-dev-token
 
 这会把种子节点恢复为 available。它使用开发 HTTP 端点，不具备生产 mTLS、任务流或容器能力。
 
+开发模式（Memory store）默认是纯模拟：provision/power/backup 等操作 sleep 后置成功，不创建真实容器；调用 `EnableRealRuntime` 后只有 provision/power 走本地 Docker，备份/恢复/删除与网络对账仍是模拟，`DownloadBackup` 返回 `NOT_FOUND`。真实 mTLS gRPC Agent（Enroll/Connect、任务队列、文件操作、备份下载）在 production 模式（PostgreSQL store）下运行，参考 `deploy/docker-compose.prod.yml`。
+
 ## 5. GameDefinition
 
 ```powershell
@@ -90,7 +92,7 @@ npm run e2e
 
 `npm run e2e` 会先构建 SPA，再在 `127.0.0.1:18080` 启动单独的 Go Control Plane；`npm run e2e:ui` 使用相同前置构建和服务配置打开交互调试界面。它们使用公开且仅用于测试的开发凭据、`0s` operation latency 和 `web/test-results/run/server-data` 隔离数据根；Chromium 必须观察真实 setup/status、session、login、server detail 与 logout API，浏览器 Mock 不满足验收。失败 trace、截图、视频和 HTML 报告位于 `web/test-results` 与 `web/playwright-report`，两者都不会提交。当前只覆盖 Chromium。
 
-在 Windows 上，如果 `buf format --diff` 报告找不到外部 `diff`，需要把 Git for Windows 的 `usr/bin` 加入当前终端 `PATH`；这不是 Protobuf 格式失败。真实 Docker Agent、PostgreSQL 并发、mTLS 和游戏包完整生命周期不属于当前开发适配器的验证范围。
+在 Windows 上，如果 `buf format --diff` 报告找不到外部 `diff`，需要把 Git for Windows 的 `usr/bin` 加入当前终端 `PATH`；这不是 Protobuf 格式失败。真实 Docker 节点上的游戏生命周期一致性、PostgreSQL 并发租约、跨副本恢复和游戏包完整生命周期不属于本地开发模式的验证范围。
 
 ## 7. 迁移清单与生产门禁
 
@@ -109,10 +111,10 @@ $env:GUGU_TEST_DATABASE_URL = 'postgres://gugumanager:integration-test-only@127.
 go test -v ./internal/migrations -run '^TestPostgresMigrationsUpAndDown$' -count=1
 ```
 
-未设置 URL 时该集成测试明确跳过；数据库名没有非空前缀或不以 `_test` 结尾时，会在建立网络连接前拒绝执行。测试只创建并清理本次随机命名的 Schema；即使 migration 在显式事务中失败，也会改用独立连接清理，并由故意失败的回归场景断言 Schema 已消失。CI 使用 PostgreSQL 17 service 执行此路径；这仍不代表 Control Plane 已接入生产 PostgreSQL Store。
+未设置 URL 时该集成测试明确跳过；数据库名没有非空前缀或不以 `_test` 结尾时，会在建立网络连接前拒绝执行。测试只创建并清理本次随机命名的 Schema；即使 migration 在显式事务中失败，也会改用独立连接清理，并由故意失败的回归场景断言 Schema 已消失。CI 使用 PostgreSQL 17 service 执行此路径；生产 Control Plane 启动路径也会在启动前连接 PostgreSQL 执行全部迁移。
 
-Compose 会在全新 `postgres-data` volume 中按编号执行 `000001_core` 与 `000002_identity` 的 up 文件。PostgreSQL 官方入口只在空数据目录执行初始化脚本，已有 volume 不会自动升级；不要删除生产数据卷来模拟迁移。真实生产 migrator 仍是后续任务。
+开发 Compose 会在全新 `postgres-data` volume 中按编号执行 `000001_core` 与 `000002_identity` 的 up 文件。PostgreSQL 官方入口只在空数据目录执行初始化脚本，已有 volume 不会自动升级；不要删除生产数据卷来模拟迁移。生产 Control Plane 启动路径会在启动前连接 PostgreSQL 执行迁移（000001-000006），也支持通过 `GUGU_MIGRATIONS_DIR` 指定迁移目录。
 
-`GUGU_ENVIRONMENT=production` 会先完整校验 HTTPS Public URL、PostgreSQL URL、TLS 终止声明、Session/Encryption Key 文件和 Agent CA 文件，然后以 `ErrProductionAdapterUnavailable` 退出。该门禁避免生产配置误用开发内存适配器。
+`GUGU_ENVIRONMENT=production` 会先完整校验 HTTPS Public URL、PostgreSQL URL、TLS 终止声明、Session/Encryption Key 文件和 Agent CA 文件，校验通过后连接 PostgreSQL 执行迁移并启动生产适配器（PostgreSQL store 与 mTLS gRPC Agent），不再返回 `ErrProductionAdapterUnavailable`。
 
 CI 的 `development-container` job 使用 `node:24.18.0-alpine3.23` 构建 Web，构建一次以 `github.sha` 标记的 development preview 镜像，再显式选择 development 并在宿主回环端口检查 `/readyz` 与 SPA 首页。镜像裸启动默认进入 production 配置的 fail-closed 路径。随后固定 Trivy 0.72.0 生成漏洞 JSON 与 CycloneDX SBOM，并阻断存在修复版本的 HIGH/CRITICAL 漏洞。工作流不推送镜像、不使用部署 Secret；只有真实 GitHub run 才能证明容器步骤通过，本机没有 Docker 时只能验证 Dockerfile 与工作流静态配置。

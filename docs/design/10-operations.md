@@ -42,7 +42,7 @@
 
 敏感环境变量不会输出到启动日志。生产模式按 [安全门禁](09-security.md#7-生产启动门禁)校验。
 
-当前加载器在 `development` 读取 Web、开发管理员、Agent Token、operation 延迟和开发数据根；Control Plane 启动器会按 `GUGU_LOG_LEVEL`（`debug`、`info`、`warn`、`error`）和 `GUGU_LOG_FORMAT`（`json`、`text`）构造日志处理器。在 `production` 会读取并聚合校验 HTTPS Public URL、PostgreSQL/可选 Redis URL、TLS 终止声明、Session/Encryption Key 与 Agent CA 文件，并拒绝所有 `GUGU_DEV_*` 身份凭据，包括 `GUGU_DEV_BOOTSTRAP_TOKEN`；`Config.Validate()` 与环境加载使用相同的禁止项。全部字段有效后仍以 `ErrProductionAdapterUnavailable` 硬失败，既不连接这些依赖，也不回退到内存适配器。
+当前加载器在 `development` 读取 Web、开发管理员、Agent Token、operation 延迟和开发数据根；Control Plane 启动器会按 `GUGU_LOG_LEVEL`（`debug`、`info`、`warn`、`error`）和 `GUGU_LOG_FORMAT`（`json`、`text`）构造日志处理器。在 `production` 会读取并聚合校验 HTTPS Public URL、PostgreSQL/可选 Redis URL、TLS 终止声明、Session/Encryption Key 与 Agent CA 文件，并拒绝所有 `GUGU_DEV_*` 身份凭据，包括 `GUGU_DEV_BOOTSTRAP_TOKEN`；`Config.Validate()` 与环境加载使用相同的禁止项。全部字段有效后正常启动生产适配器：连接 PostgreSQL 执行迁移、构造 Postgres store，并启用 Agent 的 mTLS gRPC 网关；不再返回 `ErrProductionAdapterUnavailable`。
 
 ## 4. 数据库迁移
 
@@ -63,18 +63,18 @@
 
 - 日志使用结构化 JSON，携带 trace ID、operation ID、actor、resource、node 和安全裁剪后的 error code。
 - 指标包含 API 延迟/错误率、任务队列/租约/重试、节点心跳延迟、容器状态、资源使用和备份恢复结果。
-- 健康检查拆分 `/healthz`（进程存活）与 `/readyz`。当前 `/readyz` 只报告开发内存适配器可用；生产实现必须检查数据库、迁移和关键依赖就绪。
+- 健康检查拆分 `/healthz`（进程存活）与 `/readyz`。生产模式 `/readyz` 校验数据库连接与迁移、Agent 网关等关键依赖就绪；开发模式只报告内存适配器可用。
 - 告警至少覆盖高错误率、任务长期积压、节点批量离线、证书即将过期、磁盘不足和备份连续失败。
 
 ## 7. 开发运行
 
 开发垂直切片可以不依赖 Docker、PostgreSQL 和 Redis，以内存存储与模拟节点启动。该模式用于 UI、契约和状态机开发；控制面状态在进程退出时重置，但 `GUGU_DEV_DATA_ROOT` 下的服务器文件保留。动态创建服务器使用随机 ID，重启后对应内存记录消失而目录不自动删除；开发者只能在 Control Plane 停止、确认没有需要保留的数据后人工清理开发根。该目录不能指向生产数据，详见 [ADR-0002](../adr/0002-development-data-lifecycle.md)。
 
-Docker Compose 提供未来生产依赖的本地拓扑，但“配置可以解析”不代表真实节点一致性测试已通过。
+仓库包含开发 Compose（Control Plane + PostgreSQL + Redis）与生产 Compose（`deploy/docker-compose.prod.yml`，含 control-plane、agent、postgres、redis 服务，agent 挂载 Docker Socket 执行真实容器任务）。开发 Compose 提供本地依赖拓扑，但“配置可以解析”不代表真实节点一致性测试已通过。
 
 仓库中的 Compose 文件具有严格的开发边界：
 
 - Control Plane、PostgreSQL 和 Redis 的宿主端口默认只绑定 `127.0.0.1`，不对局域网或公网发布。
 - Compose 中的默认管理员密码、Agent Token 和数据库密码只用于本机开发，不是示例生产 Secret。
 - 不允许通过修改宿主绑定地址把当前开发 Control Plane 当作共享服务。需要远程评审时，应使用受控隧道并在结束后关闭。
-- 生产部署必须等待生产适配器、安全启动门禁、TLS、Secret 管理和真实恢复演练完成，不能沿用开发 Compose。
+- 生产部署使用已实现的生产适配器（PostgreSQL store 与 mTLS gRPC Agent）；`deploy/docker-compose.prod.yml` 已提供含 agent 服务的示例拓扑，在 TLS、Secret 管理和真实恢复演练就绪后上线，不能沿用开发 Compose。

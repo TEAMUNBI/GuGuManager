@@ -30,7 +30,7 @@ GuGuManager 通过“模块化控制平面 + 独立 Node Agent + 版本化 GameD
 
 ## Capabilities and Constraints
 
-- 当前仓库是开发垂直切片；Identity、节点、任务、Network、Startup、备份与审计包含内存或模拟实现，不得包装成真实生产执行结果。
+- 当前仓库提供开发垂直切片（内存/模拟）与已实现的生产适配器（PostgreSQL store + 真实 mTLS gRPC Agent）；开发模式能力不得包装成真实生产执行结果。概览 CPU/实时内存与控制台日志/指标已由 PostgreSQL 持久化（重启可恢复）；生产模式其余已知限制（加密 Secret 静态存储、实时控制台 WebSocket、Outbox/多副本恢复）必须如实呈现。
 - 权限默认拒绝。前端隐藏入口不是授权证明，服务端必须重复鉴权。
 - 状态改变通过异步 operation 收敛；界面必须区分“请求已受理”和“执行成功”。
 - 已有 React 19、TypeScript、Vite、原生 CSS、Lucide 图标以及简体中文、英文、日文、韩文四语言基础设施。
