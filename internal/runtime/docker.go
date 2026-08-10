@@ -6,22 +6,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 )
 
 // containerStateString returns a human-readable string representation of a
-// container state. It mirrors the String method that was removed from
-// github.com/docker/docker/api/types.ContainerState.
-func containerStateString(s *types.ContainerState) string {
+// container state. It preserves the status rendering used by the old Docker
+// client while accepting the Moby API's container.State value.
+func containerStateString(s *container.State) string {
+	if s == nil {
+		return "unknown"
+	}
 	if s.Running {
 		if s.Paused {
 			return "paused"
@@ -56,7 +58,7 @@ func NewDockerRuntime() (*DockerRuntime, error) {
 	// Verify connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = cli.Ping(ctx)
+	_, err = cli.Ping(ctx, client.PingOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("ping docker daemon: %w", err)
 	}
@@ -83,9 +85,9 @@ type ContainerConfig struct {
 // CreateContainer creates and starts a new container.
 func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig) (containerID string, err error) {
 	// Pull image if not present
-	_, _, err = r.client.ImageInspectWithRaw(ctx, cfg.Image)
+	_, err = r.client.ImageInspect(ctx, cfg.Image)
 	if err != nil {
-		pullReader, pullErr := r.client.ImagePull(ctx, cfg.Image, image.PullOptions{})
+		pullReader, pullErr := r.client.ImagePull(ctx, cfg.Image, client.ImagePullOptions{})
 		if pullErr != nil {
 			return "", fmt.Errorf("pull image %s: %w", cfg.Image, pullErr)
 		}
@@ -101,14 +103,17 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 	}
 
 	// Convert port bindings
-	exposedPorts := nat.PortSet{}
-	portBindings := nat.PortMap{}
+	exposedPorts := network.PortSet{}
+	portBindings := network.PortMap{}
 	for containerPort, hostPort := range cfg.PortBindings {
-		port := nat.Port(fmt.Sprintf("%d/tcp", containerPort))
+		port, ok := network.PortFrom(uint16(containerPort), network.TCP)
+		if !ok {
+			return "", fmt.Errorf("invalid container port %d", containerPort)
+		}
 		exposedPorts[port] = struct{}{}
-		portBindings[port] = []nat.PortBinding{
+		portBindings[port] = []network.PortBinding{
 			{
-				HostIP:   "0.0.0.0",
+				HostIP:   netip.IPv4Unspecified(),
 				HostPort: fmt.Sprintf("%d", hostPort),
 			},
 		}
@@ -145,15 +150,19 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 	}
 
 	// Create container
-	resp, err := r.client.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, cfg.Name)
+	resp, err := r.client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config:     containerCfg,
+		HostConfig: hostCfg,
+		Name:       cfg.Name,
+	})
 	if err != nil {
 		return "", fmt.Errorf("create container: %w", err)
 	}
 
 	// Start container
-	if err := r.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if _, err := r.client.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
 		// Cleanup on failure
-		_ = r.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		_, _ = r.client.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true})
 		return "", fmt.Errorf("start container: %w", err)
 	}
 
@@ -163,26 +172,30 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 // StopContainer stops a running container gracefully.
 func (r *DockerRuntime) StopContainer(ctx context.Context, containerID string, timeoutSec int) error {
 	timeout := timeoutSec
-	return r.client.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+	_, err := r.client.ContainerStop(ctx, containerID, client.ContainerStopOptions{Timeout: &timeout})
+	return err
 }
 
 // StartContainer starts a stopped container.
 func (r *DockerRuntime) StartContainer(ctx context.Context, containerID string) error {
-	return r.client.ContainerStart(ctx, containerID, container.StartOptions{})
+	_, err := r.client.ContainerStart(ctx, containerID, client.ContainerStartOptions{})
+	return err
 }
 
 // RestartContainer restarts a container.
 func (r *DockerRuntime) RestartContainer(ctx context.Context, containerID string, timeoutSec int) error {
 	timeout := timeoutSec
-	return r.client.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
+	_, err := r.client.ContainerRestart(ctx, containerID, client.ContainerRestartOptions{Timeout: &timeout})
+	return err
 }
 
 // RemoveContainer removes a container (must be stopped first unless force=true).
 func (r *DockerRuntime) RemoveContainer(ctx context.Context, containerID string, force bool) error {
-	return r.client.ContainerRemove(ctx, containerID, container.RemoveOptions{
+	_, err := r.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{
 		Force:         force,
 		RemoveVolumes: true,
 	})
+	return err
 }
 
 // ContainerStatus represents the current state of a container.
@@ -196,14 +209,18 @@ type ContainerStatus struct {
 
 // InspectContainer gets the current status of a container.
 func (r *DockerRuntime) InspectContainer(ctx context.Context, containerID string) (ContainerStatus, error) {
-	inspect, err := r.client.ContainerInspect(ctx, containerID)
+	inspectResult, err := r.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		return ContainerStatus{}, fmt.Errorf("inspect container: %w", err)
+	}
+	inspect := inspectResult.Container
+	if inspect.State == nil {
+		return ContainerStatus{}, fmt.Errorf("inspect container: missing state")
 	}
 
 	status := ContainerStatus{
 		ID:      inspect.ID,
-		State:   inspect.State.Status,
+		State:   string(inspect.State.Status),
 		Status:  containerStateString(inspect.State),
 		Running: inspect.State.Running,
 	}
@@ -221,7 +238,7 @@ func (r *DockerRuntime) InspectContainer(ctx context.Context, containerID string
 
 // ContainerLogs retrieves logs from a container.
 func (r *DockerRuntime) ContainerLogs(ctx context.Context, containerID string, tail int) (io.ReadCloser, error) {
-	return r.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+	return r.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Tail:       fmt.Sprintf("%d", tail),
@@ -231,7 +248,7 @@ func (r *DockerRuntime) ContainerLogs(ctx context.Context, containerID string, t
 
 // AttachToContainer attaches to a container's stdin/stdout for console interaction.
 func (r *DockerRuntime) AttachToContainer(ctx context.Context, containerID string) (io.ReadWriteCloser, error) {
-	resp, err := r.client.ContainerAttach(ctx, containerID, container.AttachOptions{
+	resp, err := r.client.ContainerAttach(ctx, containerID, client.ContainerAttachOptions{
 		Stream: true,
 		Stdin:  true,
 		Stdout: true,
@@ -308,7 +325,9 @@ func containerStatsFromJSON(data []byte) (ContainerStats, error) {
 
 // ContainerStats 采集单个容器的实时资源使用（docker stats 单容器）。
 func (r *DockerRuntime) ContainerStats(ctx context.Context, containerID string) (ContainerStats, error) {
-	resp, err := r.client.ContainerStats(ctx, containerID, false)
+	resp, err := r.client.ContainerStats(ctx, containerID, client.ContainerStatsOptions{
+		IncludePreviousSample: true,
+	})
 	if err != nil {
 		return ContainerStats{}, fmt.Errorf("container stats: %w", err)
 	}
@@ -322,16 +341,16 @@ func (r *DockerRuntime) ContainerStats(ctx context.Context, containerID string) 
 
 // ExecInContainer 在容器内执行命令并返回合并的 stdout/stderr 输出。
 func (r *DockerRuntime) ExecInContainer(ctx context.Context, containerID string, argv []string) (string, error) {
-	execConfig := container.ExecOptions{
+	execConfig := client.ExecCreateOptions{
 		Cmd:          argv,
 		AttachStdout: true,
 		AttachStderr: true,
 	}
-	execID, err := r.client.ContainerExecCreate(ctx, containerID, execConfig)
+	execID, err := r.client.ExecCreate(ctx, containerID, execConfig)
 	if err != nil {
 		return "", fmt.Errorf("exec create: %w", err)
 	}
-	attach, err := r.client.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
+	attach, err := r.client.ExecAttach(ctx, execID.ID, client.ExecAttachOptions{})
 	if err != nil {
 		return "", fmt.Errorf("exec attach: %w", err)
 	}
@@ -346,7 +365,7 @@ func (r *DockerRuntime) ExecInContainer(ctx context.Context, containerID string,
 // FollowLogs 从容器实时输出流式读取日志（docker logs -f --timestamps）。
 // 返回的 ReadCloser 需要调用方在结束后 Close；ctx 取消会中断读取。
 func (r *DockerRuntime) FollowLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
-	return r.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+	return r.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
@@ -356,12 +375,15 @@ func (r *DockerRuntime) FollowLogs(ctx context.Context, containerID string) (io.
 
 // InspectEnv 返回容器当前环境变量（docker inspect .Config.Env）。
 func (r *DockerRuntime) InspectEnv(ctx context.Context, containerID string) (map[string]string, error) {
-	inspect, err := r.client.ContainerInspect(ctx, containerID)
+	inspectResult, err := r.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("inspect container env: %w", err)
 	}
-	env := make(map[string]string, len(inspect.Config.Env))
-	for _, pair := range inspect.Config.Env {
+	if inspectResult.Container.Config == nil {
+		return nil, fmt.Errorf("inspect container env: missing config")
+	}
+	env := make(map[string]string, len(inspectResult.Container.Config.Env))
+	for _, pair := range inspectResult.Container.Config.Env {
 		if idx := strings.IndexByte(pair, '='); idx >= 0 {
 			env[pair[:idx]] = pair[idx+1:]
 		}
@@ -376,7 +398,10 @@ func (r *DockerRuntime) CopyArchiveToContainer(ctx context.Context, containerID,
 		return fmt.Errorf("open archive: %w", err)
 	}
 	defer file.Close()
-	if err := r.client.CopyToContainer(ctx, containerID, containerPath, file, container.CopyToContainerOptions{}); err != nil {
+	if _, err := r.client.CopyToContainer(ctx, containerID, client.CopyToContainerOptions{
+		DestinationPath: containerPath,
+		Content:         file,
+	}); err != nil {
 		return fmt.Errorf("copy to container: %w", err)
 	}
 	return nil
@@ -384,10 +409,13 @@ func (r *DockerRuntime) CopyArchiveToContainer(ctx context.Context, containerID,
 
 // CopyArchiveFromContainer 把容器内路径复制为宿主机归档文件（docker cp 语义）。
 func (r *DockerRuntime) CopyArchiveFromContainer(ctx context.Context, containerID, containerPath, hostPath string) error {
-	reader, _, err := r.client.CopyFromContainer(ctx, containerID, containerPath)
+	result, err := r.client.CopyFromContainer(ctx, containerID, client.CopyFromContainerOptions{
+		SourcePath: containerPath,
+	})
 	if err != nil {
 		return fmt.Errorf("copy from container: %w", err)
 	}
+	reader := result.Content
 	defer reader.Close()
 	file, err := os.Create(hostPath)
 	if err != nil {
@@ -402,12 +430,12 @@ func (r *DockerRuntime) CopyArchiveFromContainer(ctx context.Context, containerI
 
 // ListRunningContainers 返回名称以 namePrefix 开头的运行中容器，去掉前缀。
 func (r *DockerRuntime) ListRunningContainers(ctx context.Context, namePrefix string) ([]string, error) {
-	containers, err := r.client.ContainerList(ctx, container.ListOptions{})
+	result, err := r.client.ContainerList(ctx, client.ContainerListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 	var out []string
-	for _, c := range containers {
+	for _, c := range result.Items {
 		for _, name := range c.Names {
 			trimmed := strings.TrimPrefix(name, "/")
 			if strings.HasPrefix(trimmed, namePrefix) {
