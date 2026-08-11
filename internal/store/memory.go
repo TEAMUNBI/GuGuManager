@@ -77,6 +77,8 @@ type Memory struct {
 	ownedFileRoot    bool
 	backups          map[string][]domain.Backup
 	backupChecksums  map[string]string
+	backupOperations map[string]string
+	backupDeleteFrom map[string]string
 }
 
 func NewMemory(environment string, adminEmail string, adminPassword string, agentToken string, operationLatency time.Duration) *Memory {
@@ -141,6 +143,8 @@ func newMemoryAt(environment string, adminEmail string, adminPassword string, ag
 		ownedFileRoot:       ownedFileRoot,
 		backups:             map[string][]domain.Backup{},
 		backupChecksums:     map[string]string{},
+		backupOperations:    map[string]string{},
+		backupDeleteFrom:    map[string]string{},
 	}
 	if store.adminEmail != "" && adminPassword != "" {
 		now := time.Now().UTC()
@@ -424,7 +428,13 @@ func (m *Memory) Backups(serverID string) ([]domain.Backup, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return append([]domain.Backup{}, m.backups[serverID]...), nil
+	backups := make([]domain.Backup, 0, len(m.backups[serverID]))
+	for _, backup := range m.backups[serverID] {
+		if backup.Status != "deleted" {
+			backups = append(backups, backup)
+		}
+	}
+	return backups, nil
 }
 
 func (m *Memory) recordAudit(actor string, action string, targetType string, targetName string, result string, operationID string) {

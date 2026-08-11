@@ -6,6 +6,7 @@ import { ServerWorkspace } from "./ServerWorkspace";
 
 const mocks = vi.hoisted(() => ({
   backups: vi.fn(),
+  deleteBackup: vi.fn(),
   downloadBackup: vi.fn(),
   files: vi.fn(),
   operation: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock("../lib/api", () => ({
   ApiError: class ApiError extends Error {},
   api: {
     backups: mocks.backups,
+    deleteBackup: mocks.deleteBackup,
     downloadBackup: mocks.downloadBackup,
     files: mocks.files,
     operation: mocks.operation,
@@ -475,5 +477,71 @@ describe("ServerWorkspace file listings", () => {
     fireEvent.click(downloadButton);
 
     await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("download unavailable", "danger"));
+  });
+
+  it("shows the persisted failure reason for an unsuccessful backup", async () => {
+    mocks.backups.mockResolvedValue([
+      {
+        id: "backup-failed",
+        name: "before-upgrade",
+        status: "failed",
+        sizeBytes: null,
+        checksum: null,
+        failureCode: "BACKUP_INTEGRITY_FAILED",
+        failureMessage: "Backup manifest or result validation failed",
+        createdAt: "2026-08-08T08:00:00Z",
+      } satisfies Backup,
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={[`/servers/${server.id}/backups`]}>
+        <Routes>
+          <Route path="/servers/:serverId/*" element={<ServerWorkspace />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/BACKUP_INTEGRITY_FAILED: Backup manifest or result validation failed/)).toBeInTheDocument();
+  });
+
+  it("cleans up a failed backup through the existing deletion operation", async () => {
+    const failedBackup = {
+      id: "backup-failed",
+      name: "before-upgrade",
+      status: "failed",
+      sizeBytes: null,
+      checksum: null,
+      failureCode: "BACKUP_INTEGRITY_FAILED",
+      failureMessage: "Backup manifest or result validation failed",
+      createdAt: "2026-08-08T08:00:00Z",
+    } satisfies Backup;
+    const completedDeletion = {
+      ...queuedPowerOperation,
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      type: "backup-delete",
+      status: "succeeded",
+      progress: 100,
+      checkpoint: "completed",
+    } satisfies Operation;
+    mocks.backups.mockResolvedValueOnce([failedBackup]).mockResolvedValue([]);
+    mocks.deleteBackup.mockResolvedValue(completedDeletion);
+
+    render(
+      <MemoryRouter initialEntries={[`/servers/${server.id}/backups`]}>
+        <Routes>
+          <Route path="/servers/:serverId/*" element={<ServerWorkspace />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const cleanupButton = await screen.findByRole("button", { name: "Clean up failed backup before-upgrade" });
+    expect(cleanupButton).toBeEnabled();
+    fireEvent.click(cleanupButton);
+
+    expect(await screen.findByRole("heading", { name: "Clean up this failed backup?" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clean up" }));
+
+    await waitFor(() => expect(mocks.deleteBackup).toHaveBeenCalledWith(server.id, failedBackup.id, "csrf-token"));
+    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("Failed backup cleaned up", "success"));
   });
 });

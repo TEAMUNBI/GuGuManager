@@ -85,6 +85,89 @@ func TestPostgresMigrationsUpAndDown(t *testing.T) {
 	}
 }
 
+func TestBackupFailureMetadataMigrationBackfillsAndConstrainsState(t *testing.T) {
+	config := testDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect to PostgreSQL test database %q: %v", config.Database, err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+
+	schema := uniqueTestSchema(t)
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+quotedSchema); err != nil {
+		t.Fatalf("create isolated schema %q: %v", schema, err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := dropIsolatedSchema(cleanupCtx, config, quotedSchema); err != nil {
+			t.Errorf("drop isolated schema %q: %v", schema, err)
+		}
+	}()
+	if _, err := conn.Exec(ctx, "SET search_path TO "+quotedSchema); err != nil {
+		t.Fatalf("set search_path to isolated schema %q: %v", schema, err)
+	}
+
+	applyMigration(t, ctx, conn, "000001_core.up.sql")
+	serverID, ownerID := createServerMemberFixture(t, ctx, conn)
+
+	var failedID, deletedID string
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO backups (server_id, creator_id, name, status, format_version, game_bundle_digest)
+		VALUES ($1, $2, 'legacy-failed', 'failed', 'v1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+		RETURNING id::text`, serverID, ownerID).Scan(&failedID); err != nil {
+		t.Fatalf("insert legacy failed backup: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO backups (server_id, creator_id, name, status, format_version, game_bundle_digest, completed_at)
+		VALUES ($1, $2, 'legacy-deleted', 'deleted', 'v1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', now() - interval '1 minute')
+		RETURNING id::text`, serverID, ownerID).Scan(&deletedID); err != nil {
+		t.Fatalf("insert legacy deleted backup: %v", err)
+	}
+
+	applyMigration(t, ctx, conn, "000008_backup_failure_metadata.up.sql")
+	for _, column := range []string{"manifest_digest", "failure_code", "failure_message", "deleted_at"} {
+		assertColumnExists(t, ctx, conn, schema, "backups", column, true)
+	}
+
+	var failureCode, failureMessage string
+	if err := conn.QueryRow(ctx, `SELECT failure_code, failure_message FROM backups WHERE id = $1`, failedID).Scan(&failureCode, &failureMessage); err != nil {
+		t.Fatalf("read failed backup backfill: %v", err)
+	}
+	if failureCode != "BACKUP_FAILED" || failureMessage == "" {
+		t.Fatalf("failed backup backfill = %q/%q", failureCode, failureMessage)
+	}
+	var deletedAt time.Time
+	if err := conn.QueryRow(ctx, `SELECT deleted_at FROM backups WHERE id = $1`, deletedID).Scan(&deletedAt); err != nil {
+		t.Fatalf("read deleted backup backfill: %v", err)
+	}
+	if deletedAt.IsZero() {
+		t.Fatal("deleted backup did not receive deleted_at backfill")
+	}
+
+	_, err = conn.Exec(ctx, `UPDATE backups SET manifest_digest = 'sha256:not-a-digest' WHERE id = $1`, failedID)
+	requireSQLState(t, err, "23514", "backups.manifest_digest must be a sha256 digest")
+	_, err = conn.Exec(ctx, `UPDATE backups SET failure_message = NULL WHERE id = $1`, failedID)
+	requireSQLState(t, err, "23514", "backup failure metadata must remain paired")
+	_, err = conn.Exec(ctx, `UPDATE backups SET failure_code = NULL, failure_message = NULL WHERE id = $1`, failedID)
+	requireSQLState(t, err, "23514", "failed backups must retain failure metadata")
+	_, err = conn.Exec(ctx, `UPDATE backups SET deleted_at = NULL WHERE id = $1`, deletedID)
+	requireSQLState(t, err, "23514", "deleted backups must retain deleted_at")
+	if _, err := conn.Exec(ctx, `UPDATE backups SET manifest_digest = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' WHERE id = $1`, failedID); err != nil {
+		t.Fatalf("set valid manifest digest: %v", err)
+	}
+
+	applyMigration(t, ctx, conn, "000008_backup_failure_metadata.down.sql")
+	for _, column := range []string{"manifest_digest", "failure_code", "failure_message", "deleted_at"} {
+		assertColumnExists(t, ctx, conn, schema, "backups", column, false)
+	}
+	applyMigration(t, ctx, conn, "000001_core.down.sql")
+}
+
 func TestPostgresMigrationFailureCleansIsolatedSchema(t *testing.T) {
 	config := testDatabaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

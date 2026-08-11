@@ -86,12 +86,15 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		assertPublicTableExists(t, db, table, true)
 	}
 	assertPublicColumnExists(t, db, "secret_handles", "encrypted_value", true)
+	for _, column := range []string{"manifest_digest", "failure_code", "failure_message", "deleted_at"} {
+		assertPublicColumnExists(t, db, "backups", column, true)
+	}
 	var applied int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if applied != 7 {
-		t.Fatalf("schema_migrations rows = %d, want 7", applied)
+	if applied != 8 {
+		t.Fatalf("schema_migrations rows = %d, want 8", applied)
 	}
 
 	// Idempotency: a repeated up must be a no-op without error.
@@ -116,6 +119,9 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		assertPublicTableExists(t, db, table, false)
 	}
 	assertPublicColumnExists(t, db, "secret_handles", "encrypted_value", false)
+	for _, column := range []string{"manifest_digest", "failure_code", "failure_message", "deleted_at"} {
+		assertPublicColumnExists(t, db, "backups", column, false)
+	}
 	if err := RunMigrations(ctx, db, dir, "down_all"); err != nil {
 		t.Fatalf("idempotent down_all: %v", err)
 	}

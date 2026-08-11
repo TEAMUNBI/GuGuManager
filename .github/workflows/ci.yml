@@ -83,7 +83,6 @@ jobs:
       - run: npm run build
 
   openapi-compatibility:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -91,7 +90,7 @@ jobs:
           fetch-depth: 0
       - uses: oasdiff/oasdiff-action/breaking@v0
         with:
-          base: origin/${{ github.base_ref }}:api/openapi/openapi.yaml
+          base: ${{ github.event_name == 'pull_request' && format('origin/{0}:api/openapi/openapi.yaml', github.base_ref) || 'HEAD^:api/openapi/openapi.yaml' }}
           revision: HEAD:api/openapi/openapi.yaml
           fail-on: WARN
           review: false
@@ -122,6 +121,34 @@ jobs:
         env:
           GUGU_TEST_DATABASE_URL: postgres://gugumanager:integration-test-only@127.0.0.1:5432/gugumanager_test?sslmode=disable
         run: go test ./internal/migrations -count=1 -v
+      - name: Apply canonical migrations for store integration
+        env:
+          PGPASSWORD: integration-test-only
+        run: |
+          set -euo pipefail
+          for migration in migrations/*.up.sql; do
+            psql "postgres://gugumanager@127.0.0.1:5432/gugumanager_test?sslmode=disable" --file "$migration"
+          done
+      - name: Test PostgreSQL Control Plane store
+        env:
+          GUGU_TEST_DATABASE_URL: postgres://gugumanager:integration-test-only@127.0.0.1:5432/gugumanager_test?sslmode=disable
+        run: go test ./internal/store -count=1 -v
+
+  docker-backup-lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: false
+      - name: Pull lifecycle test image
+        run: docker pull nginx:1.29-alpine
+      - name: Test real Docker backup lifecycle
+        env:
+          GUGU_TEST_DOCKER: "1"
+        run: go test ./internal/agent -run TestDockerBackupRestoreDeleteLifecycle -count=1 -v
 
   browser-e2e:
     runs-on: ubuntu-24.04

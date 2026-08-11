@@ -243,6 +243,30 @@ describe("MockClient API parity", () => {
       vi.useRealTimers();
     }
   });
+
+  test("cleans up a failed backup through the deletion operation", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new MockClient();
+      const [backup] = await client.getBackups(serverId);
+      backup.status = "failed";
+      backup.failureCode = "BACKUP_INTEGRITY_FAILED";
+      backup.failureMessage = "Backup manifest validation failed";
+
+      const cleanup = await client.deleteBackup(serverId, backup.id, "mock-cleanup-key-0001");
+      expect(cleanup.type).toBe("backup-delete");
+      await expect(client.getBackups(serverId)).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: backup.id, status: "deleting" }),
+      ]));
+
+      await vi.runAllTimersAsync();
+
+      expect((await client.getOperation(cleanup.id)).status).toBe("succeeded");
+      expect((await client.getBackups(serverId)).some((item) => item.id === backup.id)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("MockClient network and startup reconciliation", () => {

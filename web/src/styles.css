@@ -511,6 +511,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .backup-name .backup-checksum { min-width: 0; display: flex; align-items: center; gap: 5px; }
 .backup-checksum code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .backup-checksum .icon-button { width: 24px; height: 24px; flex: 0 0 24px; }
+.backup-name .backup-failure { margin-top: 5px; overflow: hidden; color: var(--danger); font-family: "Cascadia Code", monospace; font-size: 8px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .backup-meta { display: flex; flex-direction: column; text-align: right; }
 .backup-meta span { color: var(--text-soft); font-family: "Cascadia Code", monospace; font-size: 9px; }
 .backup-meta small { margin-top: 4px; color: var(--dim); font-size: 8px; }

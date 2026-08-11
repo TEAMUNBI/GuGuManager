@@ -3,7 +3,10 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1714,7 +1717,8 @@ func (s *Postgres) Backups(serverID string) ([]domain.Backup, error) {
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id::text, name, status, size_bytes, content_digest, storage_location, retention_until, created_at, completed_at
+		SELECT id::text, name, status, size_bytes, content_digest, manifest_digest, storage_location, retention_until, created_at, completed_at,
+		       failure_code, failure_message, deleted_at
 		FROM backups
 		WHERE server_id = $1 AND status <> 'deleted'
 		ORDER BY created_at DESC
@@ -1728,10 +1732,12 @@ func (s *Postgres) Backups(serverID string) ([]domain.Backup, error) {
 	for rows.Next() {
 		var backup domain.Backup
 		var sizeBytes sql.NullInt64
-		var checksum, storageLocation sql.NullString
-		var retentionUntil, completedAt sql.NullTime
+		var checksum, manifestDigest, storageLocation sql.NullString
+		var retentionUntil, completedAt, deletedAt sql.NullTime
+		var failureCode, failureMessage sql.NullString
 		if err := rows.Scan(&backup.ID, &backup.Name, &backup.Status, &sizeBytes,
-			&checksum, &storageLocation, &retentionUntil, &backup.CreatedAt, &completedAt); err != nil {
+			&checksum, &manifestDigest, &storageLocation, &retentionUntil, &backup.CreatedAt, &completedAt,
+			&failureCode, &failureMessage, &deletedAt); err != nil {
 			continue
 		}
 		if sizeBytes.Valid {
@@ -1739,6 +1745,9 @@ func (s *Postgres) Backups(serverID string) ([]domain.Backup, error) {
 		}
 		if checksum.Valid {
 			backup.Checksum = valuePointer(checksum.String)
+		}
+		if manifestDigest.Valid {
+			backup.ManifestDigest = valuePointer(manifestDigest.String)
 		}
 		if storageLocation.Valid {
 			backup.StorageLocation = valuePointer(storageLocation.String)
@@ -1748,6 +1757,15 @@ func (s *Postgres) Backups(serverID string) ([]domain.Backup, error) {
 		}
 		if completedAt.Valid {
 			backup.CompletedAt = valuePointer(completedAt.Time)
+		}
+		if failureCode.Valid {
+			backup.FailureCode = valuePointer(failureCode.String)
+		}
+		if failureMessage.Valid {
+			backup.FailureMessage = valuePointer(failureMessage.String)
+		}
+		if deletedAt.Valid {
+			backup.DeletedAt = valuePointer(deletedAt.Time)
 		}
 		backups = append(backups, backup)
 	}
@@ -1867,12 +1885,12 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法恢复备份", true)
 	}
 
-	var backupStatus, contentDigest, storageLocation string
+	var backupStatus, contentDigest, manifestDigest, storageLocation string
 	err = tx.QueryRowContext(ctx, `
-		SELECT status, COALESCE(content_digest, ''), COALESCE(storage_location, '')
+		SELECT status, COALESCE(content_digest, ''), COALESCE(manifest_digest, ''), COALESCE(storage_location, '')
 		FROM backups WHERE id = $1 AND server_id = $2
 		FOR UPDATE
-	`, backupID, serverID).Scan(&backupStatus, &contentDigest, &storageLocation)
+	`, backupID, serverID).Scan(&backupStatus, &contentDigest, &manifestDigest, &storageLocation)
 	if err == sql.ErrNoRows || backupStatus == "deleted" {
 		return domain.Operation{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
 	}
@@ -1903,17 +1921,24 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 	`, serverID); err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法推进服务器 generation", true)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE backups SET status = 'restoring' WHERE id = $1
-	`, backupID); err != nil {
+	transition, err := tx.ExecContext(ctx, `
+		UPDATE backups SET status = 'restoring'
+		WHERE id = $1 AND server_id = $2 AND status = 'ready'
+	`, backupID, serverID)
+	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
+	}
+	if err := requireBackupTransition(transition, "ready", "restoring"); err != nil {
+		return domain.Operation{}, err
 	}
 
 	operationID := id.New()
 	// 恢复任务负载：storageObjectKey 指向备份归档在节点上的相对路径。
 	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
-		BackupID:         backupID,
-		StorageObjectKey: backupObjectKey(backupID, storageLocation),
+		BackupID:               backupID,
+		StorageObjectKey:       backupObjectKey(backupID, storageLocation),
+		ExpectedManifestDigest: manifestDigest,
+		ExpectedContentDigest:  contentDigest,
 	})
 	if marshalErr != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
@@ -1978,7 +2003,7 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询备份", true)
 	}
-	if backupStatus != "ready" {
+	if backupStatus != "ready" && backupStatus != "failed" {
 		return domain.Operation{}, domain.NewProblem("RESTORE_LOCKED", "备份当前不可删除", false)
 	}
 	if active, ok, err := s.activeTaskInTx(ctx, tx, serverID); err != nil {
@@ -1988,10 +2013,18 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 	}
 
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE backups SET status = 'deleting' WHERE id = $1
-	`, backupID); err != nil {
+	transition, err := tx.ExecContext(ctx, `
+		UPDATE backups
+		SET status = 'deleting',
+		    failure_code = CASE WHEN $3 = 'failed' THEN failure_code ELSE NULL END,
+		    failure_message = CASE WHEN $3 = 'failed' THEN failure_message ELSE NULL END
+		WHERE id = $1 AND server_id = $2 AND status = $3
+	`, backupID, serverID, backupStatus)
+	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
+	}
+	if err := requireBackupTransition(transition, backupStatus, "deleting"); err != nil {
+		return domain.Operation{}, err
 	}
 
 	operationID := id.New()
@@ -2037,10 +2070,12 @@ func (s *Postgres) DownloadBackup(serverID string, backupID string, actor domain
 		return domain.BackupContent{}, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
 	}
 
-	var backupStatus string
+	var backupStatus, expectedChecksum string
+	var expectedSize sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT status FROM backups WHERE id = $1 AND server_id = $2
-	`, backupID, serverID).Scan(&backupStatus); err != nil {
+		SELECT status, COALESCE(content_digest, ''), size_bytes
+		FROM backups WHERE id = $1 AND server_id = $2
+	`, backupID, serverID).Scan(&backupStatus, &expectedChecksum, &expectedSize); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
 		}
@@ -2052,6 +2087,9 @@ func (s *Postgres) DownloadBackup(serverID string, backupID string, actor domain
 	if backupStatus != "ready" {
 		return domain.BackupContent{}, domain.NewProblem("RESTORE_LOCKED", "备份当前不可下载", false)
 	}
+	if !backupChecksumValid(expectedChecksum) || !expectedSize.Valid || expectedSize.Int64 < 0 {
+		return domain.BackupContent{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "备份完整性元数据无效", false)
+	}
 
 	fd := s.getFileDispatcher()
 	if fd == nil {
@@ -2060,6 +2098,22 @@ func (s *Postgres) DownloadBackup(serverID string, backupID string, actor domain
 	content, err := fd.DownloadBackup(ctx, nodeID, serverID, backupID)
 	if err != nil {
 		return domain.BackupContent{}, mapAgentFileError(errorCodeFromDispatcher(err))
+	}
+	payload := content.Content
+	if content.Base64 {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(string(payload))
+		if decodeErr != nil {
+			return domain.BackupContent{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "备份归档编码无效", false)
+		}
+		payload = decoded
+	}
+	if int64(len(payload)) != expectedSize.Int64 || content.SizeBytes != expectedSize.Int64 {
+		return domain.BackupContent{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "备份归档大小与记录不一致", false)
+	}
+	digest := sha256.Sum256(payload)
+	actualChecksum := "sha256:" + hex.EncodeToString(digest[:])
+	if actualChecksum != expectedChecksum {
+		return domain.BackupContent{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "备份归档摘要与记录不一致", false)
 	}
 	return content, nil
 }

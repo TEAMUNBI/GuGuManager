@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -534,13 +536,7 @@ func TestPostgresControlPlaneBackupsConsoleHeartbeat(t *testing.T) {
 		t.Fatalf("backups = %+v, want one creating", backups)
 	}
 	backupID := backups[0].ID
-	// Simulate the agent finishing the backup task so the restore path is not
-	// blocked by the exclusive backup task.
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, nil); err != nil {
-		t.Fatalf("complete backup task: %v", err)
-	}
-
-	// A backup that is not ready cannot be restored or deleted.
+	// A backup that is still being created cannot be restored or deleted.
 	if _, err := s.RestoreBackup(serverID, backupID, "idem-cp-restore-0001", admin); err == nil {
 		t.Fatal("expected restoring a non-ready backup to fail")
 	}
@@ -548,11 +544,16 @@ func TestPostgresControlPlaneBackupsConsoleHeartbeat(t *testing.T) {
 		t.Fatal("expected deleting a non-ready backup to fail")
 	}
 
-	// Mark the backup ready via SQL and restore it from a stopped server.
-	if _, err := s.db.Exec(`UPDATE backups SET status = 'ready', content_digest = $1 WHERE id = $2`,
-		"sha256:"+strings.Repeat("ab", 32), backupID); err != nil {
-		t.Fatalf("mark backup ready: %v", err)
+	// Simulate a valid Agent result so the state machine advances creating -> ready.
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, []byte("control-plane-backup"))); err != nil {
+		t.Fatalf("complete backup task: %v", err)
 	}
+	backups, _ = s.Backups(serverID)
+	if len(backups) != 1 || backups[0].Status != "ready" {
+		t.Fatalf("backups after completion = %+v, want one ready", backups)
+	}
+
+	// Restore the ready recovery point from a stopped server.
 	if _, err := s.db.Exec(`UPDATE servers SET observed_power = 'stopped' WHERE id = $1`, serverID); err != nil {
 		t.Fatalf("stop server: %v", err)
 	}
@@ -637,16 +638,16 @@ func TestCompleteBackupTaskMarksBackupReady(t *testing.T) {
 		t.Fatalf("backups = %+v, want 1", backups)
 	}
 	backupID := backups[0].ID
-	result := []byte(`{"checksum":"sha256:` + strings.Repeat("ab", 32) + `","sizeBytes":42,"storageLocation":"backups/` + backupID + `.tar.gz"}`)
+	result := []byte(`{"backupId":"` + backupID + `","checksum":"sha256:` + strings.Repeat("ab", 32) + `","manifestDigest":"sha256:` + strings.Repeat("cd", 32) + `","sizeBytes":42,"storageLocation":"backups/` + backupID + `.tar.gz"}`)
 	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, result); err != nil {
 		t.Fatalf("complete backup task: %v", err)
 	}
 
-	var status, checksum, storageLocation string
+	var status, checksum, manifestDigest, storageLocation string
 	var sizeBytes int64
 	if err := s.db.QueryRow(`
-		SELECT status, COALESCE(content_digest, ''), COALESCE(storage_location, ''), COALESCE(size_bytes, 0)
-		FROM backups WHERE id = $1`, backupID).Scan(&status, &checksum, &storageLocation, &sizeBytes); err != nil {
+		SELECT status, COALESCE(content_digest, ''), COALESCE(manifest_digest, ''), COALESCE(storage_location, ''), COALESCE(size_bytes, 0)
+		FROM backups WHERE id = $1`, backupID).Scan(&status, &checksum, &manifestDigest, &storageLocation, &sizeBytes); err != nil {
 		t.Fatalf("query backup state: %v", err)
 	}
 	if status != "ready" {
@@ -655,10 +656,236 @@ func TestCompleteBackupTaskMarksBackupReady(t *testing.T) {
 	if checksum != "sha256:"+strings.Repeat("ab", 32) {
 		t.Errorf("backup checksum = %q", checksum)
 	}
+	if manifestDigest != "sha256:"+strings.Repeat("cd", 32) {
+		t.Errorf("backup manifest digest = %q", manifestDigest)
+	}
 	if sizeBytes != 42 {
 		t.Errorf("backup size = %d, want 42", sizeBytes)
 	}
 	if want := "backups/" + backupID + ".tar.gz"; storageLocation != want {
 		t.Errorf("storage location = %q, want %q", storageLocation, want)
 	}
+}
+
+func TestInvalidBackupResultPersistsIntegrityFailureMetadata(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+
+	op, err := s.CreateBackup(serverID, "idem-cp-invalid-result-0001", admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, err := s.Backups(serverID)
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("creating backup metadata = %+v, err=%v", backups, err)
+	}
+	backupID := backups[0].ID
+	malformed := []byte(`{"backupId":"` + backupID + `","checksum":"sha256:` + strings.Repeat("ab", 32) + `","sizeBytes":42,"storageLocation":"backups/` + backupID + `.tar.gz"}`)
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, malformed); err != nil {
+		t.Fatalf("complete malformed backup task: %v", err)
+	}
+	backups, err = s.Backups(serverID)
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("failed backup metadata = %+v, err=%v", backups, err)
+	}
+	backup := backups[0]
+	if backup.Status != "failed" || backup.FailureCode == nil || *backup.FailureCode != "BACKUP_INTEGRITY_FAILED" || backup.FailureMessage == nil {
+		t.Fatalf("integrity failure metadata = %+v", backup)
+	}
+}
+
+func TestCompleteBackupTaskRejectsUnexpectedBackupState(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+
+	op, err := s.CreateBackup(serverID, "idem-cp-state-conflict-0001", admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, err := s.Backups(serverID)
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("creating backup = %+v, err=%v", backups, err)
+	}
+	backupID := backups[0].ID
+	if _, err := s.db.Exec(`
+		UPDATE backups
+		SET status = 'failed', failure_code = 'BACKUP_FAILED', failure_message = 'injected state conflict'
+		WHERE id = $1
+	`, backupID); err != nil {
+		t.Fatalf("inject backup state conflict: %v", err)
+	}
+
+	err = s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, []byte("archive")))
+	requireProblemCode(t, err, "BACKUP_STATE_CONFLICT")
+	var backupStatus, taskStatus string
+	if err := s.db.QueryRow(`SELECT status FROM backups WHERE id = $1`, backupID).Scan(&backupStatus); err != nil {
+		t.Fatalf("query backup status: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT status FROM server_tasks WHERE id = $1`, op.ID).Scan(&taskStatus); err != nil {
+		t.Fatalf("query task status: %v", err)
+	}
+	if backupStatus != "failed" || taskStatus != "queued" {
+		t.Fatalf("state conflict committed partial writes: backup=%q task=%q", backupStatus, taskStatus)
+	}
+}
+
+func TestPostgresRestoreCompletionConvergesObservedState(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+	backupID := completePostgresBackup(t, s, admin, nodeID, serverID, "idem-cp-converge-backup-0001", []byte("restore-point"))
+
+	if _, err := s.db.Exec(`
+		UPDATE servers
+		SET observed_power = 'stopped', health_condition = 'healthy', observed_generation = 0
+		WHERE id = $1
+	`, serverID); err != nil {
+		t.Fatalf("prepare stopped server: %v", err)
+	}
+	restore, err := s.RestoreBackup(serverID, backupID, "idem-cp-converge-restore-0001", admin)
+	if err != nil {
+		t.Fatalf("restore backup: %v", err)
+	}
+	if err := s.CompleteTask(context.Background(), restore.ID, nodeID, true, nil, nil); err != nil {
+		t.Fatalf("complete restore: %v", err)
+	}
+
+	var generation, observedGeneration int64
+	var desiredPower, observedPower, health string
+	if err := s.db.QueryRow(`
+		SELECT generation, observed_generation, desired_power, observed_power, health_condition
+		FROM servers WHERE id = $1
+	`, serverID).Scan(&generation, &observedGeneration, &desiredPower, &observedPower, &health); err != nil {
+		t.Fatalf("query converged server: %v", err)
+	}
+	if observedGeneration != generation || desiredPower != "stopped" || observedPower != "stopped" || health != "unknown" {
+		t.Fatalf("restore convergence = generation %d/%d power %s/%s health %s", observedGeneration, generation, desiredPower, observedPower, health)
+	}
+}
+
+func TestPostgresFailedBackupCanBeDeleted(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+	op, err := s.CreateBackup(serverID, "idem-cp-failed-delete-0001", admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, _ := s.Backups(serverID)
+	backupID := backups[0].ID
+	failureCode := "BACKUP_FAILED"
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, false, &failureCode, nil); err != nil {
+		t.Fatalf("fail backup: %v", err)
+	}
+
+	deleteOperation, err := s.DeleteBackup(serverID, backupID, "idem-cp-failed-delete-0002", admin)
+	if err != nil {
+		t.Fatalf("delete failed backup: %v", err)
+	}
+	if err := s.CompleteTask(context.Background(), deleteOperation.ID, nodeID, true, nil, nil); err != nil {
+		t.Fatalf("complete failed-backup deletion: %v", err)
+	}
+	backups, err = s.Backups(serverID)
+	if err != nil || len(backups) != 0 {
+		t.Fatalf("backups after deletion = %+v, err=%v", backups, err)
+	}
+}
+
+func TestPostgresFailedBackupDeleteCompensationReturnsToFailed(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+	op, err := s.CreateBackup(serverID, "idem-cp-failed-delete-comp-0001", admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, _ := s.Backups(serverID)
+	backupID := backups[0].ID
+	failureCode := "BACKUP_FAILED"
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, false, &failureCode, nil); err != nil {
+		t.Fatalf("fail backup: %v", err)
+	}
+	deleteOperation, err := s.DeleteBackup(serverID, backupID, "idem-cp-failed-delete-comp-0002", admin)
+	if err != nil {
+		t.Fatalf("delete failed backup: %v", err)
+	}
+	deleteFailure := "RUNTIME_UNAVAILABLE"
+	if err := s.CompleteTask(context.Background(), deleteOperation.ID, nodeID, false, &deleteFailure, nil); err != nil {
+		t.Fatalf("compensate failed deletion: %v", err)
+	}
+	backups, err = s.Backups(serverID)
+	if err != nil || len(backups) != 1 || backups[0].Status != "failed" {
+		t.Fatalf("compensated backup = %+v, err=%v", backups, err)
+	}
+	if backups[0].FailureCode == nil || *backups[0].FailureCode != "RUNTIME_UNAVAILABLE" {
+		t.Fatalf("compensated failure metadata = %+v", backups[0])
+	}
+}
+
+func TestPostgresDownloadBackupVerifiesChecksumAndSize(t *testing.T) {
+	s := testPostgres(t)
+	admin, nodeID, serverID := controlPlaneFixture(t, s)
+	raw := []byte("verified-backup")
+	backupID := completePostgresBackup(t, s, admin, nodeID, serverID, "idem-cp-download-verify-0001", raw)
+	root := t.TempDir()
+	s.SetFileDispatcher(&localFileDispatcher{fileRoot: root})
+	archiveDir := filepath.Join(root, "backups")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatalf("create backup directory: %v", err)
+	}
+	archive := filepath.Join(archiveDir, backupID+".tar.gz")
+	if err := os.WriteFile(archive, raw, 0o600); err != nil {
+		t.Fatalf("write verified archive: %v", err)
+	}
+	content, err := s.DownloadBackup(serverID, backupID, admin)
+	if err != nil || content.SizeBytes != int64(len(raw)) {
+		t.Fatalf("download verified backup = %+v, err=%v", content, err)
+	}
+
+	if err := os.WriteFile(archive, []byte("tampered-backup"), 0o600); err != nil {
+		t.Fatalf("tamper archive: %v", err)
+	}
+	_, err = s.DownloadBackup(serverID, backupID, admin)
+	requireProblemCode(t, err, "BACKUP_INTEGRITY_FAILED")
+
+	larger := []byte("larger-tampered-backup")
+	if err := os.WriteFile(archive, larger, 0o600); err != nil {
+		t.Fatalf("write size-mismatched archive: %v", err)
+	}
+	digest := sha256.Sum256(larger)
+	if _, err := s.db.Exec(`UPDATE backups SET content_digest = $2 WHERE id = $1`, backupID, "sha256:"+hex.EncodeToString(digest[:])); err != nil {
+		t.Fatalf("prepare size mismatch: %v", err)
+	}
+	_, err = s.DownloadBackup(serverID, backupID, admin)
+	requireProblemCode(t, err, "BACKUP_INTEGRITY_FAILED")
+}
+
+func completePostgresBackup(t *testing.T, s *Postgres, admin domain.User, nodeID, serverID, idempotencyKey string, content []byte) string {
+	t.Helper()
+	op, err := s.CreateBackup(serverID, idempotencyKey, admin)
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, err := s.Backups(serverID)
+	if err != nil || len(backups) == 0 {
+		t.Fatalf("creating backup = %+v, err=%v", backups, err)
+	}
+	backupID := backups[0].ID
+	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, content)); err != nil {
+		t.Fatalf("complete backup: %v", err)
+	}
+	return backupID
+}
+
+func postgresBackupResult(t *testing.T, backupID string, content []byte) []byte {
+	t.Helper()
+	digest := sha256.Sum256(content)
+	result, err := json.Marshal(map[string]any{
+		"backupId":        backupID,
+		"checksum":        "sha256:" + hex.EncodeToString(digest[:]),
+		"manifestDigest":  "sha256:" + strings.Repeat("cd", 32),
+		"sizeBytes":       len(content),
+		"storageLocation": "backups/" + backupID + ".tar.gz",
+	})
+	if err != nil {
+		t.Fatalf("marshal backup result: %v", err)
+	}
+	return result
 }

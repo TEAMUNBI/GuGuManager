@@ -66,6 +66,9 @@ type DockerExecutor struct {
 // 根目录（每台服务器的数据卷位于 <dataRoot>/<serverID>）。
 // 运行时延迟到首次 ExecuteTask 时创建，因此无 Docker 环境也能构造。
 func NewDockerExecutor(dataRoot string) (*DockerExecutor, error) {
+	if err := recoverInterruptedRestores(dataRoot); err != nil {
+		return nil, fmt.Errorf("recover interrupted restores: %w", err)
+	}
 	return &DockerExecutor{
 		dataRoot: dataRoot,
 		newRuntime: func() (containerRuntime, error) {
@@ -118,11 +121,6 @@ func (e *DockerExecutor) executeBackup(ctx context.Context, task *agentv1.Task) 
 	if payload == nil {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
 	}
-	rt, err := e.runtime()
-	if err != nil {
-		slog.Warn("backup: runtime unavailable", "server_id", task.GetServerId(), "error", err)
-		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
-	}
 	containerName := fmt.Sprintf("gugu-server-%s", task.GetServerId())
 	switch action := payload.GetAction().(type) {
 	case *agentv1.BackupTaskPayload_Create:
@@ -130,11 +128,21 @@ func (e *DockerExecutor) executeBackup(ctx context.Context, task *agentv1.Task) 
 		if create == nil {
 			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
 		}
+		rt, err := e.runtime()
+		if err != nil {
+			slog.Warn("backup: runtime unavailable", "server_id", task.GetServerId(), "error", err)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
+		}
 		return e.createBackup(ctx, rt, task.GetServerId(), containerName, create)
 	case *agentv1.BackupTaskPayload_Restore:
 		restore := action.Restore
 		if restore == nil {
 			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
+		}
+		rt, err := e.runtime()
+		if err != nil {
+			slog.Warn("backup: runtime unavailable", "server_id", task.GetServerId(), "error", err)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
 		}
 		return e.restoreBackup(ctx, rt, containerName, restore)
 	case *agentv1.BackupTaskPayload_Delete:
@@ -149,30 +157,86 @@ func (e *DockerExecutor) executeBackup(ctx context.Context, task *agentv1.Task) 
 }
 
 func (e *DockerExecutor) createBackup(ctx context.Context, rt containerRuntime, serverID, containerName string, create *agentv1.CreateBackupPayload) (*ExecutionOutcome, error) {
-	backupDir := filepath.Join(e.dataRoot, "backups")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		slog.Warn("backup: create backup dir", "server_id", serverID, "error", err)
+	backupID := create.GetBackupId()
+	objectKey, err := canonicalBackupObjectKey(backupID)
+	if err != nil || (create.GetStorageObjectKey() != "" && create.GetStorageObjectKey() != objectKey) {
+		slog.Warn("backup: invalid storage identity", "server_id", serverID, "backup_id", backupID)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+	}
+	archive, err := resolveBackupArchive(e.dataRoot, backupID, objectKey)
+	if err != nil {
+		slog.Warn("backup: resolve archive", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+	}
+	if _, err := os.Stat(archive); err == nil {
+		metadata, inspectErr := inspectBackupArchive(archive)
+		if inspectErr != nil {
+			slog.Warn("backup: immutable archive is invalid", "server_id", serverID, "error", inspectErr)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+		}
+		return backupCreateOutcome(backupID, objectKey, metadata)
+	} else if !os.IsNotExist(err) {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
 	}
-	archive := filepath.Join(backupDir, create.GetBackupId()+".tar.gz")
-	// 容器内打包到 /tmp，再拷出到节点备份目录。
-	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", fmt.Sprintf("tar -czf /tmp/%s.tar.gz -C /data .", create.GetBackupId())}); err != nil {
+
+	backupDir := filepath.Dir(archive)
+	containerArchiveName := backupID + ".tar.gz"
+	containerArchive := "/tmp/" + containerArchiveName
+	defer func() {
+		if _, cleanupErr := rt.ExecInContainer(context.Background(), containerName, []string{"rm", "-f", containerArchive}); cleanupErr != nil {
+			slog.Warn("backup: clean container temporary archive", "server_id", serverID, "error", cleanupErr)
+		}
+	}()
+	if _, err := rt.ExecInContainer(ctx, containerName, []string{"tar", "-czf", containerArchive, "-C", "/data", "."}); err != nil {
 		slog.Warn("backup: in-container tar", "server_id", serverID, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
 	}
-	if err := rt.CopyArchiveFromContainer(ctx, containerName, fmt.Sprintf("/tmp/%s.tar.gz", create.GetBackupId()), archive); err != nil {
+	outer, err := os.CreateTemp(backupDir, "."+backupID+"-*.docker.partial")
+	if err != nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	outerPath := outer.Name()
+	if err := outer.Close(); err != nil {
+		_ = os.Remove(outerPath)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	}
+	defer os.Remove(outerPath)
+	if err := rt.CopyArchiveFromContainer(ctx, containerName, containerArchive, outerPath); err != nil {
 		slog.Warn("backup: copy archive from container", "server_id", serverID, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
 	}
-	sum, size, err := fileChecksum(archive)
+	partial, err := extractDockerBackupPayload(outerPath, backupDir, containerArchiveName, backupID)
 	if err != nil {
-		slog.Warn("backup: checksum archive", "server_id", serverID, "error", err)
-		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+		slog.Warn("backup: extract docker archive payload", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
 	}
+	defer os.Remove(partial)
+	metadata, err := inspectBackupArchive(partial)
+	if err != nil {
+		slog.Warn("backup: validate archive", "server_id", serverID, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+	}
+	if err := publishBackupArchive(partial, archive); err != nil {
+		if !os.IsExist(err) {
+			slog.Warn("backup: publish archive", "server_id", serverID, "error", err)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+		}
+		existing, inspectErr := inspectBackupArchive(archive)
+		if inspectErr != nil || existing != metadata {
+			slog.Warn("backup: conflicting immutable archive", "server_id", serverID, "error", inspectErr)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+		}
+	}
+	return backupCreateOutcome(backupID, objectKey, metadata)
+}
+
+func backupCreateOutcome(backupID, objectKey string, metadata backupMetadata) (*ExecutionOutcome, error) {
 	result, err := json.Marshal(map[string]any{
-		"checksum":        "sha256:" + sum,
-		"sizeBytes":       size,
-		"storageLocation": "backups/" + create.GetBackupId() + ".tar.gz",
+		"backupId":        backupID,
+		"checksum":        metadata.Checksum,
+		"manifestDigest":  metadata.ManifestDigest,
+		"sizeBytes":       metadata.SizeBytes,
+		"storageLocation": objectKey,
 	})
 	if err != nil {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: false}, nil
@@ -181,34 +245,54 @@ func (e *DockerExecutor) createBackup(ctx context.Context, rt containerRuntime, 
 }
 
 func (e *DockerExecutor) restoreBackup(ctx context.Context, rt containerRuntime, containerName string, restore *agentv1.RestoreBackupPayload) (*ExecutionOutcome, error) {
-	archive := filepath.Join(e.dataRoot, restore.GetStorageObjectKey())
+	status, err := rt.InspectContainer(ctx, containerName)
+	if err != nil {
+		slog.Warn("backup: inspect container before restore", "container", containerName, "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
+	}
+	if status.Running {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "SERVER_MUST_BE_STOPPED", Retryable: false}, nil
+	}
+	archive, err := resolveBackupArchive(e.dataRoot, restore.GetBackupId(), restore.GetStorageObjectKey())
+	if err != nil {
+		slog.Warn("backup: invalid restore archive path", "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+	}
 	if _, err := os.Stat(archive); err != nil {
 		slog.Warn("backup: restore archive missing", "archive", archive, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED"}, nil
 	}
-	// 服务器 stop 后容器为 stopped，docker exec 无法在容器内执行；
-	// 恢复前先确保容器 running（对已 running 容器 docker start 幂等）。
-	if err := rt.StartContainer(ctx, containerName); err != nil {
-		slog.Warn("backup: start container before restore", "container", containerName, "error", err)
-		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	if expected := restore.GetExpectedContentDigest(); expected != "" {
+		sum, _, err := fileChecksum(archive)
+		if err != nil || expected != "sha256:"+sum {
+			slog.Warn("backup: restore content digest mismatch", "archive", archive)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+		}
 	}
-	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", "rm -rf /data/* /data/.[!.]* 2>/dev/null || true"}); err != nil {
-		slog.Warn("backup: clear data dir", "container", containerName, "error", err)
-		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
+	if expected := restore.GetExpectedManifestDigest(); expected != "" {
+		actual, err := backupManifestDigest(archive)
+		if err != nil || expected != actual {
+			slog.Warn("backup: restore manifest digest mismatch", "archive", archive)
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+		}
 	}
-	if err := rt.CopyArchiveToContainer(ctx, containerName, archive, "/tmp"); err != nil {
-		slog.Warn("backup: copy archive into container", "container", containerName, "error", err)
-		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
-	}
-	if _, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", "tar -xzf /tmp/restore.tar.gz -C /data 2>/dev/null || tar -xzf $(ls /tmp/*.tar.gz | head -1) -C /data"}); err != nil {
-		slog.Warn("backup: in-container extract", "container", containerName, "error", err)
+	if err := replaceServerDataFromBackup(e.dataRoot, containerName, archive, restore.GetExpectedManifestDigest()); err != nil {
+		slog.Warn("backup: staged restore", "container", containerName, "error", err)
+		if errors.Is(err, errBackupIntegrity) {
+			return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+		}
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil
 	}
 	return &ExecutionOutcome{Succeeded: true}, nil
 }
 
 func (e *DockerExecutor) deleteBackup(ctx context.Context, del *agentv1.DeleteBackupPayload) (*ExecutionOutcome, error) {
-	archive := filepath.Join(e.dataRoot, del.GetStorageObjectKey())
+	_ = ctx
+	archive, err := resolveBackupArchive(e.dataRoot, del.GetBackupId(), del.GetStorageObjectKey())
+	if err != nil {
+		slog.Warn("backup: invalid delete archive path", "error", err)
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_INTEGRITY_FAILED", Retryable: false}, nil
+	}
 	if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
 		slog.Warn("backup: delete archive", "archive", archive, "error", err)
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "BACKUP_FAILED", Retryable: true}, nil

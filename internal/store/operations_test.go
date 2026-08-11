@@ -458,6 +458,118 @@ func TestFinishBackupDoesNotSucceedWithAStaleGeneration(t *testing.T) {
 	assertStaleOperationFailure(t, completed)
 }
 
+func TestCreateBackupPersistsCreatingMetadataAndFailureReason(t *testing.T) {
+	service := newTestMemory(50 * time.Millisecond)
+	operation, err := service.CreateBackup(stoppedServerID, "backup-state-machine-001", testActor("admin-1", "GuGu Admin"))
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, err := service.Backups(stoppedServerID)
+	if err != nil || len(backups) == 0 || backups[0].Status != "creating" {
+		t.Fatalf("accepted backup metadata = %+v, err=%v; want creating", backups, err)
+	}
+	backupID := backups[0].ID
+	service.mu.Lock()
+	server := service.servers[stoppedServerID]
+	server.Generation++
+	service.servers[stoppedServerID] = server
+	service.mu.Unlock()
+	completed := waitForStoredOperation(t, service, operation.ID)
+	if completed.Status != "failed" {
+		t.Fatalf("operation status = %q, want failed", completed.Status)
+	}
+	backups, err = service.Backups(stoppedServerID)
+	if err != nil || len(backups) == 0 || backups[0].ID != backupID {
+		t.Fatalf("failed backup metadata missing: %+v, err=%v", backups, err)
+	}
+	if backups[0].Status != "failed" || backups[0].FailureCode == nil || *backups[0].FailureCode != "OPERATION_STALE" || backups[0].FailureMessage == nil {
+		t.Fatalf("failed backup metadata = %+v", backups[0])
+	}
+}
+
+func TestFailedBackupCanBeDeleted(t *testing.T) {
+	service := newTestMemory(30 * time.Millisecond)
+	operation, err := service.CreateBackup(stoppedServerID, "failed-backup-delete-0001", testActor("admin-1", "GuGu Admin"))
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, err := service.Backups(stoppedServerID)
+	if err != nil || len(backups) == 0 {
+		t.Fatalf("creating backup = %+v, err=%v", backups, err)
+	}
+	backupID := backups[0].ID
+	service.mu.Lock()
+	server := service.servers[stoppedServerID]
+	server.Generation++
+	service.servers[stoppedServerID] = server
+	service.mu.Unlock()
+	if completed := waitForStoredOperation(t, service, operation.ID); completed.Status != "failed" {
+		t.Fatalf("backup operation status = %q, want failed", completed.Status)
+	}
+
+	deleteOperation, err := service.DeleteBackup(stoppedServerID, backupID, "failed-backup-delete-0002", testActor("admin-1", "GuGu Admin"))
+	if err != nil {
+		t.Fatalf("delete failed backup: %v", err)
+	}
+	if completed := waitForStoredOperation(t, service, deleteOperation.ID); completed.Status != "succeeded" {
+		t.Fatalf("delete operation = %+v, want succeeded", completed)
+	}
+	backups, err = service.Backups(stoppedServerID)
+	if err != nil {
+		t.Fatalf("backups after deleting failed recovery point = %+v, err=%v", backups, err)
+	}
+	for _, backup := range backups {
+		if backup.ID == backupID {
+			t.Fatalf("deleted failed recovery point remains visible: %+v", backup)
+		}
+	}
+}
+
+func TestFailedBackupDeleteCompensationReturnsToFailed(t *testing.T) {
+	service := newTestMemory(40 * time.Millisecond)
+	operation, err := service.CreateBackup(stoppedServerID, "failed-backup-compensate-0001", testActor("admin-1", "GuGu Admin"))
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	backups, _ := service.Backups(stoppedServerID)
+	backupID := backups[0].ID
+	service.mu.Lock()
+	server := service.servers[stoppedServerID]
+	server.Generation++
+	service.servers[stoppedServerID] = server
+	service.mu.Unlock()
+	_ = waitForStoredOperation(t, service, operation.ID)
+
+	deleteOperation, err := service.DeleteBackup(stoppedServerID, backupID, "failed-backup-compensate-0002", testActor("admin-1", "GuGu Admin"))
+	if err != nil {
+		t.Fatalf("delete failed backup: %v", err)
+	}
+	service.mu.Lock()
+	server = service.servers[stoppedServerID]
+	server.Generation++
+	service.servers[stoppedServerID] = server
+	service.mu.Unlock()
+	if completed := waitForStoredOperation(t, service, deleteOperation.ID); completed.Status != "failed" {
+		t.Fatalf("delete operation = %+v, want failed", completed)
+	}
+	backups, err = service.Backups(stoppedServerID)
+	if err != nil {
+		t.Fatalf("compensated failed backup = %+v, err=%v", backups, err)
+	}
+	found := false
+	for _, backup := range backups {
+		if backup.ID == backupID {
+			found = true
+			if backup.Status != "failed" {
+				t.Fatalf("compensated backup status = %q, want failed", backup.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("compensated failed backup %q is missing: %+v", backupID, backups)
+	}
+}
+
 func assertStaleOperationFailure(t *testing.T, operation domain.Operation) {
 	t.Helper()
 	if operation.Status != "failed" || operation.Checkpoint != "failed" {
@@ -636,6 +748,9 @@ func TestRestoreBackupHoldsExclusiveLockAndConvergesGeneration(t *testing.T) {
 	backups, _ = service.Backups(stoppedServerID)
 	if backups[0].Status != "ready" {
 		t.Fatalf("backup status after restore = %q, want ready", backups[0].Status)
+	}
+	if backups[0].FailureCode != nil || backups[0].FailureMessage != nil {
+		t.Fatalf("successful restore retained failure metadata: %+v", backups[0])
 	}
 }
 

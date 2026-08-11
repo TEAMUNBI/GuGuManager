@@ -14,20 +14,20 @@ import (
 // testDatabaseDSN 返回规范化后的测试数据库 DSN；未配置或不是 _test 库时返回空串。
 // lib/pq 默认 sslmode=require 而本地测试实例无 SSL，未显式指定时回退 plaintext。
 func testDatabaseDSN() string {
-	dsn := os.Getenv("GUGU_TEST_DATABASE_URL")
-	if dsn == "" || !strings.HasSuffix(dsn, "_test") {
+	dsn := strings.TrimSpace(os.Getenv("GUGU_TEST_DATABASE_URL"))
+	if dsn == "" {
 		return ""
 	}
 	parsed, err := url.Parse(dsn)
-	if err == nil {
-		query := parsed.Query()
-		if query.Get("sslmode") == "" {
-			query.Set("sslmode", "disable")
-			parsed.RawQuery = query.Encode()
-			dsn = parsed.String()
-		}
+	if err != nil || !strings.HasSuffix(strings.Trim(parsed.Path, "/"), "_test") {
+		return ""
 	}
-	return dsn
+	query := parsed.Query()
+	if query.Get("sslmode") == "" {
+		query.Set("sslmode", "disable")
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String()
 }
 
 func testPostgres(t *testing.T) *Postgres {

@@ -8,7 +8,7 @@ import (
 
 func TestValidBackupTaskResultRequiresIntegrityMetadata(t *testing.T) {
 	checkpoint := `{"backupId":"backup-1","storageObjectKey":"backups/backup-1.tar.gz"}`
-	valid := `{"checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":0,"storageLocation":"backups/backup-1.tar.gz"}`
+	valid := `{"backupId":"backup-1","checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":0,"storageLocation":"backups/backup-1.tar.gz"}`
 	if !validBackupTaskResult(checkpoint, []byte(valid)) {
 		t.Fatal("valid zero-byte backup result was rejected")
 	}
@@ -17,11 +17,14 @@ func TestValidBackupTaskResultRequiresIntegrityMetadata(t *testing.T) {
 		name   string
 		result string
 	}{
-		{name: "missing checksum", result: `{"sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
-		{name: "negative size", result: `{"checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":-1,"storageLocation":"backups/backup-1.tar.gz"}`},
-		{name: "path escape", result: `{"checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12,"storageLocation":"../backup.tar.gz"}`},
-		{name: "wrong digest length", result: `{"checksum":"sha256:aa","sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
-		{name: "storage key mismatch", result: `{"checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12,"storageLocation":"backups/other.tar.gz"}`},
+		{name: "missing backup id", result: `{"checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
+		{name: "wrong backup id", result: `{"backupId":"backup-2","checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
+		{name: "missing checksum", result: `{"backupId":"backup-1","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
+		{name: "missing manifest digest", result: `{"backupId":"backup-1","checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
+		{name: "negative size", result: `{"backupId":"backup-1","checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":-1,"storageLocation":"backups/backup-1.tar.gz"}`},
+		{name: "path escape", result: `{"backupId":"backup-1","checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12,"storageLocation":"../backup.tar.gz"}`},
+		{name: "wrong digest length", result: `{"backupId":"backup-1","checksum":"sha256:aa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12,"storageLocation":"backups/backup-1.tar.gz"}`},
+		{name: "storage key mismatch", result: `{"backupId":"backup-1","checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12,"storageLocation":"backups/other.tar.gz"}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

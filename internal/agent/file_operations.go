@@ -160,10 +160,11 @@ func (e *DockerExecutor) ExecuteFileOperation(ctx context.Context, req *agentv1.
 // and returns it base64-encoded. Backups may be large, so no maxReadBytes cap
 // is applied; the 512 MiB gRPC message limit bounds the response.
 func (e *DockerExecutor) downloadBackup(ctx context.Context, backupID string) (*FileReadResult, error) {
-	if strings.TrimSpace(backupID) == "" {
-		return nil, fmt.Errorf("backup id required: %w", os.ErrInvalid)
+	_ = ctx
+	archive, err := resolveBackupArchive(e.dataRoot, backupID, "")
+	if err != nil {
+		return nil, fmt.Errorf("resolve backup archive: %w", os.ErrInvalid)
 	}
-	archive := filepath.Join(e.dataRoot, "backups", backupID+".tar.gz")
 	content, err := os.ReadFile(archive)
 	if err != nil {
 		if os.IsNotExist(err) {

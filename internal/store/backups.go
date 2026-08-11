@@ -62,6 +62,10 @@ func (m *Memory) CreateBackup(serverID string, idempotencyKey string, actor doma
 	}
 	now := time.Now().UTC()
 	operation := domain.NewQueuedOperation(id.New(), serverID, server.NodeID, domain.PowerAction("backup"), server.Generation, idempotencyKey, now)
+	backupID := id.New()
+	backup := domain.Backup{ID: backupID, Name: "manual-" + now.Format("20060102-150405"), Status: "creating", CreatedAt: now}
+	m.backups[serverID] = append([]domain.Backup{backup}, m.backups[serverID]...)
+	m.backupOperations[operation.ID] = backupID
 	m.operations[operation.ID] = operation
 	m.idempotency[scope] = idempotencyRecord{OperationID: operation.ID, RequestDigest: digest}
 	m.mu.Unlock()
@@ -166,7 +170,7 @@ func (m *Memory) DeleteBackup(serverID string, backupID string, idempotencyKey s
 		m.mu.Unlock()
 		return domain.Operation{}, domain.NewProblem("NOT_FOUND", "备份不存在", false)
 	}
-	if backup.Status != "ready" {
+	if !domain.BackupStatusTransitionAllowed(backup.Status, "deleting") {
 		m.mu.Unlock()
 		return domain.Operation{}, domain.NewProblem("RESTORE_LOCKED", "备份当前不可删除", false)
 	}
@@ -175,9 +179,11 @@ func (m *Memory) DeleteBackup(serverID string, backupID string, idempotencyKey s
 		return domain.Operation{}, operationInProgress(active)
 	}
 	now := time.Now().UTC()
+	deleteFrom := backup.Status
 	backup.Status = "deleting"
 	m.backups[serverID][backupIndex] = backup
 	operation := domain.NewQueuedOperation(id.New(), serverID, server.NodeID, domain.PowerAction("backup-delete"), server.Generation, idempotencyKey, now)
+	m.backupDeleteFrom[operation.ID] = deleteFrom
 	m.operations[operation.ID] = operation
 	m.idempotency[scope] = idempotencyRecord{OperationID: operation.ID, RequestDigest: digest}
 	m.mu.Unlock()
@@ -200,14 +206,39 @@ func (m *Memory) finishBackup(operationID string, serverID string, actor string)
 		m.operations[operationID] = operation
 	}
 	succeeded := finished && operation.Status == "succeeded"
-	if succeeded {
-		backupID := id.New()
-		checksumBytes := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d:%d", backupID, server.GameBundleDigest, server.Metrics.DiskBytes, now.UnixNano())))
-		checksum := "sha256:" + hex.EncodeToString(checksumBytes[:])
-		backup := domain.Backup{ID: backupID, Name: "manual-" + now.Format("20060102-150405"), Status: "ready", SizeBytes: valuePointer(server.Metrics.DiskBytes), Checksum: valuePointer(checksum), CreatedAt: now}
-		m.backups[serverID] = append([]domain.Backup{backup}, m.backups[serverID]...)
-		m.backupChecksums[backup.ID] = *backup.Checksum
+	backupID := m.backupOperations[operationID]
+	if finished && backupID != "" {
+		backupIndex, backup, backupOK := m.backupLocked(serverID, backupID)
+		if !backupOK {
+			finished = false
+			succeeded = false
+			failure := domain.OperationError{Code: "BACKUP_FAILED", Message: "备份元数据在任务完成前丢失", Retryable: false}
+			operation.Status = "failed"
+			operation.Checkpoint = "failed"
+			operation.Error = &failure
+			m.operations[operationID] = operation
+		} else if succeeded {
+			checksumBytes := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d:%d", backupID, server.GameBundleDigest, server.Metrics.DiskBytes, now.UnixNano())))
+			checksum := "sha256:" + hex.EncodeToString(checksumBytes[:])
+			manifestBytes := sha256.Sum256([]byte("manifest:" + checksum))
+			manifestDigest := "sha256:" + hex.EncodeToString(manifestBytes[:])
+			backup.Status = "ready"
+			backup.SizeBytes = valuePointer(server.Metrics.DiskBytes)
+			backup.Checksum = valuePointer(checksum)
+			backup.ManifestDigest = valuePointer(manifestDigest)
+			backup.CompletedAt = valuePointer(now)
+			backup.FailureCode = nil
+			backup.FailureMessage = nil
+			m.backups[serverID][backupIndex] = backup
+			m.backupChecksums[backup.ID] = *backup.Checksum
+		} else if finished {
+			backup.Status = "failed"
+			backup.FailureCode, backup.FailureMessage = backupFailureMetadata(operation.Error)
+			backup.CompletedAt = nil
+			m.backups[serverID][backupIndex] = backup
+		}
 	}
+	delete(m.backupOperations, operationID)
 	m.mu.Unlock()
 	if finished {
 		result := "failure"
@@ -252,6 +283,12 @@ func (m *Memory) finishRestoreBackup(operationID string, serverID string, backup
 		// A restore failure is compensatable: preserve the last known-good
 		// recovery point so operators can retry without destructive metadata.
 		backup.Status = "ready"
+		if succeeded {
+			backup.FailureCode = nil
+			backup.FailureMessage = nil
+		} else {
+			backup.FailureCode, backup.FailureMessage = backupFailureMetadata(operation.Error)
+		}
 		m.backups[serverID][backupIndex] = backup
 	}
 	if succeeded && completed {
@@ -310,14 +347,23 @@ func (m *Memory) finishDeleteBackup(operationID string, serverID string, backupI
 			m.operations[operationID] = operation
 		}
 	}
+	deleteFrom := m.backupDeleteFrom[operationID]
 	if backupOK && succeeded {
-		backups := m.backups[serverID]
-		m.backups[serverID] = append(backups[:backupIndex], backups[backupIndex+1:]...)
+		backup.Status = "deleted"
+		backup.DeletedAt = valuePointer(now)
+		backup.FailureCode = nil
+		backup.FailureMessage = nil
+		m.backups[serverID][backupIndex] = backup
 		delete(m.backupChecksums, backupID)
 	} else if backupOK && completed {
 		backup.Status = "ready"
+		if deleteFrom == "failed" {
+			backup.Status = "failed"
+		}
+		backup.FailureCode, backup.FailureMessage = backupFailureMetadata(operation.Error)
 		m.backups[serverID][backupIndex] = backup
 	}
+	delete(m.backupDeleteFrom, operationID)
 	m.mu.Unlock()
 	if completed {
 		result := "failure"
@@ -360,6 +406,36 @@ func (m *Memory) backupChecksumValidLocked(backup domain.Backup) bool {
 	}
 	digest, err := hex.DecodeString(strings.TrimPrefix(*backup.Checksum, "sha256:"))
 	return err == nil && len(digest) == sha256.Size
+}
+
+func backupFailureMetadata(operationError *domain.OperationError) (*string, *string) {
+	code := "BACKUP_FAILED"
+	if operationError != nil && operationError.Code != "" {
+		code = operationError.Code
+	}
+	code, message := backupFailureDetails(code)
+	return &code, &message
+}
+
+func backupFailureDetails(code string) (string, string) {
+	switch code {
+	case "BACKUP_INTEGRITY_FAILED":
+		return code, "备份摘要或结果校验失败"
+	case "MAX_ATTEMPTS":
+		return code, "备份任务租约耗尽，已停止重试"
+	case "NODE_OFFLINE":
+		return code, "备份所在节点离线"
+	case "RUNTIME_UNAVAILABLE":
+		return code, "备份运行时不可用"
+	case "OPERATION_STALE":
+		return code, "备份任务对应的服务器状态已变化"
+	case "TASK_CANCELED":
+		return code, "备份任务已取消"
+	case "BACKUP_FAILED":
+		return code, "备份任务失败，请检查节点和任务日志"
+	default:
+		return "BACKUP_FAILED", "备份任务失败，请检查节点和任务日志"
+	}
 }
 
 func valuePointer[T any](value T) *T {

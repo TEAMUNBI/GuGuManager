@@ -1584,10 +1584,14 @@ components:
         status: {type: string, enum: [creating, ready, failed, restoring, deleting]}
         sizeBytes: {type: [integer, 'null'], minimum: 0}
         checksum: {type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$'}
+        manifestDigest: {type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$'}
         storageLocation: {type: [string, 'null']}
         retentionUntil: {type: [string, 'null'], format: date-time}
         createdAt: {type: string, format: date-time}
         completedAt: {type: [string, 'null'], format: date-time}
+        failureCode: {type: [string, 'null'], description: Stable machine-readable failure code for the latest failed transition.}
+        failureMessage: {type: [string, 'null'], description: Safe operator-facing explanation for the latest failed transition.}
+        deletedAt: {type: [string, 'null'], format: date-time, description: Soft-delete timestamp retained for recovery and garbage collection.}
     AuditEvent:
       type: object
       required: [id, actorName, action, targetType, targetName, result, operationId, createdAt]

@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,18 +37,19 @@ type fakeDocker struct {
 	createErr error
 	actionErr error
 
-	execOut    string
-	execErr    error
-	execArgv   [][]string
-	stats      runtime.ContainerStats
-	statsErr   error
-	env        map[string]string
-	envErr     error
-	containers []string
-	listErr    error
-	logReader  io.ReadCloser
-	copiesTo   []archiveOp
-	copiesFrom []archiveOp
+	execOut     string
+	execErr     error
+	execArgv    [][]string
+	stats       runtime.ContainerStats
+	statsErr    error
+	env         map[string]string
+	envErr      error
+	containers  []string
+	listErr     error
+	logReader   io.ReadCloser
+	copiesTo    []archiveOp
+	copiesFrom  []archiveOp
+	copyFromErr error
 }
 
 type archiveOp struct {
@@ -104,12 +108,62 @@ func (f *fakeDocker) CopyArchiveFromContainer(ctx context.Context, containerID, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.copiesFrom = append(f.copiesFrom, archiveOp{ContainerID: containerID, ContainerPath: containerPath, HostPath: hostPath})
+	if f.copyFromErr != nil {
+		return f.copyFromErr
+	}
 	// fake 在宿主机目标路径生成一份归档，供后续断言与恢复路径使用。
 	if hostPath != "" {
-		_ = os.MkdirAll(filepath.Dir(hostPath), 0o755)
-		_ = os.WriteFile(hostPath, []byte("fake-archive"), 0o644)
+		archive, err := fakeDockerBackupArchive(filepath.Base(containerPath))
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(hostPath, archive, 0o644); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func fakeBackupPayload() ([]byte, error) {
+	var payload bytes.Buffer
+	gzipWriter := gzip.NewWriter(&payload)
+	inner := tar.NewWriter(gzipWriter)
+	content := []byte("level-data")
+	if err := inner.WriteHeader(&tar.Header{Name: "world/level.dat", Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+		return nil, err
+	}
+	if _, err := inner.Write(content); err != nil {
+		return nil, err
+	}
+	if err := inner.Close(); err != nil {
+		return nil, err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return nil, err
+	}
+	return payload.Bytes(), nil
+}
+
+func fakeDockerBackupArchive(name string) ([]byte, error) {
+	payload, err := fakeBackupPayload()
+	if err != nil {
+		return nil, err
+	}
+	var dockerArchive bytes.Buffer
+	outer := tar.NewWriter(&dockerArchive)
+	if err := outer.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(payload)), Typeflag: tar.TypeReg}); err != nil {
+		return nil, err
+	}
+	if _, err := outer.Write(payload); err != nil {
+		return nil, err
+	}
+	if err := outer.Close(); err != nil {
+		return nil, err
+	}
+	return dockerArchive.Bytes(), nil
 }
 
 func (f *fakeDocker) CreateContainer(ctx context.Context, cfg runtime.ContainerConfig) (string, error) {
@@ -667,7 +721,9 @@ func TestExecuteBackupTaskArchivesDataVolume(t *testing.T) {
 		t.Fatalf("execute backup: outcome=%+v err=%v", outcome, err)
 	}
 	var result struct {
+		BackupID        string `json:"backupId"`
 		Checksum        string `json:"checksum"`
+		ManifestDigest  string `json:"manifestDigest"`
 		SizeBytes       int64  `json:"sizeBytes"`
 		StorageLocation string `json:"storageLocation"`
 	}
@@ -677,8 +733,14 @@ func TestExecuteBackupTaskArchivesDataVolume(t *testing.T) {
 	if result.StorageLocation != "backups/b-1.tar.gz" {
 		t.Errorf("storage location = %q, want backups/b-1.tar.gz", result.StorageLocation)
 	}
+	if result.BackupID != "b-1" {
+		t.Errorf("backup id = %q, want b-1", result.BackupID)
+	}
 	if !strings.HasPrefix(result.Checksum, "sha256:") {
 		t.Errorf("checksum = %q, want sha256: prefix", result.Checksum)
+	}
+	if !strings.HasPrefix(result.ManifestDigest, "sha256:") {
+		t.Errorf("manifest digest = %q, want sha256: prefix", result.ManifestDigest)
 	}
 	archive := filepath.Join(dir, "backups", "b-1.tar.gz")
 	if _, err := os.Stat(archive); err != nil {
@@ -686,21 +748,33 @@ func TestExecuteBackupTaskArchivesDataVolume(t *testing.T) {
 	}
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
-	if len(fd.execArgv) != 1 || !strings.Contains(strings.Join(fd.execArgv[0], " "), "tar -czf") {
+	if len(fd.execArgv) != 2 || !strings.Contains(strings.Join(fd.execArgv[0], " "), "tar -czf") || strings.Join(fd.execArgv[1], " ") != "rm -f /tmp/b-1.tar.gz" {
 		t.Errorf("expected in-container tar exec, got %v", fd.execArgv)
 	}
 }
 
 func TestExecuteRestoreBackupTask(t *testing.T) {
 	dir := t.TempDir()
-	// 预置归档供恢复读取。
+	// 预置归档和当前数据目录，验证恢复不会先破坏旧恢复点。
 	if err := os.MkdirAll(filepath.Join(dir, "backups"), 0o755); err != nil {
 		t.Fatalf("mkdir backups: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "backups", "b-1.tar.gz"), []byte("archive-bytes"), 0o644); err != nil {
+	archive, err := fakeBackupPayload()
+	if err != nil {
+		t.Fatalf("build archive: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "backups", "b-1.tar.gz"), archive, 0o644); err != nil {
 		t.Fatalf("write archive: %v", err)
 	}
+	dataDir := filepath.Join(dir, "srv-1")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir current data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "old.txt"), []byte("old-data"), 0o644); err != nil {
+		t.Fatalf("write current data: %v", err)
+	}
 	fd := newFakeDocker()
+	fd.status = runtime.ContainerStatus{ID: "cont-abc", State: "exited", Status: "exited", Running: false}
 	exec := &DockerExecutor{dataRoot: dir, rt: fd}
 
 	payload, err := protojson.Marshal(&agentv1.BackupTaskPayload{Action: &agentv1.BackupTaskPayload_Restore{
@@ -714,16 +788,48 @@ func TestExecuteRestoreBackupTask(t *testing.T) {
 	if err != nil || !outcome.Succeeded {
 		t.Fatalf("execute restore: outcome=%+v err=%v", outcome, err)
 	}
+	if _, err := os.Stat(filepath.Join(dataDir, "old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("old data still present after restore, stat err = %v", err)
+	}
+	if restored, err := os.ReadFile(filepath.Join(dataDir, "world", "level.dat")); err != nil || string(restored) != "level-data" {
+		t.Fatalf("restored data = %q, err=%v", restored, err)
+	}
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
-	if len(fd.copiesTo) != 1 {
-		t.Fatalf("copy to container calls = %d, want 1", len(fd.copiesTo))
+	if len(fd.copiesTo) != 0 || len(fd.started) != 0 || len(fd.execArgv) != 0 {
+		t.Fatalf("host restore unexpectedly touched container: copies=%v started=%v exec=%v", fd.copiesTo, fd.started, fd.execArgv)
 	}
-	if fd.copiesTo[0].HostPath != filepath.Join(dir, "backups", "b-1.tar.gz") {
-		t.Errorf("restore source = %q", fd.copiesTo[0].HostPath)
+}
+
+func TestExecuteRestoreBackupRejectsContentDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "backups"), 0o755); err != nil {
+		t.Fatalf("mkdir backups: %v", err)
 	}
-	if len(fd.started) != 1 || fd.started[0] != "gugu-server-srv-1" {
-		t.Errorf("restore should start container first, started = %v", fd.started)
+	if err := os.WriteFile(filepath.Join(dir, "backups", "b-2.tar.gz"), []byte("archive-bytes"), 0o644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	fd := newFakeDocker()
+	fd.status = runtime.ContainerStatus{ID: "cont-abc", State: "exited", Status: "exited", Running: false}
+	exec := &DockerExecutor{dataRoot: dir, rt: fd}
+	payload, err := protojson.Marshal(&agentv1.BackupTaskPayload{Action: &agentv1.BackupTaskPayload_Restore{
+		Restore: &agentv1.RestoreBackupPayload{BackupId: "b-2", StorageObjectKey: "backups/b-2.tar.gz", ExpectedContentDigest: "sha256:" + strings.Repeat("0", 64)},
+	}})
+	if err != nil {
+		t.Fatalf("marshal restore payload: %v", err)
+	}
+	task := &agentv1.Task{OperationId: "op-r-digest", ServerId: "srv-1", Type: "backup", Attempt: 1, Payload: &agentv1.Task_PayloadJson{PayloadJson: payload}}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("execute restore: %v", err)
+	}
+	if outcome.Succeeded || outcome.ErrorCode != "BACKUP_INTEGRITY_FAILED" {
+		t.Fatalf("digest mismatch outcome = %+v, want non-retryable integrity failure", outcome)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.started) != 0 || len(fd.copiesTo) != 0 {
+		t.Fatalf("digest failure touched container: started=%v copies=%v", fd.started, fd.copiesTo)
 	}
 }
 

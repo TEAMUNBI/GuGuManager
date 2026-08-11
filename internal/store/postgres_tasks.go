@@ -266,6 +266,7 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
 			var res struct {
 				Checksum        string `json:"checksum"`
+				ManifestDigest  string `json:"manifestDigest"`
 				SizeBytes       *int64 `json:"sizeBytes"`
 				StorageLocation string `json:"storageLocation"`
 			}
@@ -281,12 +282,18 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 				if res.SizeBytes != nil {
 					sizeBytes = *res.SizeBytes
 				}
-				if _, err := tx.ExecContext(ctx, `
+				transition, err := tx.ExecContext(ctx, `
 					UPDATE backups
-					SET status = 'ready', content_digest = $2, size_bytes = $3, storage_location = $4, completed_at = now()
-					WHERE id = $1 AND server_id = $5
-				`, payload.BackupID, contentDigest, sizeBytes, res.StorageLocation, serverID); err != nil {
+					SET status = 'ready', content_digest = $2, size_bytes = $3, storage_location = $4,
+					    manifest_digest = $6,
+					    completed_at = now(), failure_code = NULL, failure_message = NULL
+					WHERE id = $1 AND server_id = $5 AND status = 'creating'
+				`, payload.BackupID, contentDigest, sizeBytes, res.StorageLocation, serverID, res.ManifestDigest)
+				if err != nil {
 					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份元数据", true)
+				}
+				if err := requireBackupTransition(transition, "creating", "ready"); err != nil {
+					return err
 				}
 			}
 		case "restore":
@@ -295,11 +302,27 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			}
 			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
 			if payload.BackupID != "" {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE backups SET status = 'ready'
-					WHERE id = $1 AND server_id = $2
-				`, payload.BackupID, serverID); err != nil {
+				transition, err := tx.ExecContext(ctx, `
+					UPDATE backups SET status = 'ready', failure_code = NULL, failure_message = NULL
+					WHERE id = $1 AND server_id = $2 AND status = 'restoring'
+				`, payload.BackupID, serverID)
+				if err != nil {
 					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
+				}
+				if err := requireBackupTransition(transition, "restoring", "ready"); err != nil {
+					return err
+				}
+				serverResult, err := tx.ExecContext(ctx, `
+					UPDATE servers
+					SET desired_power = 'stopped', observed_power = 'stopped', health_condition = 'unknown',
+					    observed_generation = $2, observed_at = $3, updated_at = $3
+					WHERE id = $1 AND deleted_at IS NULL AND generation = $2
+				`, serverID, taskGeneration, now)
+				if err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法收敛恢复后的服务器观测状态", true)
+				}
+				if err := requireSingleRow(serverResult, "SERVER_STATE_CONFLICT", "服务器 generation 已变化，拒绝覆盖恢复结果"); err != nil {
+					return err
 				}
 			}
 		case "backup-delete":
@@ -308,16 +331,24 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 			}
 			_ = json.Unmarshal([]byte(taskCheckpoint), &payload)
 			if payload.BackupID != "" {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE backups SET status = 'deleted'
-					WHERE id = $1 AND server_id = $2
-				`, payload.BackupID, serverID); err != nil {
+				transition, err := tx.ExecContext(ctx, `
+					UPDATE backups SET status = 'deleted', deleted_at = now(), failure_code = NULL, failure_message = NULL
+					WHERE id = $1 AND server_id = $2 AND status = 'deleting'
+				`, payload.BackupID, serverID)
+				if err != nil {
 					return domain.NewProblem("INTERNAL_ERROR", "无法更新备份状态", true)
+				}
+				if err := requireBackupTransition(transition, "deleting", "deleted"); err != nil {
+					return err
 				}
 			}
 		}
 	} else if taskType == "backup" || taskType == "restore" || taskType == "backup-delete" {
-		if err := compensateBackupTaskTx(ctx, tx, taskType, taskCheckpoint, serverID); err != nil {
+		failureCode := "BACKUP_FAILED"
+		if effectiveErrCode != nil && *effectiveErrCode != "" {
+			failureCode = *effectiveErrCode
+		}
+		if err := compensateBackupTaskTx(ctx, tx, taskType, taskCheckpoint, serverID, failureCode); err != nil {
 			return err
 		}
 	}
@@ -339,20 +370,28 @@ func (s *Postgres) CompleteTask(ctx context.Context, operationID, nodeID string,
 func validBackupTaskResult(checkpoint string, resultJSON []byte) bool {
 	var payload backupTaskPayload
 	var result struct {
+		BackupID        string `json:"backupId"`
 		Checksum        string `json:"checksum"`
+		ManifestDigest  string `json:"manifestDigest"`
 		SizeBytes       *int64 `json:"sizeBytes"`
 		StorageLocation string `json:"storageLocation"`
 	}
 	if json.Unmarshal([]byte(checkpoint), &payload) != nil || payload.BackupID == "" {
 		return false
 	}
-	if json.Unmarshal(resultJSON, &result) != nil || result.SizeBytes == nil || *result.SizeBytes < 0 || result.StorageLocation == "" {
+	if json.Unmarshal(resultJSON, &result) != nil || result.BackupID != payload.BackupID || result.SizeBytes == nil || *result.SizeBytes < 0 || result.StorageLocation == "" {
 		return false
 	}
 	if !strings.HasPrefix(result.Checksum, "sha256:") || len(result.Checksum) != len("sha256:")+sha256.Size*2 {
 		return false
 	}
 	if _, err := hex.DecodeString(strings.TrimPrefix(result.Checksum, "sha256:")); err != nil {
+		return false
+	}
+	if !strings.HasPrefix(result.ManifestDigest, "sha256:") || len(result.ManifestDigest) != len("sha256:")+sha256.Size*2 {
+		return false
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(result.ManifestDigest, "sha256:")); err != nil {
 		return false
 	}
 	clean := path.Clean(result.StorageLocation)
@@ -365,7 +404,35 @@ func validBackupTaskResult(checkpoint string, resultJSON []byte) bool {
 	return true
 }
 
-func compensateBackupTaskTx(ctx context.Context, tx *sql.Tx, taskType, checkpoint, serverID string) error {
+func requireSingleRow(result sql.Result, code, message string) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法确认数据库状态转换", true)
+	}
+	if affected == 1 {
+		return nil
+	}
+	problem := domain.NewProblem(code, message, false)
+	problem.Details["rowsAffected"] = affected
+	return problem
+}
+
+func requireBackupTransition(result sql.Result, expected, next string) error {
+	if !domain.BackupStatusTransitionAllowed(expected, next) {
+		return domain.NewProblem("INTERNAL_ERROR", "备份状态转换未在状态机中声明", false)
+	}
+	problem := requireSingleRow(result, "BACKUP_STATE_CONFLICT", "备份状态已变化，拒绝覆盖任务结果")
+	if problem == nil {
+		return nil
+	}
+	if typed, ok := problem.(*domain.Problem); ok {
+		typed.Details["expectedStatus"] = expected
+		typed.Details["nextStatus"] = next
+	}
+	return problem
+}
+
+func compensateBackupTaskTx(ctx context.Context, tx *sql.Tx, taskType, checkpoint, serverID, failureCode string) error {
 	if taskType != "backup" && taskType != "restore" && taskType != "backup-delete" {
 		return nil
 	}
@@ -373,17 +440,43 @@ func compensateBackupTaskTx(ctx context.Context, tx *sql.Tx, taskType, checkpoin
 	if err := json.Unmarshal([]byte(checkpoint), &payload); err != nil || payload.BackupID == "" {
 		return nil
 	}
+	expectedStatus := "creating"
 	status := "failed"
-	if taskType == "restore" || taskType == "backup-delete" {
+	if taskType == "restore" {
+		expectedStatus = "restoring"
 		status = "ready"
+	} else if taskType == "backup-delete" {
+		expectedStatus = "deleting"
+		var previousFailure sql.NullString
+		if err := tx.QueryRowContext(ctx, `
+			SELECT failure_code
+			FROM backups
+			WHERE id = $1 AND server_id = $2 AND status = 'deleting'
+			FOR UPDATE
+		`, payload.BackupID, serverID).Scan(&previousFailure); err != nil {
+			if err == sql.ErrNoRows {
+				return domain.NewProblem("BACKUP_STATE_CONFLICT", "备份状态已变化，无法补偿删除任务", false)
+			}
+			return domain.NewProblem("INTERNAL_ERROR", "无法读取删除前的备份状态", true)
+		}
+		status = "ready"
+		if previousFailure.Valid {
+			status = "failed"
+		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE backups SET status = $1, completed_at = CASE WHEN $1 = 'failed' THEN NULL ELSE completed_at END
-		WHERE id = $2 AND server_id = $3 AND status <> 'deleted'
-	`, status, payload.BackupID, serverID); err != nil {
+	normalizedCode, failureMessage := backupFailureDetails(failureCode)
+	transition, err := tx.ExecContext(ctx, `
+		UPDATE backups
+		SET status = $1,
+		    completed_at = CASE WHEN $1 = 'failed' THEN NULL ELSE completed_at END,
+		    failure_code = $4,
+		    failure_message = $5
+		WHERE id = $2 AND server_id = $3 AND status = $6
+	`, status, payload.BackupID, serverID, normalizedCode, failureMessage, expectedStatus)
+	if err != nil {
 		return domain.NewProblem("INTERNAL_ERROR", "无法补偿备份终态", true)
 	}
-	return nil
+	return requireBackupTransition(transition, expectedStatus, status)
 }
 
 // lookupIdempotentTask resolves a previously recorded server_tasks row by its
@@ -481,7 +574,7 @@ func (s *Postgres) ReconcileTaskLeases(now time.Time) {
 	}
 
 	for _, task := range expired {
-		if err := compensateBackupTaskTx(ctx, tx, task.taskType, task.checkpoint, task.serverID); err != nil {
+		if err := compensateBackupTaskTx(ctx, tx, task.taskType, task.checkpoint, task.serverID, "MAX_ATTEMPTS"); err != nil {
 			return
 		}
 		if err := s.recordTaskOutboxEvent(ctx, tx, "task.completed", taskEventPayload{
@@ -495,7 +588,7 @@ func (s *Postgres) ReconcileTaskLeases(now time.Time) {
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO audit_events (actor_type, action, target_type, target_id, result, operation_id, trace_id, created_at)
-			VALUES ('system', 'task.expired', 'server', $1, 'failed', $2, $3, now())
+			VALUES ('system', 'task.expired', 'server', $1, 'failure', $2, $3, now())
 		`, task.serverID, task.operationID, id.New()); err != nil {
 			return
 		}

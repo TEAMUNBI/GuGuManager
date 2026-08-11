@@ -221,10 +221,14 @@ export interface Backup {
   status: "creating" | "ready" | "failed" | "restoring" | "deleting";
   sizeBytes?: number | null;
   checksum?: string | null;
+  manifestDigest?: string | null;
   storageLocation?: string | null;
   retentionUntil?: string | null;
   createdAt: string;
   completedAt?: string | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
+  deletedAt?: string | null;
 }
 
 export interface Allocation {

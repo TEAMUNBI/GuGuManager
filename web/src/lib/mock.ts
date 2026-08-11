@@ -745,7 +745,8 @@ export class MockClient {
     const server = this.requireServer(serverId);
     const backup = (backups[serverId] ?? []).find((item) => item.id === backupId);
     if (!backup) throw new Error("NOT_FOUND");
-    if (backup.status !== "ready") throw new Error("RESTORE_LOCKED");
+    if (backup.status !== "ready" && backup.status !== "failed") throw new Error("RESTORE_LOCKED");
+    const previousStatus = backup.status;
     const scope = `backup:delete:${serverId}:${backupId}:${key}`;
     const record = this.idempotency.get(scope);
     if (record) return this.operations.get(record.operationId) as Operation;
@@ -758,7 +759,7 @@ export class MockClient {
     window.setTimeout(() => {
       if (!this.completeOperationForServer(operation.id)) {
         const retained = (backups[serverId] ?? []).find((item) => item.id === backupId);
-        if (retained?.status === "deleting") retained.status = "ready";
+        if (retained?.status === "deleting") retained.status = previousStatus;
         return;
       }
       backups[serverId] = (backups[serverId] ?? []).filter((item) => item.id !== backupId);

@@ -1007,6 +1007,7 @@ export interface components {
             status: "creating" | "ready" | "failed" | "restoring" | "deleting";
             sizeBytes?: number | null;
             checksum?: string | null;
+            manifestDigest?: string | null;
             storageLocation?: string | null;
             /** Format: date-time */
             retentionUntil?: string | null;
@@ -1014,6 +1015,15 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             completedAt?: string | null;
+            /** @description Stable machine-readable failure code for the latest failed transition. */
+            failureCode?: string | null;
+            /** @description Safe operator-facing explanation for the latest failed transition. */
+            failureMessage?: string | null;
+            /**
+             * Format: date-time
+             * @description Soft-delete timestamp retained for recovery and garbage collection.
+             */
+            deletedAt?: string | null;
         };
         AuditEvent: {
             id: components["schemas"]["Uuid"];
