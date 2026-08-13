@@ -3,7 +3,6 @@ package agentrpc
 import (
 	"context"
 	"io"
-	"sync"
 	"time"
 
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
@@ -35,20 +34,17 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 		return err
 	}
 
-	// 单个连接的 Send 必须串行化：claim goroutine 与 Recv 循环并发调用 stream.Send。
-	var sendMu sync.Mutex
-	send := func(resp *agentv1.ConnectResponse) error {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		return stream.Send(resp)
-	}
+	ctx := stream.Context()
 	nodeConnection := &nodeStream{
-		nodeID: nodeID, send: send, done: make(chan struct{}),
+		nodeID: nodeID, send: stream.Send, done: make(chan struct{}),
 		consolePending: make(map[string]consolePending),
 		filePending:    make(map[string]chan *agentv1.FileOperationResponse),
 	}
 	s.registerStream(nodeConnection)
 	defer s.unregisterStream(nodeConnection)
+	send := func(resp *agentv1.ConnectResponse) error {
+		return nodeConnection.sendFrame(ctx, resp)
+	}
 
 	if err := send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Welcome{Welcome: &agentv1.Welcome{
 		ProtocolVersion:          protocolVersion,
@@ -59,17 +55,47 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 	}
 	s.log.Info("agent connected", "node", nodeID, "version", hello.Hello.GetAgentVersion())
 
-	ctx := stream.Context()
 	go s.claimLoop(ctx, nodeID, send)
+	type receivedFrame struct {
+		request *agentv1.ConnectRequest
+		err     error
+	}
+	received := make(chan receivedFrame, 1)
+	// Recv has no caller-controlled deadline. Keep exactly one receive pump per
+	// connection so replacing/closing a nodeStream can return this RPC handler,
+	// cancel the gRPC stream context, and thereby unblock its outbound writer.
+	go func() {
+		for {
+			request, recvErr := stream.Recv()
+			select {
+			case received <- receivedFrame{request: request, err: recvErr}:
+			case <-ctx.Done():
+				return
+			case <-nodeConnection.done:
+				return
+			}
+			if recvErr != nil {
+				return
+			}
+		}
+	}()
 
 	for {
-		req, err := stream.Recv()
-		if err == io.EOF {
+		var incoming receivedFrame
+		select {
+		case <-nodeConnection.done:
+			return status.Error(codes.Unavailable, "node connect stream closed")
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		case incoming = <-received:
+		}
+		if incoming.err == io.EOF {
 			return nil
 		}
-		if err != nil {
-			return err
+		if incoming.err != nil {
+			return incoming.err
 		}
+		req := incoming.request
 		switch p := req.Payload.(type) {
 		case *agentv1.ConnectRequest_Hello:
 			// 重复 Hello 忽略。

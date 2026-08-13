@@ -973,6 +973,19 @@ export interface components {
             icon: string;
             defaultMemoryMb: number;
             defaultDiskGb: number;
+            /** @description True only when cryptographic signature material is present; a digest or signer label alone is not a signature. */
+            signed: boolean;
+            /** @description True only after the signature and authenticated publisher identity have been verified by the control plane. */
+            verified: boolean;
+            /** @description True only when the current Agent contract can consume and execute an immutable runtime target for this exact Bundle. */
+            runnable: boolean;
+            /** @description Overall support claim; requires an approved, verified, and runnable Bundle. */
+            supported: boolean;
+            /** @enum {string} */
+            trustLevel: "L0_LOCAL" | "L1_COMMUNITY" | "L2_GUGU_VERIFIED" | "L3_VENDOR";
+            /** @description Provenance of the catalog metadata, not proof of publisher identity. */
+            source: string;
+            supportReasons: string[];
         };
         ConsoleLine: {
             sequence: number;

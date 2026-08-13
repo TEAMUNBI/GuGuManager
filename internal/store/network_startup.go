@@ -349,7 +349,13 @@ func capabilityUnsupported(node domain.Node, required string) *domain.Problem {
 	problem := domain.NewProblem("CAPABILITY_UNSUPPORTED", "目标节点未声明执行该操作所需的能力", false)
 	problem.Details["nodeId"] = node.ID
 	problem.Details["nodeVersion"] = node.Version
-	problem.Details["requiredCapability"] = required
+	requiredCapability, requiredVersion, ok := domain.SplitNodeCapability(required)
+	if ok {
+		problem.Details["requiredCapability"] = requiredCapability
+		problem.Details["requiredVersion"] = requiredVersion
+	} else {
+		problem.Details["requiredCapability"] = required
+	}
 	problem.Details["declaredCapabilities"] = append([]string(nil), node.Capabilities...)
 	return problem
 }

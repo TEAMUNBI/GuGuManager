@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
@@ -31,6 +32,10 @@ func setupAdminForTest(t *testing.T, s *Postgres) domain.User {
 // game_bundles.digest; callers pass a unique digest per test.
 func insertGameFixture(t *testing.T, s *Postgres, gameID string, digest string) {
 	t.Helper()
+	enableTestRuntimeTarget(t, domain.GameDefinition{
+		ID: gameID, BundleDigest: digest, Name: "PG Test Game", Version: "1.0.0",
+		GameVersion: "1.0.0", Status: "approved", Runnable: true,
+	})
 	if _, err := s.db.Exec(`
 		INSERT INTO game_definitions (id, name, source_url, review_status)
 		VALUES ($1, 'PG Test Game', 'https://example.invalid/pg.json', 'approved')
@@ -43,6 +48,23 @@ func insertGameFixture(t *testing.T, s *Postgres, gameID string, digest string) 
 	`, gameID, digest); err != nil {
 		t.Fatalf("insert game bundle: %v", err)
 	}
+}
+
+// enableTestRuntimeTarget injects executable-target evidence only into this
+// package's test process. No production API or database flag can bypass the
+// fail-closed catalog evaluator.
+func enableTestRuntimeTarget(t *testing.T, game domain.GameDefinition) {
+	t.Helper()
+	_, _ = fixedCatalogGame(game.ID) // initialize the embedded catalog once
+	previous, existed := fixedCatalog[game.ID]
+	fixedCatalog[game.ID] = game
+	t.Cleanup(func() {
+		if existed {
+			fixedCatalog[game.ID] = previous
+		} else {
+			delete(fixedCatalog, game.ID)
+		}
+	})
 }
 
 const (
@@ -67,7 +89,7 @@ func TestPostgresNodeServerRegistration(t *testing.T) {
 		CPUCores:     8,
 		MemoryBytes:  16 << 30,
 		DiskBytes:    1 << 40,
-		Capabilities: []string{"docker", "files"},
+		Capabilities: []string{domain.NodeCapabilityRuntimeContainer, domain.NodeCapabilityServerReconcile, "files/v2"},
 	})
 	if err != nil {
 		t.Fatalf("register node: %v", err)
@@ -82,8 +104,19 @@ func TestPostgresNodeServerRegistration(t *testing.T) {
 		got.CPUCores != 8 || got.MemoryBytes != 16<<30 || got.DiskBytes != 1<<40 {
 		t.Fatalf("node round-trip mismatch: %+v", got)
 	}
-	if len(got.Capabilities) != 2 {
-		t.Fatalf("expected 2 capabilities, got %v", got.Capabilities)
+	wantCapabilities := []string{"files/v2", domain.NodeCapabilityRuntimeContainer, domain.NodeCapabilityServerReconcile}
+	if !reflect.DeepEqual(got.Capabilities, wantCapabilities) {
+		t.Fatalf("capabilities = %v, want %v", got.Capabilities, wantCapabilities)
+	}
+	var storedKey, storedVersion string
+	if err := s.db.QueryRow(`
+		SELECT capability_key, capability_version FROM node_capabilities
+		WHERE node_id = $1 AND capability_key = 'server.reconcile'
+	`, nodeID).Scan(&storedKey, &storedVersion); err != nil {
+		t.Fatalf("query stored reconcile capability: %v", err)
+	}
+	if storedKey != "server.reconcile" || storedVersion != "1" {
+		t.Fatalf("stored capability = %s/%s, want server.reconcile/1", storedKey, storedVersion)
 	}
 
 	// Duplicate node name must map to NODE_NAME_CONFLICT.
@@ -101,7 +134,7 @@ func TestPostgresNodeServerRegistration(t *testing.T) {
 
 	// Nodes() lists the registered node.
 	nodes := s.Nodes()
-	if len(nodes) != 1 || nodes[0].ID != nodeID || nodes[0].Name != "node-a" {
+	if len(nodes) != 1 || nodes[0].ID != nodeID || nodes[0].Name != "node-a" || !reflect.DeepEqual(nodes[0].Capabilities, wantCapabilities) {
 		t.Fatalf("Nodes() mismatch: %+v", nodes)
 	}
 
@@ -141,6 +174,62 @@ func TestPostgresNodeServerRegistration(t *testing.T) {
 	}
 	if single.Name != "pg-server-1" {
 		t.Fatalf("server by id mismatch: %+v", single)
+	}
+}
+
+func TestPostgresNodesAggregatesServersIndependentlyOfCapabilities(t *testing.T) {
+	s := testPostgres(t)
+	resetTestDatabase(t, s)
+	admin := setupAdminForTest(t, s)
+
+	nodeID, err := s.RegisterNode(context.Background(), domain.Node{
+		Name: "aggregate-node", Condition: "available", Version: "agent-v2", Region: "test",
+		CPUCores: 8, MemoryBytes: 32 << 30, DiskBytes: 1 << 40,
+		Capabilities: []string{
+			domain.NodeCapabilityRuntimeContainer,
+			domain.NodeCapabilityServerReconcile,
+			"files/v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("register aggregate node: %v", err)
+	}
+	insertGameFixture(t, s, "aggregate-game", testDigestA)
+
+	var bundleID string
+	if err := s.db.QueryRow(`SELECT id::text FROM game_bundles WHERE game_definition_id = 'aggregate-game'`).Scan(&bundleID); err != nil {
+		t.Fatalf("query aggregate game bundle: %v", err)
+	}
+	for index, fixture := range []struct {
+		name          string
+		observedPower string
+		memoryBytes   int64
+		diskBytes     int64
+	}{
+		{name: "aggregate-running", observedPower: "running", memoryBytes: 1 << 30, diskBytes: 10 << 30},
+		{name: "aggregate-stopped", observedPower: "stopped", memoryBytes: 2 << 30, diskBytes: 20 << 30},
+	} {
+		if _, err := s.db.Exec(`
+			INSERT INTO servers (
+				owner_id, node_id, game_bundle_id, game_version, name, lifecycle_state,
+				desired_power, observed_power, node_condition, health_condition,
+				memory_limit_bytes, disk_limit_bytes
+			) VALUES ($1, $2, $3, '1.0.0', $4, 'ready', 'stopped', $5, 'available', 'healthy', $6, $7)
+		`, admin.ID, nodeID, bundleID, fixture.name, fixture.observedPower, fixture.memoryBytes, fixture.diskBytes); err != nil {
+			t.Fatalf("insert aggregate server %d: %v", index, err)
+		}
+	}
+
+	nodes := s.Nodes()
+	if len(nodes) != 1 {
+		t.Fatalf("Nodes() = %+v, want one node", nodes)
+	}
+	got := nodes[0]
+	if got.TotalServers != 2 || got.RunningServers != 1 || got.AllocatedMemoryBytes != 3<<30 || got.AllocatedDiskBytes != 30<<30 {
+		t.Fatalf("node aggregates multiplied by capabilities: %+v", got)
+	}
+	if len(got.Capabilities) != 3 {
+		t.Fatalf("node capabilities = %v, want 3", got.Capabilities)
 	}
 }
 

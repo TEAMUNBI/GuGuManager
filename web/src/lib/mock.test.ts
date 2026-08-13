@@ -15,6 +15,13 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 type MutableFixedBundleSpec = Record<string, unknown> & { variables?: unknown };
 type MutableFixedBundle = Record<string, unknown> & { spec: MutableFixedBundleSpec };
 
+async function clientWithRunnableCatalog(...gameIds: string[]): Promise<MockClient> {
+  const defaults = new MockClient();
+  const runnable = new Set(gameIds);
+  const catalog = (await defaults.listGames()).map((game) => ({ ...game, runnable: runnable.has(game.id) }));
+  return new MockClient({ catalog });
+}
+
 async function expectFixedBundleVariablesMutationRejected(
   bundle: unknown,
   targetServerId: string,
@@ -82,7 +89,7 @@ describe("MockClient file listings", () => {
 
 describe("MockClient contract identities", () => {
   test("uses UUIDs for seeded and newly-created resource IDs", async () => {
-    const client = new MockClient();
+    const client = await clientWithRunnableCatalog("io.gugumanager.papermc");
     const [game] = await client.listGames();
     const [node] = await client.listNodes();
     const [event] = await client.listAudit();
@@ -105,8 +112,36 @@ describe("MockClient contract identities", () => {
     await expect(client.getServer(operation.serverId)).resolves.toMatchObject({ id: operation.serverId });
   });
 
-  test("keeps the GameDefinition version separate from the upstream game version", async () => {
+  test("marks every default embedded catalog entry as unavailable and rejects creation", async () => {
     const client = new MockClient();
+    const catalog = await client.listGames();
+    const [game] = catalog;
+    const [node] = await client.listNodes();
+
+    for (const candidate of catalog) {
+      expect(candidate).toMatchObject({
+        signed: false,
+        verified: false,
+        runnable: false,
+        supported: false,
+        trustLevel: "L0_LOCAL",
+        source: "embedded-v1alpha1",
+        supportReasons: ["BUNDLE_SIGNATURE_UNVERIFIED", "RUNTIME_TARGET_UNAVAILABLE"],
+      });
+    }
+
+    await expect(client.createServer({
+      name: "Unavailable embedded world",
+      gameDefinitionId: game.id,
+      gameBundleDigest: game.bundleDigest,
+      nodeId: node.id,
+      memoryMb: 1024,
+      diskGb: 5,
+    }, "mock-unavailable-key-0001")).rejects.toThrow("PACKAGE_INCOMPATIBLE");
+  });
+
+  test("keeps the GameDefinition version separate from the upstream game version", async () => {
+    const client = await clientWithRunnableCatalog("io.gugumanager.papermc");
     const [game] = await client.listGames();
     const [node] = await client.listNodes();
 
@@ -347,7 +382,7 @@ describe("MockClient network and startup reconciliation", () => {
   test("creates the initial primary allocation and startup state from the selected fixed bundle", async () => {
     vi.useFakeTimers();
     try {
-      const client = new MockClient();
+      const client = await clientWithRunnableCatalog("io.gugumanager.papermc");
       const game = (await client.listGames()).find((candidate) => candidate.id === "io.gugumanager.papermc");
       const node = (await client.listNodes()).find((candidate) => candidate.id === "11111111-1111-4111-8111-111111111111");
       expect(game).toBeDefined();
@@ -389,7 +424,7 @@ describe("MockClient network and startup reconciliation", () => {
   test("creates Factorio network and startup state without inheriting seeded secrets", async () => {
     vi.useFakeTimers();
     try {
-      const client = new MockClient();
+      const client = await clientWithRunnableCatalog("io.gugumanager.factorio");
       const game = (await client.listGames()).find((candidate) => candidate.id === "io.gugumanager.factorio");
       const node = (await client.listNodes()).find((candidate) => candidate.id === "22222222-2222-4222-8222-222222222222");
 
@@ -429,7 +464,7 @@ describe("MockClient network and startup reconciliation", () => {
       });
       variables.schema.required = [...(originalRequired ?? []), "__proto__"];
 
-      const client = new MockClient();
+      const client = await clientWithRunnableCatalog("io.gugumanager.factorio");
       const game = (await client.listGames()).find((candidate) => candidate.id === "io.gugumanager.factorio");
       const node = (await client.listNodes()).find((candidate) => candidate.id === "22222222-2222-4222-8222-222222222222");
       const provision = await client.createServer({

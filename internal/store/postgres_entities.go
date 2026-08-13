@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -74,15 +75,16 @@ func (s *Postgres) RegisterNode(ctx context.Context, node domain.Node) (string, 
 	}
 
 	for _, capability := range node.Capabilities {
-		capability = strings.TrimSpace(capability)
-		if capability == "" {
+		capabilityKey, capabilityVersion, ok := domain.SplitNodeCapability(capability)
+		if !ok {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO node_capabilities (node_id, capability_key, capability_version)
-			VALUES ($1, $2, '1')
-			ON CONFLICT (node_id, capability_key) DO NOTHING
-		`, nodeID, capability); err != nil {
+			VALUES ($1, $2, $3)
+			ON CONFLICT (node_id, capability_key) DO UPDATE
+			SET capability_version = EXCLUDED.capability_version
+		`, nodeID, capabilityKey, capabilityVersion); err != nil {
 			return "", domain.NewProblem("INTERNAL_ERROR", "无法保存节点能力", true)
 		}
 	}
@@ -105,7 +107,7 @@ func (s *Postgres) NodeByID(ctx context.Context, nodeID string) (domain.Node, er
 	err := s.db.QueryRowContext(ctx, `
 		SELECT n.id::text, n.name, n.condition, n.agent_version, n.region,
 		       host(n.address), n.cpu_cores, n.memory_bytes, n.disk_bytes, n.last_heartbeat_at,
-		       COALESCE(array_agg(nc.capability_key) FILTER (WHERE nc.capability_key IS NOT NULL), '{}') AS capabilities
+		       COALESCE(array_agg(nc.capability_key || '/v' || nc.capability_version) FILTER (WHERE nc.capability_key IS NOT NULL), '{}') AS capabilities
 		FROM nodes n
 		LEFT JOIN node_capabilities nc ON nc.node_id = n.id
 		WHERE n.id = $1 AND n.revoked_at IS NULL
@@ -125,7 +127,7 @@ func (s *Postgres) NodeByID(ctx context.Context, nodeID string) (domain.Node, er
 	if lastHeartbeat.Valid {
 		node.LastHeartbeatAt = lastHeartbeat.Time
 	}
-	node.Capabilities = capabilities
+	node.Capabilities = canonicalNodeCapabilities(capabilities)
 	return node, nil
 }
 
@@ -138,16 +140,24 @@ func (s *Postgres) Nodes() []domain.Node {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT n.id::text, n.name, n.condition, n.agent_version, n.region,
 		       host(n.address), n.cpu_cores, n.memory_bytes, n.disk_bytes, n.last_heartbeat_at,
-		       COALESCE(SUM(CASE WHEN sv.observed_power = 'running' THEN 1 ELSE 0 END), 0) AS running_servers,
-		       COUNT(sv.id) AS total_servers,
-		       COALESCE(SUM(sv.memory_limit_bytes), 0) AS allocated_memory,
-		       COALESCE(SUM(sv.disk_limit_bytes), 0) AS allocated_disk,
-		       COALESCE(array_agg(nc.capability_key) FILTER (WHERE nc.capability_key IS NOT NULL), '{}') AS capabilities
+		       COALESCE(sa.running_servers, 0), COALESCE(sa.total_servers, 0),
+		       COALESCE(sa.allocated_memory, 0), COALESCE(sa.allocated_disk, 0),
+		       COALESCE(ca.capabilities, ARRAY[]::text[]) AS capabilities
 		FROM nodes n
-		LEFT JOIN servers sv ON sv.node_id = n.id AND sv.deleted_at IS NULL
-		LEFT JOIN node_capabilities nc ON nc.node_id = n.id
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) FILTER (WHERE sv.observed_power = 'running') AS running_servers,
+			       COUNT(*) AS total_servers,
+			       COALESCE(SUM(sv.memory_limit_bytes), 0) AS allocated_memory,
+			       COALESCE(SUM(sv.disk_limit_bytes), 0) AS allocated_disk
+			FROM servers sv
+			WHERE sv.node_id = n.id AND sv.deleted_at IS NULL
+		) sa ON true
+		LEFT JOIN LATERAL (
+			SELECT array_agg(nc.capability_key || '/v' || nc.capability_version ORDER BY nc.capability_key) AS capabilities
+			FROM node_capabilities nc
+			WHERE nc.node_id = n.id
+		) ca ON true
 		WHERE n.revoked_at IS NULL
-		GROUP BY n.id
 		ORDER BY n.created_at ASC
 	`)
 	if err != nil {
@@ -173,10 +183,30 @@ func (s *Postgres) Nodes() []domain.Node {
 		if lastHeartbeat.Valid {
 			node.LastHeartbeatAt = lastHeartbeat.Time
 		}
-		node.Capabilities = capabilities
+		node.Capabilities = canonicalNodeCapabilities(capabilities)
 		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+// canonicalNodeCapabilities normalizes both current split DB rows and legacy
+// declarations before exposing the public, versioned Node representation.
+func canonicalNodeCapabilities(declarations []string) []string {
+	result := make([]string, 0, len(declarations))
+	seen := make(map[string]struct{}, len(declarations))
+	for _, declaration := range declarations {
+		canonical, ok := domain.CanonicalNodeCapability(declaration, "")
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[canonical]; duplicate {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, canonical)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // serverSelect joins servers with their node, game definition, bundle, owner
@@ -340,6 +370,18 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		return domain.Operation{}, domain.NewProblem("GAME_DEFINITION_NOT_APPROVED", "游戏包尚未通过审核", false)
 	}
 
+	catalogGame := domain.GameDefinition{
+		ID: input.GameDefinitionID, BundleDigest: input.GameBundleDigest, Name: gameName,
+		Version: bundleDefinitionVersion, GameVersion: bundleGameVersion, Status: reviewStatus,
+	}
+	markCatalogBundleUntrusted(&catalogGame, gameSourceDatabaseMetadata)
+	if fixed, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil && fixed.BundleDigest == input.GameBundleDigest {
+		catalogGame = fixed
+	}
+	if !catalogGame.Runnable {
+		return domain.Operation{}, packageRuntimeTargetUnavailable(catalogGame)
+	}
+
 	memoryBytes := int64(input.MemoryMB) * 1024 * 1024
 	diskBytes := int64(input.DiskGB) * 1024 * 1024 * 1024
 
@@ -405,7 +447,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	// PACKAGE_INCOMPATIBLE.
 	var startupValues map[string]any
 	var startupDefinitions []domain.StartupVariable
-	if game, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil {
+	if game, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil && game.BundleDocument != "" {
 		serverForStartup := domain.Server{
 			ID: serverID, GameID: input.GameDefinitionID, GameBundleDigest: input.GameBundleDigest,
 			GameDefinitionVersion: bundleDefinitionVersion, NodeID: input.NodeID, Generation: 1,

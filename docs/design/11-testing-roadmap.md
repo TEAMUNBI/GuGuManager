@@ -86,11 +86,11 @@
 
 - `1A Identity`：已完成开发 Argon2id 口令、受控 Bootstrap setup、本地用户管理页面、单次密码重置页面、用户停用/重置会话与 reset token 撤销、membership 资源授权、in-flight reservation 限流、Argon2 并发门、写入提交前重新授权、production 配置硬门禁，以及 PostgreSQL 持久会话（token 摘要 + `csrf_digest`，会话恢复时轮换 CSRF）；Redis 协调、多副本与实时连接撤销未完成。
 - `1B Node`：已完成一次性注册令牌、CSR、mTLS/gRPC Enroll/Connect 双向流、证书轮换、吊销、心跳与 30 秒离线判定。
-- `1C Catalog`：保留 Schema 与固定摘要校验，固定目录已持久化到 PostgreSQL；签名、审核工作流和可拉取 PaperMC Bundle 未完成。
-- `1D Provisioning`：已完成 PostgreSQL 事务、Allocation 关联、持久任务表与 Agent 的 OCI provision；Outbox 投递与自动放置未完成。
+- `1C Catalog`：保留 Schema 与固定摘要校验，目录现在明确返回未验证/不可运行证据并阻止创建；签名、审核工作流和可拉取 PaperMC Bundle 未完成。
+- `1D Provisioning`：PostgreSQL 事务、Allocation、持久任务表与 Agent OCI 执行器已有实现，但 Bundle Runtime target 尚未进入不可变 provision 契约，因此当前生产创建 fail closed；Outbox 投递与自动放置未完成。
 - `1E Operations`：已完成真实 Runtime 电源收敛、控制台命令帧、备份创建/恢复/删除/下载与文件操作，指标与控制台日志已持久化到 PostgreSQL（000006 迁移，控制面重启经 `RestoreTelemetry` 恢复）；实时控制台 WebSocket 未完成。
 
-因此阶段 1 的真实垂直能力已基本完成；剩余未闭合项为实时控制台 WebSocket、加密 Secret 静态存储、Outbox/多副本恢复与真实 Docker 节点上的游戏生命周期一致性测试。
+因此阶段 1 仍不是可运行游戏的完整垂直能力。除实时控制台续传、Outbox/多副本恢复等缺口外，还必须先完成签名 Bundle、不可变 Runtime spec/reconcile，以及真实 Docker 节点上的游戏生命周期一致性测试。
 
 ## 7. 阶段 1：首个真实垂直能力
 

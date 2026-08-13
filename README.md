@@ -1,6 +1,6 @@
 # GuGuManager
 
-GuGuManager 是一个面向自托管用户和小型游戏托管团队的游戏服务器控制面。当前仓库提供阶段 0 工程基础、开发垂直切片（内存/模拟），以及已实现的生产适配器（PostgreSQL store + 真实 mTLS gRPC Agent，覆盖建服、电源、网络分配、启动配置、备份创建/恢复/删除/下载、文件操作、控制台命令、节点注册/心跳/离线判定）。项目仍在迭代，尚未达到完整生产发布。
+GuGuManager 是一个面向自托管用户和小型游戏托管团队的游戏服务器控制面。当前仓库提供阶段 0 工程基础、开发垂直切片（内存/模拟），以及 PostgreSQL store + mTLS gRPC Agent 的生产基础。电源、备份、文件、控制台和节点链路已有实现；新建服务器目前会被目录门禁拒绝，因为内置 v1alpha1 Bundle 没有可由 Agent 可信消费的不可变 Runtime target。项目仍在迭代，尚未达到完整生产发布。
 
 ![GuGuManager status](https://img.shields.io/badge/status-development%20slice-e98245)
 
@@ -10,27 +10,28 @@ GuGuManager 是一个面向自托管用户和小型游戏托管团队的游戏�
 
 - 开发模式下 Control Plane 的用户、会话、Bootstrap/reset 令牌摘要、membership、服务器、operation、备份元数据和审计使用内存存储，退出后重置；开发服务器文件保存在受限本地数据根，可跨重启保留。
 - 动态创建服务器的本地目录不会随内存状态重置自动删除，可能成为开发孤儿目录；不要把开发数据根指向生产数据，清理规则见 [ADR-0002](docs/adr/0002-development-data-lifecycle.md)。
-- 开发模式下节点、指标、控制台和电源收敛由内存适配器模拟，不启动真实游戏容器；生产模式由真实 Agent 在 Docker 容器上执行。
+- 开发模式下节点、指标、控制台和电源收敛由内存适配器模拟，不启动真实游戏容器；生产 Agent 已有 Docker 执行器，但当前内置目录全部标记为未验证、不可运行和不受支持，因此不会据此创建新容器。
 - Network 只维护内存 Allocation 和模拟 reconcile，不预留或绑定宿主端口；当前单端口模型没有 `portRef`、容器端口或端口角色。
 - Startup 从固定 GameDefinition Bundle 读取命令和受限变量 Schema。string/integer/boolean 的 default、const、范围、长度和字符串 enum 在 CLI 与 Store 使用同一语义校验，integer 限于 JavaScript 安全整数域；Start/Restart 会在任何状态变化前拒绝缺少 required 值的服务器。Secret 禁止在 Bundle 声明 default/const/enum，读取时只暴露声明状态和 `hasValue`；含 Secret 的幂等摘要使用进程内随机密钥的 HMAC。生产 PostgreSQL 使用 `enc:v2:<key-id>` 密钥环密文，旧 `enc:v1` 可在轮换窗口内读取；Agent 任务只携带一次性、operation/server/node 绑定的 Secret Handle，解析后立即消费。
-- Network/Startup 写入使用 CSRF、`Idempotency-Key` 和十进制 generation `If-Match`；精确 endpoint 冲突返回 `409 PORT_CONFLICT`，过期 generation 返回 `412 PRECONDITION_FAILED`。这些是内存期望状态校验，不代表宿主端口已绑定或 Runtime 已对账。
+- Network/Startup 写入使用 CSRF、`Idempotency-Key` 和十进制 generation `If-Match`；精确 endpoint 冲突返回 `409 PORT_CONFLICT`，过期 generation 返回 `412 PRECONDITION_FAILED`。写入前还要求节点精确声明 `server.reconcile/v1`；当前 Agent 尚未实现或声明该能力，所以生产路径会明确拒绝，不代表宿主端口已绑定或 Runtime 已对账。
 - Identity 开发 API 已支持首次管理员初始化、本地用户查询/创建/更新/停用、短期单次密码重置，以及服务器 membership 查询/授予/替换/撤销。无效或已消费的 setup/reset 令牌在 Argon2 前被拒绝；登录、setup 和重置使用 reservation 限流，Argon2id 有进程级并发门。密码重置或用户停用会撤销旧内存会话和未消费重置令牌，membership 变更立即影响当前 REST 资源授权。
 - Store 写操作会在副作用和幂等回放前重新核验当前角色与 membership；文件写入、建目录、移动和删除与撤权互斥，避免已撤权请求继续修改开发数据根。这仍是单进程内存适配器，不代表生产多副本撤权或实时连接关闭。
 - 当前 Web 已提供首次 setup、用户与访问管理、一次性密码重置令牌签发及匿名消费页面。快速启动仍使用已初始化的种子管理员；未初始化的开发 Control Plane 会先进入 setup。Identity 开发适配器未接 PostgreSQL/Redis，不提供持久会话、多副本一致撤销或实时连接撤销。
 - `cmd/agent` 提供真实 mTLS gRPC Agent（Enroll/Connect 双向流、任务队列、文件操作、备份下载）；开发 HTTP 心跳仅用于开发模式。
 - OpenAPI 已由固定版本 Redocly 校验并生成只读 TypeScript 类型；Agent Protobuf 已由 Buf 编译、lint、生成 Go 类型并建立兼容基线。它们与 HTTP 契约测试、Agent 执行器测试（60+ 文件操作测试）共同构成契约门禁，不替代运行时请求校验。
-- PostgreSQL 迁移 000001-000007 齐备（含 membership permission 约束、指标/控制台日志和一次性 Secret Handle 表），生产 Control Plane 启动时按序执行；开发模式仍使用内存 store。迁移已承载 Allocation 的 primary 标记与 Startup 变量持久化（000005），尚未承载 Allocation 的 portRef 约束。
+- PostgreSQL 迁移 000001-000008 齐备（含 membership permission 约束、指标/控制台日志、一次性 Secret Handle 与备份失败元数据），生产 Control Plane 启动时按序执行；开发模式仍使用内存 store。迁移已承载 Allocation 的 primary 标记与 Startup 变量持久化（000005），尚未承载 Allocation 的 portRef 约束。
 - `gamectl lint` 当前执行 JSON Schema、端口引用、可执行变量子集及 Secret/required/binding 语义，以及文件绑定与 Artifact destination 的跨平台相对路径安全和重复目标校验。变量对象采用 closed-object 语义；未实现的类型和 JSON Schema 关键字会被拒绝而不是静默忽略。lint 不联网下载制品，也不替代游戏安装、摘要/签名、Runtime、安全审核或生命周期一致性测试。
 - `npm run e2e` 使用构建后的 SPA 和同源真实 Go Control Plane，在隔离开发数据根上验证 Chromium 深链、Cookie/CSRF 会话、固定服务器详情与退出；测试要求观察真实 `/api/v1/*` 响应，浏览器 Mock 不能让它假绿。当前没有 Firefox/WebKit、生产 Store 或真实 Agent Runtime 的端到端覆盖。
-- CI 工作流已声明浏览器 E2E，以及同一 commit 开发镜像的回环启动、Trivy 漏洞 JSON、CycloneDX SBOM 和可修复 HIGH/CRITICAL 门禁。当前工作区没有 `.git` 和 Docker，本机已真实运行 Go 18 个包（含 Agent 文件操作与 Postgres store 契约测试）、前端 206 个测试和 Chromium E2E；不得把工作流静态配置写成 GitHub Runner 或容器扫描已通过。
+- CI 工作流已声明 Go/Proto、PostgreSQL、OpenAPI、Web、Chromium E2E、真实 Docker 备份生命周期，以及同一 commit 开发镜像的回环启动、Trivy 漏洞 JSON、CycloneDX SBOM 和可修复 HIGH/CRITICAL 门禁。只有对应 GitHub Actions run 的结果可以证明某个提交通过这些门禁。
 
 完整范围、架构和路线图见 [DESIGN.md](DESIGN.md)，当前与目标端点差异见 [API 契约](docs/design/08-api-contracts.md)。
 
 ## 生产模式
 
-`GUGU_ENVIRONMENT=production` 启动 PostgreSQL store（实现 Control Plane 全部契约方法，编译期断言覆盖）与 mTLS gRPC Agent 网关：迁移 000001-000007 在启动前执行，节点任务经数据库任务表投递给真实 Agent。参考 [deploy/docker-compose.prod.yml](deploy/docker-compose.prod.yml)（control-plane + agent + postgres + redis）。指标与控制台日志已持久化：Agent 的 MetricsBatch/LogBatch 帧经 `ApplyServerMetrics`/`RecordConsoleLines` 双写内存缓冲（热读缓存）与 PostgreSQL（`server_metrics`/`server_metric_history`/`console_logs`），概览页 CPU/内存用量由 `server_metrics` 聚合，控制面重启时经 `RestoreTelemetry` 恢复。已知限制：
+`GUGU_ENVIRONMENT=production` 启动 PostgreSQL store 与 mTLS gRPC Agent 网关：迁移 000001-000008 在启动前执行，节点任务经数据库任务表投递给真实 Agent。参考 [deploy/docker-compose.prod.yml](deploy/docker-compose.prod.yml)（control-plane + agent + postgres + redis）。指标与控制台日志已持久化：Agent 的 MetricsBatch/LogBatch 帧经 `ApplyServerMetrics`/`RecordConsoleLines` 双写内存缓冲（热读缓存）与 PostgreSQL（`server_metrics`/`server_metric_history`/`console_logs`），概览页 CPU/内存用量由 `server_metrics` 聚合，控制面重启时经 `RestoreTelemetry` 恢复。已知限制：
 
 - Secret 静态存储和控制台 WebSocket 已有第一版实现，但短期连接令牌、跨副本广播、序列续传、可靠 Outbox 外部发布和多副本撤权仍未闭环。
+- 当前内置 Bundle 只有摘要和声明性元数据，没有可验证签名，也没有被 provision 协议可信传递的 Runtime target；目录与创建 API 因而 fail closed。只有后续通过签名与 Runtime conformance 的 Bundle 才能解除门禁。
 
 ## 快速启动
 

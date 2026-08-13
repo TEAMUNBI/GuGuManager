@@ -56,6 +56,10 @@ func (m *Memory) CreateServer(input domain.CreateServerInput, idempotencyKey str
 		m.mu.Unlock()
 		return domain.Operation{}, domain.NewProblem("PACKAGE_INCOMPATIBLE", "请求的 Bundle 摘要与游戏目录不匹配", false)
 	}
+	if !game.Runnable {
+		m.mu.Unlock()
+		return domain.Operation{}, packageRuntimeTargetUnavailable(game)
+	}
 	if node.Condition != "available" {
 		m.mu.Unlock()
 		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前不可接收新任务", true)

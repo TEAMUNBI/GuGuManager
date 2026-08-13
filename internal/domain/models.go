@@ -163,6 +163,13 @@ type GameDefinition struct {
 	Icon           string   `json:"icon"`
 	DefaultMemory  int      `json:"defaultMemoryMb"`
 	DefaultDisk    int      `json:"defaultDiskGb"`
+	Signed         bool     `json:"signed"`
+	Verified       bool     `json:"verified"`
+	Runnable       bool     `json:"runnable"`
+	Supported      bool     `json:"supported"`
+	TrustLevel     string   `json:"trustLevel"`
+	Source         string   `json:"source"`
+	SupportReasons []string `json:"supportReasons"`
 	BundleDocument string   `json:"-"`
 }
 

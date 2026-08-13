@@ -1208,7 +1208,15 @@ func TestNextAllocationPortReportsExhaustion(t *testing.T) {
 }
 
 func newTestMemory(latency time.Duration) *Memory {
-	return NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", latency)
+	service := NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", latency)
+	// Existing lifecycle tests exercise behavior after a runtime target has
+	// been admitted. Production constructors remain fail-closed; this test-only
+	// fixture supplies that evidence explicitly.
+	for gameID, game := range service.games {
+		game.Runnable = true
+		service.games[gameID] = game
+	}
+	return service
 }
 
 func testActor(id string, name string) domain.User {

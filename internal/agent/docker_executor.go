@@ -329,7 +329,10 @@ func (e *DockerExecutor) ExecuteConsoleCommand(ctx context.Context, serverID str
 	}
 	password := env["RCON_PASSWORD"]
 	if password == "" {
-		return &ExecutionOutcome{Succeeded: false, ErrorCode: "CONSOLE_UNSUPPORTED", Retryable: false}, nil
+		// The trusted marker proves that this runtime declares an RCON adapter.
+		// A missing credential is therefore a broken adapter configuration, not
+		// an unsupported console capability.
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "COMMAND_FAILED", Retryable: false}, nil
 	}
 	port := env["RCON_PORT"]
 	if port == "" {

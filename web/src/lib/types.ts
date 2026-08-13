@@ -149,6 +149,13 @@ export interface GameDefinition {
   version: string;
   gameVersion: string;
   status: "approved" | "pending" | "rejected";
+  signed: boolean;
+  verified: boolean;
+  runnable: boolean;
+  supported: boolean;
+  trustLevel: string;
+  source: string;
+  supportReasons: string[];
   capabilities: string[];
   platforms: string[];
   servers: number;

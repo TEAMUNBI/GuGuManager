@@ -75,6 +75,44 @@ var developmentGameOrder = []string{
 	"io.gugumanager.vintagestory",
 }
 
+const (
+	gameTrustLevelLocal                = "L0_LOCAL"
+	gameSourceEmbeddedV1Alpha1         = "embedded-v1alpha1"
+	gameSourceDatabaseMetadata         = "database-metadata"
+	gameReasonSignatureUnverified      = "BUNDLE_SIGNATURE_UNVERIFIED"
+	gameReasonRuntimeTargetUnavailable = "RUNTIME_TARGET_UNAVAILABLE"
+)
+
+var untrustedBundleSupportReasons = []string{
+	gameReasonSignatureUnverified,
+	gameReasonRuntimeTargetUnavailable,
+}
+
+// markCatalogBundleUntrusted records only evidence the current implementation
+// actually has. A content digest is not a signature, signature_identity is not
+// verification evidence, and the current provision contract does not carry or
+// execute the Bundle runtime target. Therefore current entries are neither
+// verified, runnable, nor supported.
+func markCatalogBundleUntrusted(game *domain.GameDefinition, source string) {
+	game.Signed = false
+	game.Verified = false
+	game.Runnable = false
+	game.Supported = false
+	game.TrustLevel = gameTrustLevelLocal
+	game.Source = source
+	game.SupportReasons = append([]string(nil), untrustedBundleSupportReasons...)
+}
+
+func packageRuntimeTargetUnavailable(game domain.GameDefinition) *domain.Problem {
+	problem := domain.NewProblem("PACKAGE_INCOMPATIBLE", "当前游戏包没有可由 Agent 可信执行的运行目标", false)
+	problem.Details["gameDefinitionId"] = game.ID
+	problem.Details["bundleDigest"] = game.BundleDigest
+	problem.Details["trustLevel"] = game.TrustLevel
+	problem.Details["source"] = game.Source
+	problem.Details["supportReasons"] = append([]string(nil), game.SupportReasons...)
+	return problem
+}
+
 func loadFixedGameCatalog() ([]domain.GameDefinition, error) {
 	bundles, err := gamedefinition.FixedBundles()
 	if err != nil {
@@ -93,7 +131,7 @@ func loadFixedGameCatalog() ([]domain.GameDefinition, error) {
 		if _, duplicate := byID[document.Metadata.ID]; duplicate {
 			return nil, fmt.Errorf("duplicate embedded GameDefinition id %s", document.Metadata.ID)
 		}
-		byID[document.Metadata.ID] = domain.GameDefinition{
+		game := domain.GameDefinition{
 			ID: document.Metadata.ID, BundleDigest: bundleDigest(bundle.Document), Name: document.Metadata.Name,
 			Summary: presentation.Summary, Version: document.Metadata.Version, GameVersion: document.Spec.Release.Version,
 			Status: presentation.Status, Capabilities: append([]string(nil), document.Spec.Capabilities...),
@@ -101,6 +139,8 @@ func loadFixedGameCatalog() ([]domain.GameDefinition, error) {
 			Icon: presentation.Icon, DefaultMemory: presentation.DefaultMemory, DefaultDisk: presentation.DefaultDisk,
 			BundleDocument: string(bundle.Document),
 		}
+		markCatalogBundleUntrusted(&game, gameSourceEmbeddedV1Alpha1)
+		byID[document.Metadata.ID] = game
 	}
 
 	result := make([]domain.GameDefinition, 0, len(developmentGameOrder))

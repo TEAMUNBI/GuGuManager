@@ -61,10 +61,10 @@
 | 注册令牌 | 部署侧注册令牌（环境变量注入，回退 bootstrap token） | 已实现：注册令牌经 gRPC `Enroll` 原子消费 |
 | Agent 注册 | 版本化 gRPC `Enroll` 服务 | 已实现：消费令牌、校验 CSR 并签发短期客户端证书（mTLS） |
 | 节点 | `/nodes` | 已实现：mTLS 注册、心跳、证书轮换、30 秒离线判定与吊销；维护模式和自动放置未实现 |
-| Bundle | `/game-definitions` 与版本化 Bundle 资源 | 已实现固定目录持久化与创建时摘要快照；签名验证与可拉取 Bundle 安装未实现 |
-| 服务器 | `/servers`、`/servers/{id}` | 已实现：PostgreSQL 事务、Allocation 关联与 Agent 的 OCI provision |
-| Network | `/servers/{id}/allocations`、`/servers/{id}/allocations/{allocationId}` | 已实现：PostgreSQL 事务、权限与真实端口绑定；`portRef`/多端口 Bundle 映射未实现 |
-| Startup | `/servers/{id}/startup` | 已实现：PostgreSQL 持久化、权限与 Agent 对账；Secret 使用密钥环密文和一次性 mTLS Handle 下发，API 仍只返回 `hasValue` |
+| Bundle | `/game-definitions` 与版本化 Bundle 资源 | 已实现固定目录与不可变摘要；API 分别暴露签名、验证、可运行和支持证据。当前内置项均为 L0、未验证且不可运行，签名验证与可拉取 Bundle 安装未实现 |
+| 服务器 | `/servers`、`/servers/{id}` | 已有 PostgreSQL 事务、Allocation 与 Agent OCI 执行器；当前目录没有可运行 Runtime target，因此新建请求在写入前返回 `PACKAGE_INCOMPATIBLE` |
+| Network | `/servers/{id}/allocations`、`/servers/{id}/allocations/{allocationId}` | PostgreSQL 事务与权限已实现；写入要求节点声明 `server.reconcile/v1`，当前 Agent 不声明，故生产路径 fail closed；`portRef`/多端口 Bundle 映射未实现 |
+| Startup | `/servers/{id}/startup` | PostgreSQL 持久化、权限与 Secret 密钥环/一次性 mTLS Handle 已实现；修改要求 `server.reconcile/v1`，当前 Agent 不声明，故不会伪装成已对账 |
 | 电源 | `/servers/{id}/power` | 已实现：数据库任务表投递 + Agent 真实 Runtime 执行 |
 | Operation | `/operations/{id}` | 已实现：必填 `nodeId` 执行节点快照、数据库任务表、attempt、lease、checkpoint、结构化错误与按 `serverId` 的读取授权；Outbox 与跨副本恢复未实现 |
 | 实时控制台 | `POST /servers/{id}/console-token` 与 WebSocket | 已有第一版：当前 Session Cookie 握手和进程内 Hub；短期连接 Token、Origin allowlist、sequence 续传和 Redis 多副本广播仍未实现 |

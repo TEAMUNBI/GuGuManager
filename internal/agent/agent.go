@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,26 @@ type TaskExecutor interface {
 	ExecuteConsoleCommand(ctx context.Context, serverID, command string) (*ExecutionOutcome, error)
 	Runtime() (containerRuntime, error)
 	ListRunningServers(ctx context.Context) ([]string, error)
+}
+
+// connectRequestSender is the outbound half of the Agent Connect stream.
+// grpc-go permits one concurrent sender and one receiver, but not multiple
+// concurrent Send calls. serializedConnectSender is therefore shared by every
+// heartbeat, task, console, file, log, metric, and certificate path belonging
+// to one connection.
+type connectRequestSender interface {
+	Send(*agentv1.ConnectRequest) error
+}
+
+type serializedConnectSender struct {
+	mu     sync.Mutex
+	stream connectRequestSender
+}
+
+func (s *serializedConnectSender) Send(request *agentv1.ConnectRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stream.Send(request)
 }
 
 // agent 持有一次进程生命周期内的连接状态。
@@ -248,7 +269,8 @@ func (a *agent) enroll(ctx context.Context, csrPEM []byte, opts runOptions) (*ag
 
 func defaultCapabilities() []*agentv1.Capability {
 	return []*agentv1.Capability{
-		{Name: "runtime.docker", Version: "1"},
+		{Name: "runtime.container", Version: "1"},
+		{Name: "platform." + runtime.GOOS + "." + runtime.GOARCH, Version: "1"},
 	}
 }
 
@@ -312,7 +334,8 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	if err != nil {
 		return fmt.Errorf("open connect stream: %w", err)
 	}
-	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Hello{Hello: &agentv1.Hello{
+	outbound := &serializedConnectSender{stream: stream}
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Hello{Hello: &agentv1.Hello{
 		NodeId:           a.nodeID,
 		AgentVersion:     a.cfg.AgentVersion,
 		ProtocolVersions: []string{protocolV1},
@@ -332,8 +355,8 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	a.logger.Info("agent connected", "node_id", a.nodeID, "protocol", welcome.GetProtocolVersion())
 
 	// 日志流式上报与指标采样：连接建立后即启动，会话结束随 ctx 取消。
-	go a.startMetricSampler(ctx, stream)
-	a.startLogTailers(ctx, stream)
+	go a.startMetricSampler(ctx, outbound)
+	a.startLogTailers(ctx, outbound)
 
 	interval := time.Duration(welcome.GetHeartbeatIntervalSeconds()) * time.Second
 	if interval <= 0 {
@@ -341,7 +364,7 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	}
 	stopHB := make(chan struct{})
 	defer close(stopHB)
-	go a.heartbeatLoop(ctx, stream, interval, stopHB)
+	go a.heartbeatLoop(ctx, outbound, interval, stopHB)
 
 	for {
 		req, err := stream.Recv()
@@ -353,13 +376,13 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 		}
 		switch p := req.GetPayload().(type) {
 		case *agentv1.ConnectResponse_Task:
-			if err := a.handleTask(ctx, stream, client, p.Task); err != nil {
+			if err := a.handleTask(ctx, outbound, client, p.Task); err != nil {
 				return err
 			}
 		case *agentv1.ConnectResponse_ConsoleCommand:
-			a.handleConsoleCommand(ctx, stream, p.ConsoleCommand)
+			a.handleConsoleCommand(ctx, outbound, p.ConsoleCommand)
 		case *agentv1.ConnectResponse_RotateCertificate:
-			if err := a.rotateCertificate(ctx, stream); err != nil {
+			if err := a.rotateCertificate(ctx, outbound); err != nil {
 				return fmt.Errorf("rotate certificate: %w", err)
 			}
 		case *agentv1.ConnectResponse_Drain:
@@ -369,26 +392,26 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 				a.logger.Warn("failed to apply rotated certificate", "error", err)
 			}
 		case *agentv1.ConnectResponse_FileOperationRequest:
-			a.handleFileOperation(ctx, stream, p.FileOperationRequest)
+			a.handleFileOperation(ctx, outbound, p.FileOperationRequest)
 		}
 	}
 }
 
 // handleTask 处理下行任务：先回 TaskAck，执行后回 TaskResult（含 Observed）。
-func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
+func (a *agent) handleTask(ctx context.Context, outbound connectRequestSender, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
 	ack := &agentv1.TaskAck{
 		OperationId: task.GetOperationId(),
 		Accepted:    true,
 		Attempt:     task.GetAttempt(),
 	}
-	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskAck{TaskAck: ack}}); err != nil {
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskAck{TaskAck: ack}}); err != nil {
 		return fmt.Errorf("send task ack: %w", err)
 	}
 
 	if err := resolveTaskSecretHandles(ctx, gateway, task); err != nil {
 		outcome := &ExecutionOutcome{Succeeded: false, ErrorCode: "SECRET_HANDLE_FAILED", Retryable: true}
 		result := &agentv1.TaskResult{OperationId: task.GetOperationId(), Succeeded: false, ErrorCode: outcome.ErrorCode, Retryable: outcome.Retryable, Attempt: task.GetAttempt()}
-		if sendErr := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); sendErr != nil {
+		if sendErr := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); sendErr != nil {
 			return fmt.Errorf("send secret handle failure: %w", sendErr)
 		}
 		return nil
@@ -405,11 +428,11 @@ func (a *agent) handleTask(ctx context.Context, stream agentv1.AgentGatewayServi
 		ResultJson:  outcome.ResultJSON,
 		Attempt:     task.GetAttempt(),
 	}
-	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); err != nil {
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); err != nil {
 		return fmt.Errorf("send task result: %w", err)
 	}
 	if outcome.Observed != nil {
-		if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: outcome.Observed}}); err != nil {
+		if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: outcome.Observed}}); err != nil {
 			return fmt.Errorf("send server observed: %w", err)
 		}
 	}
@@ -457,7 +480,7 @@ func resolveTaskSecretHandles(ctx context.Context, gateway agentv1.AgentGatewayS
 // heartbeatLoop 按 Welcome 指定间隔发送 Heartbeat，直到会话结束或 ctx 取消。
 // 心跳携带主机资源快照（内存/磁盘总量与可用量），供 Control Plane 落库并
 // 参与节点容量校验；探测失败时相关字段为零值。
-func (a *agent) heartbeatLoop(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, interval time.Duration, stop <-chan struct{}) {
+func (a *agent) heartbeatLoop(ctx context.Context, outbound connectRequestSender, interval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -476,7 +499,7 @@ func (a *agent) heartbeatLoop(ctx context.Context, stream agentv1.AgentGatewaySe
 				DiskTotalBytes:       uint64(stats.DiskTotalBytes),
 				DiskAvailableBytes:   uint64(stats.DiskAvailableBytes),
 			}
-			if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Heartbeat{Heartbeat: hb}}); err != nil {
+			if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Heartbeat{Heartbeat: hb}}); err != nil {
 				return
 			}
 		}
@@ -485,7 +508,7 @@ func (a *agent) heartbeatLoop(ctx context.Context, stream agentv1.AgentGatewaySe
 
 // rotateCertificate 响应 RotateCertificate 下行：生成新密钥 + CSR 并经
 // 当前流上报；Control Plane 随后以 CertificateResponse 返回新证书。
-func (a *agent) rotateCertificate(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient) error {
+func (a *agent) rotateCertificate(ctx context.Context, outbound connectRequestSender) error {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("generate rotation key: %w", err)
@@ -499,7 +522,7 @@ func (a *agent) rotateCertificate(ctx context.Context, stream agentv1.AgentGatew
 		CertificateSigningRequest: csrPEM,
 		CurrentCertificateSerial:  a.currentSerial(),
 	}
-	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_CertificateSigningRequest{CertificateSigningRequest: req}}); err != nil {
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_CertificateSigningRequest{CertificateSigningRequest: req}}); err != nil {
 		return fmt.Errorf("send rotation csr: %w", err)
 	}
 	a.rotationKey = key
@@ -557,7 +580,7 @@ func (a *agent) currentSerial() string {
 
 // handleConsoleCommand 执行控制台命令，并把命令与输出作为 stdout 行经 LogBatch 回显，
 // 让控制面日志缓冲出现一条「命令 + 结果」的记录。
-func (a *agent) handleConsoleCommand(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, cmd *agentv1.ConsoleCommand) {
+func (a *agent) handleConsoleCommand(ctx context.Context, outbound connectRequestSender, cmd *agentv1.ConsoleCommand) {
 	if cmd == nil {
 		return
 	}
@@ -569,7 +592,7 @@ func (a *agent) handleConsoleCommand(ctx context.Context, stream agentv1.AgentGa
 		RequestId: cmd.GetRequestId(), ServerId: cmd.GetServerId(),
 		Succeeded: outcome.Succeeded, ErrorCode: outcome.ErrorCode, Retryable: outcome.Retryable,
 	}
-	if sendErr := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ConsoleCommandResult{ConsoleCommandResult: result}}); sendErr != nil {
+	if sendErr := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ConsoleCommandResult{ConsoleCommandResult: result}}); sendErr != nil {
 		a.logger.Warn("send console command result", "request", cmd.GetRequestId(), "error", sendErr)
 		return
 	}
@@ -585,7 +608,7 @@ func (a *agent) handleConsoleCommand(ctx context.Context, stream agentv1.AgentGa
 	if echo == "" {
 		echo = outcome.ErrorCode
 	}
-	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
 		ServerId: cmd.GetServerId(), FirstSequence: uint64(a.nextSequence(cmd.GetServerId())), Lines: []string{"> " + cmd.GetCommand(), echo},
 	}}}); err != nil {
 		a.logger.Warn("send console echo", "error", err)
@@ -599,7 +622,7 @@ type fileOperator interface {
 }
 
 // handleFileOperation 执行容器内文件操作并回发结构化响应。
-func (a *agent) handleFileOperation(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, req *agentv1.FileOperationRequest) {
+func (a *agent) handleFileOperation(ctx context.Context, outbound connectRequestSender, req *agentv1.FileOperationRequest) {
 	if req == nil {
 		return
 	}
@@ -615,7 +638,7 @@ func (a *agent) handleFileOperation(ctx context.Context, stream agentv1.AgentGat
 		resp.RequestId = req.GetRequestId()
 	}
 
-	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_FileOperationResponse{FileOperationResponse: resp}}); err != nil {
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_FileOperationResponse{FileOperationResponse: resp}}); err != nil {
 		a.logger.Warn("send file operation response", "request", req.GetRequestId(), "error", err)
 	}
 }
@@ -630,19 +653,19 @@ func (a *agent) nextSequence(serverID string) int64 {
 }
 
 // startLogTailers 为每台运行中的服务器容器启动日志流式 tailer。
-func (a *agent) startLogTailers(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient) {
+func (a *agent) startLogTailers(ctx context.Context, outbound connectRequestSender) {
 	servers, err := a.executor.ListRunningServers(ctx)
 	if err != nil {
 		a.logger.Debug("list running servers for log tailers", "error", err)
 		return
 	}
 	for _, serverID := range servers {
-		a.startLogTailer(ctx, stream, serverID)
+		a.startLogTailer(ctx, outbound, serverID)
 	}
 }
 
 // startLogTailer 在独立 goroutine 中跟随容器日志，按行分组成批上报。
-func (a *agent) startLogTailer(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient, serverID string) {
+func (a *agent) startLogTailer(ctx context.Context, outbound connectRequestSender, serverID string) {
 	go func() {
 		rt, err := a.executor.Runtime()
 		if err != nil {
@@ -662,7 +685,7 @@ func (a *agent) startLogTailer(ctx context.Context, stream agentv1.AgentGatewayS
 			if len(batch) == 0 {
 				return
 			}
-			_ = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
+			_ = outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
 				ServerId: serverID, FirstSequence: uint64(seq), Lines: batch,
 			}}})
 			seq += int64(len(batch))
@@ -681,7 +704,7 @@ func (a *agent) startLogTailer(ctx context.Context, stream agentv1.AgentGatewayS
 }
 
 // startMetricSampler 每 5 秒采集运行中容器的资源与玩家数并上报。
-func (a *agent) startMetricSampler(ctx context.Context, stream agentv1.AgentGatewayService_ConnectClient) {
+func (a *agent) startMetricSampler(ctx context.Context, outbound connectRequestSender) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -701,7 +724,7 @@ func (a *agent) startMetricSampler(ctx context.Context, stream agentv1.AgentGate
 				}
 			}
 			if len(batch.Servers) > 0 {
-				_ = stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_MetricsBatch{MetricsBatch: batch}})
+				_ = outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_MetricsBatch{MetricsBatch: batch}})
 			}
 		}
 	}

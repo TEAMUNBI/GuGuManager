@@ -10,12 +10,16 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +30,114 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type concurrentSendProbe struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	calls     int
+}
+
+func (p *concurrentSendProbe) Send(*agentv1.ConnectRequest) error {
+	p.mu.Lock()
+	p.active++
+	p.calls++
+	if p.active > p.maxActive {
+		p.maxActive = p.active
+	}
+	p.mu.Unlock()
+
+	time.Sleep(time.Millisecond)
+
+	p.mu.Lock()
+	p.active--
+	p.mu.Unlock()
+	return nil
+}
+
+func TestSerializedConnectSenderNeverCallsUnderlyingConcurrently(t *testing.T) {
+	probe := &concurrentSendProbe{}
+	outbound := &serializedConnectSender{stream: probe}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := outbound.Send(&agentv1.ConnectRequest{}); err != nil {
+				t.Errorf("send: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if probe.calls != 32 {
+		t.Fatalf("underlying sends = %d, want 32", probe.calls)
+	}
+	if probe.maxActive != 1 {
+		t.Fatalf("maximum concurrent underlying sends = %d, want 1", probe.maxActive)
+	}
+}
+
+// Keep every Agent Connect Send behind serializedConnectSender. The only raw
+// Send allowed in agent.go is the wrapper's call to its underlying stream;
+// operational paths must send through the parameter named outbound.
+func TestAgentConnectSendPathsUseSerializedSender(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "agent.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse agent.go: %v", err)
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Send" {
+			return true
+		}
+		allowed := false
+		switch receiver := selector.X.(type) {
+		case *ast.Ident:
+			allowed = receiver.Name == "outbound"
+		case *ast.SelectorExpr:
+			base, ok := receiver.X.(*ast.Ident)
+			allowed = ok && base.Name == "s" && receiver.Sel.Name == "stream"
+		}
+		if !allowed {
+			t.Errorf("raw Connect Send at %s; route it through serialized outbound", fset.Position(call.Pos()))
+		}
+		return true
+	})
+}
+
+func TestDefaultCapabilitiesDeclareOnlyImplementedRuntimeAndPlatform(t *testing.T) {
+	capabilities := defaultCapabilities()
+	want := map[string]string{
+		"runtime.container": "1",
+		"platform." + runtime.GOOS + "." + runtime.GOARCH: "1",
+	}
+	if len(capabilities) != len(want) {
+		t.Fatalf("capabilities = %+v, want exactly runtime and platform", capabilities)
+	}
+	for _, capability := range capabilities {
+		if capability == nil {
+			t.Fatal("nil capability")
+		}
+		version, ok := want[capability.GetName()]
+		if !ok || capability.GetVersion() != version {
+			t.Fatalf("unexpected capability %q version %q", capability.GetName(), capability.GetVersion())
+		}
+		if capability.GetName() == "server.reconcile" {
+			t.Fatal("Agent must not advertise reconcile before it implements it")
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // 测试辅助：内存 CA（根证书 + 服务端证书 + 按 CSR 公钥签发客户端证书）

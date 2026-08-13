@@ -157,7 +157,7 @@ func TestReconcileMutationRejectsMissingCapabilityWithoutSideEffects(t *testing.
 		BindIP: "10.0.20.14", Port: 35123, Protocol: "udp",
 	}, server.Generation, "missing-reconcile-cap", actor)
 	problem := requireProblemCode(t, err, "CAPABILITY_UNSUPPORTED")
-	if problem.Details["requiredCapability"] != domain.NodeCapabilityServerReconcile || problem.Retryable {
+	if problem.Details["requiredCapability"] != "server.reconcile" || problem.Details["requiredVersion"] != "1" || problem.Retryable {
 		t.Fatalf("capability problem = %+v", problem)
 	}
 

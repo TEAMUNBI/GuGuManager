@@ -38,6 +38,13 @@ const game: GameDefinition = {
   version: "1.0.0",
   gameVersion: "1.21.8",
   status: "approved",
+  signed: false,
+  verified: false,
+  runnable: true,
+  supported: false,
+  trustLevel: "L0_LOCAL",
+  source: "test-runnable-fixture",
+  supportReasons: ["BUNDLE_SIGNATURE_UNVERIFIED"],
   capabilities: [],
   platforms: ["linux/amd64"],
   servers: 0,
@@ -148,6 +155,30 @@ describe("ServersPage provisioning", () => {
     await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("Server creation accepted", "warning"));
     await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("The server state changed before provisioning completed.", "danger"), { timeout: 2_000 });
     expect(screen.queryByText("Server detail")).not.toBeInTheDocument();
+  });
+
+  it("disables creation when no approved catalog entry is runnable", async () => {
+    mocks.games.mockResolvedValue([{
+      ...game,
+      signed: false,
+      verified: false,
+      runnable: false,
+      supported: false,
+      trustLevel: "L0_LOCAL",
+      source: "embedded-v1alpha1",
+      supportReasons: ["BUNDLE_SIGNATURE_UNVERIFIED", "RUNTIME_TARGET_UNAVAILABLE"],
+    } satisfies GameDefinition]);
+
+    render(
+      <MemoryRouter initialEntries={["/servers?create=1"]}>
+        <Routes><Route path="/servers" element={<ServersPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent("No game template is currently approved and runnable");
+    expect(screen.getByRole("button", { name: /Create server/ })).toBeDisabled();
+    expect(screen.getByLabelText("Game template")).toBeDisabled();
+    expect(mocks.createServer).not.toHaveBeenCalled();
   });
 
   it("renders node state and allocation as readable metadata instead of outlined tags", async () => {

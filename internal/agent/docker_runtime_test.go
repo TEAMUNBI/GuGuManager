@@ -720,6 +720,25 @@ func TestExecuteConsoleCommandRejectsMissingAdapterWithoutShellFallback(t *testi
 	}
 }
 
+func TestExecuteConsoleCommandConfiguredAdapterMissingPasswordIsCommandFailure(t *testing.T) {
+	fd := newFakeDocker()
+	fd.env["GUGU_CONSOLE_ADAPTER"] = minecraftRCONAdapter
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+
+	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
+	if err != nil {
+		t.Fatalf("execute console command: %v", err)
+	}
+	if outcome.Succeeded || outcome.ErrorCode != "COMMAND_FAILED" || outcome.Retryable {
+		t.Fatalf("outcome = %+v, want COMMAND_FAILED non-retryable", outcome)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.execArgv) != 0 {
+		t.Fatalf("exec calls = %d, want 0 with missing RCON credential", len(fd.execArgv))
+	}
+}
+
 func TestExecuteConsoleCommandRuntimeUnavailable(t *testing.T) {
 	exec := &DockerExecutor{
 		dataRoot: t.TempDir(),

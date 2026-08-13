@@ -153,6 +153,13 @@ const games: GameDefinition[] = fixedBundles.map(({ digest, document, presentati
   version: document.metadata.version,
   gameVersion: document.spec.release.version,
   status: presentation.status,
+  signed: false,
+  verified: false,
+  runnable: false,
+  supported: false,
+  trustLevel: "L0_LOCAL",
+  source: "embedded-v1alpha1",
+  supportReasons: ["BUNDLE_SIGNATURE_UNVERIFIED", "RUNTIME_TARGET_UNAVAILABLE"],
   capabilities: [...document.spec.capabilities],
   platforms: [...document.spec.compatibility.platforms],
   servers: presentation.servers,
@@ -254,6 +261,7 @@ const seededStartup: Record<string, StoredStartup> = {
 export interface MockClientOptions {
   setupRequired?: boolean;
   bootstrapToken?: string;
+  catalog?: readonly GameDefinition[];
 }
 
 interface StoredMockUser {
@@ -285,6 +293,7 @@ const allowedPermissions = new Set<ServerPermission>([
 ]);
 
 export class MockClient {
+  private catalog: GameDefinition[];
   private users = new Map<string, StoredMockUser>();
   private userOrder: string[] = [];
   private currentUserId: string | null = null;
@@ -300,6 +309,12 @@ export class MockClient {
   private startup = cloneStartup(seededStartup);
 
   constructor(options: MockClientOptions = {}) {
+    this.catalog = (options.catalog ?? games).map((game) => ({
+      ...game,
+      supportReasons: [...game.supportReasons],
+      capabilities: [...game.capabilities],
+      platforms: [...game.platforms],
+    }));
     this.setupRequired = options.setupRequired ?? false;
     this.bootstrapToken = options.bootstrapToken ?? "mock-bootstrap-token-abcdefghijklmnopqrstuvwxyz";
     this.bootstrapExpiresAt = Date.now() + 15 * 60 * 1000;
@@ -487,7 +502,7 @@ export class MockClient {
     return server;
   }
   async listNodes(): Promise<Node[]> { return nodes; }
-  async listGames(): Promise<GameDefinition[]> { return games; }
+  async listGames(): Promise<GameDefinition[]> { return this.catalog; }
   async listAudit(): Promise<AuditEvent[]> { return audit; }
   async listOperations(): Promise<Operation[]> {
     return [...this.operations.values()]
@@ -549,9 +564,10 @@ export class MockClient {
       if (existing) return existing;
     }
     const node = nodes.find((item) => item.id === input.nodeId);
-    const game = games.find((item) => item.id === input.gameDefinitionId);
+    const game = this.catalog.find((item) => item.id === input.gameDefinitionId);
     if (!node || !game) throw new Error("node or game not found");
     if (game.status !== "approved") throw new Error("GAME_DEFINITION_NOT_APPROVED");
+    if (!game.runnable) throw new Error("PACKAGE_INCOMPATIBLE");
     if (game.bundleDigest !== input.gameBundleDigest) throw new Error("PACKAGE_INCOMPATIBLE");
     if (node.condition !== "available") throw new Error("NODE_OFFLINE");
     const [protocol, firstPort] = defaultAllocationSettings(game.id);

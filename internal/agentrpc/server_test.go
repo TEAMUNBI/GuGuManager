@@ -590,6 +590,7 @@ func TestSendConsoleCommandDispatchesFrame(t *testing.T) {
 		},
 	}
 	srv.registerStream(stream)
+	defer srv.unregisterStream(stream)
 	type dispatchResult struct {
 		result domain.ConsoleCommandResult
 		err    error
@@ -619,6 +620,39 @@ func TestSendConsoleCommandDispatchesFrame(t *testing.T) {
 	}
 }
 
+func TestEnrollCanonicalizesCapabilityNameAndVersion(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	srv := NewServer(ca, fs, discardLogger())
+	response, err := srv.Enroll(context.Background(), &agentv1.EnrollRequest{
+		NodeName: "capability-node", AgentVersion: "test",
+		Capabilities: []*agentv1.Capability{
+			{Name: "runtime.container", Version: "1"},
+			{Name: "platform.linux.amd64", Version: "2"},
+			{Name: "invalid capability", Version: "1"},
+			nil,
+		},
+	})
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	fs.mu.Lock()
+	node := fs.nodes[response.GetNodeId()]
+	fs.mu.Unlock()
+	want := []string{"runtime.container/v1", "platform.linux.amd64/v2"}
+	if len(node.Capabilities) != len(want) {
+		t.Fatalf("capabilities = %v, want %v", node.Capabilities, want)
+	}
+	for index := range want {
+		if node.Capabilities[index] != want[index] {
+			t.Fatalf("capabilities = %v, want %v", node.Capabilities, want)
+		}
+	}
+}
+
 func TestConsoleCommandRejectsMismatchedServerResult(t *testing.T) {
 	ca, err := agentca.NewCA(t.TempDir())
 	if err != nil {
@@ -628,6 +662,7 @@ func TestConsoleCommandRejectsMismatchedServerResult(t *testing.T) {
 	sent := make(chan *agentv1.ConnectResponse, 1)
 	stream := &nodeStream{nodeID: "node-1", send: func(resp *agentv1.ConnectResponse) error { sent <- resp; return nil }}
 	srv.registerStream(stream)
+	defer srv.unregisterStream(stream)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
@@ -652,12 +687,109 @@ func TestUnregisterOldStreamDoesNotRemoveReplacement(t *testing.T) {
 	newStream := &nodeStream{nodeID: "node-1", send: func(*agentv1.ConnectResponse) error { return nil }}
 	srv.registerStream(oldStream)
 	srv.registerStream(newStream)
+	defer srv.unregisterStream(newStream)
 	srv.unregisterStream(oldStream)
 	srv.streamMu.Lock()
 	current := srv.streams["node-1"]
 	srv.streamMu.Unlock()
 	if current != newStream {
 		t.Fatal("old connection unregister removed the replacement stream")
+	}
+}
+
+func TestSendConsoleCommandDeadlineCoversBlockedTransportSend(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	srv := NewServer(ca, newFakeStore(), discardLogger(), withConsoleCommandTimeout(50*time.Millisecond))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	stream := &nodeStream{
+		nodeID: "node-1",
+		send: func(*agentv1.ConnectResponse) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}
+	srv.registerStream(stream)
+
+	before := time.Now()
+	result, err := srv.SendConsoleCommand(context.Background(), "node-1", "server-1", "list")
+	elapsed := time.Since(before)
+	if err == nil {
+		t.Fatal("blocked transport send unexpectedly succeeded")
+	}
+	if result.ErrorCode != "CONSOLE_TIMEOUT" || !result.Retryable {
+		t.Fatalf("result = %+v, want retryable CONSOLE_TIMEOUT", result)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("blocked send returned after %v, want caller deadline to bound it", elapsed)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("test did not exercise a blocked transport send")
+	}
+
+	srv.unregisterStream(stream)
+	close(release)
+	select {
+	case <-stream.writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("outbound writer did not stop after transport was released")
+	}
+}
+
+func TestSendConsoleCommandDisconnectUnblocksBlockedTransportSend(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	srv := NewServer(ca, newFakeStore(), discardLogger())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	stream := &nodeStream{
+		nodeID: "node-1",
+		send: func(*agentv1.ConnectResponse) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}
+	srv.registerStream(stream)
+	type dispatchResult struct {
+		result domain.ConsoleCommandResult
+		err    error
+	}
+	done := make(chan dispatchResult, 1)
+	go func() {
+		result, sendErr := srv.SendConsoleCommand(context.Background(), "node-1", "server-1", "list")
+		done <- dispatchResult{result: result, err: sendErr}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("transport send did not start")
+	}
+	srv.unregisterStream(stream)
+	select {
+	case completed := <-done:
+		if completed.err == nil {
+			t.Fatal("disconnect unexpectedly completed command successfully")
+		}
+		if completed.result.ErrorCode != "NODE_OFFLINE" || !completed.result.Retryable {
+			t.Fatalf("result = %+v, want retryable NODE_OFFLINE", completed.result)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("disconnect did not unblock command waiting on transport send")
+	}
+	close(release)
+	select {
+	case <-stream.writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("outbound writer did not stop after transport was released")
 	}
 }
 

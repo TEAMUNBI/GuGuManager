@@ -177,12 +177,16 @@ func controlPlaneFixture(t *testing.T, s *Postgres) (domain.User, string, string
 	nodeID, err := s.RegisterNode(context.Background(), domain.Node{
 		Name: "cp-node", Condition: "available", Version: "agent-v1", Region: "cn",
 		Address: "127.0.0.1", CPUCores: 8, MemoryBytes: 16 << 30, DiskBytes: 1 << 40,
+		Capabilities: []string{domain.NodeCapabilityServerReconcile},
 	})
 	if err != nil {
 		t.Fatalf("register node: %v", err)
 	}
 
 	game := insertCatalogGameFixture(t, s)
+	runnableGame := game
+	runnableGame.Runnable = true
+	enableTestRuntimeTarget(t, runnableGame)
 	op, err := s.CreateServer(domain.CreateServerInput{
 		Name:             "cp-server-1",
 		GameDefinitionID: game.ID,
@@ -460,6 +464,143 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 	// Undeclared variables must fail validation.
 	if _, err := s.UpdateStartup(serverID, map[string]any{"not_a_variable": 1}, generation, "idem-cp-startup-0002", admin); err == nil {
 		t.Fatal("expected undeclared startup variable to fail")
+	}
+}
+
+type postgresReconcileSnapshot struct {
+	serverState     string
+	allocations     string
+	startupValues   string
+	serverTaskCount int
+	outboxCount     int
+	auditCount      int
+}
+
+func capturePostgresReconcileSnapshot(t *testing.T, s *Postgres, serverID string) postgresReconcileSnapshot {
+	t.Helper()
+	var snapshot postgresReconcileSnapshot
+	err := s.db.QueryRow(`
+		SELECT to_jsonb(s)::text,
+		       COALESCE((
+		           SELECT jsonb_agg(
+		               jsonb_build_object(
+		                   'id', a.id::text,
+		                   'bindIp', host(a.bind_ip),
+		                   'port', a.port,
+		                   'protocol', a.protocol,
+		                   'primary', a.is_primary,
+		                   'releasedAt', a.released_at
+		               ) ORDER BY a.id
+		           )::text
+		           FROM allocations a WHERE a.server_id = s.id
+		       ), '[]'),
+		       COALESCE((SELECT values::text FROM startup_values WHERE server_id = s.id), 'null'),
+		       (SELECT COUNT(*) FROM server_tasks),
+		       (SELECT COUNT(*) FROM outbox_events),
+		       (SELECT COUNT(*) FROM audit_events)
+		FROM servers s
+		WHERE s.id = $1
+	`, serverID).Scan(
+		&snapshot.serverState,
+		&snapshot.allocations,
+		&snapshot.startupValues,
+		&snapshot.serverTaskCount,
+		&snapshot.outboxCount,
+		&snapshot.auditCount,
+	)
+	if err != nil {
+		t.Fatalf("capture reconcile snapshot: %v", err)
+	}
+	return snapshot
+}
+
+func TestPostgresReconcileMutationsRejectMissingVersionedCapabilityWithoutSideEffects(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*Postgres, domain.User, string, string, string, int64) error
+	}{
+		{
+			name: "create allocation",
+			mutate: func(s *Postgres, actor domain.User, serverID, _, _ string, generation int64) error {
+				_, err := s.CreateAllocation(serverID, domain.CreateAllocationInput{
+					BindIP: "127.0.0.2", Port: 30111, Protocol: "udp",
+				}, generation, "idem-cap-create-0001", actor)
+				return err
+			},
+		},
+		{
+			name: "set primary allocation",
+			mutate: func(s *Postgres, actor domain.User, serverID, _, secondaryID string, generation int64) error {
+				_, err := s.SetPrimaryAllocation(serverID, secondaryID, generation, "idem-cap-primary-0001", actor)
+				return err
+			},
+		},
+		{
+			name: "delete allocation",
+			mutate: func(s *Postgres, actor domain.User, serverID, _, secondaryID string, generation int64) error {
+				_, err := s.DeleteAllocation(serverID, secondaryID, generation, "idem-cap-delete-0001", actor)
+				return err
+			},
+		},
+		{
+			name: "update startup",
+			mutate: func(s *Postgres, actor domain.User, serverID, _, _ string, generation int64) error {
+				_, err := s.UpdateStartup(serverID, map[string]any{"memory_mb": 3072}, generation, "idem-cap-startup-0001", actor)
+				return err
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := testPostgres(t)
+			admin, nodeID, serverID := controlPlaneFixture(t, s)
+
+			var primaryID string
+			if err := s.db.QueryRow(`
+				SELECT id::text FROM allocations
+				WHERE server_id = $1 AND released_at IS NULL AND is_primary
+			`, serverID).Scan(&primaryID); err != nil {
+				t.Fatalf("query primary allocation: %v", err)
+			}
+			var secondaryID string
+			if err := s.db.QueryRow(`
+				INSERT INTO allocations (node_id, bind_ip, port, protocol, server_id, is_primary)
+				VALUES ($1, '127.0.0.9', 30999, 'tcp', $2, false)
+				RETURNING id::text
+			`, nodeID, serverID).Scan(&secondaryID); err != nil {
+				t.Fatalf("insert secondary allocation: %v", err)
+			}
+
+			// Neither a canonical declaration stored as the key nor a mismatched
+			// version satisfies the split server.reconcile + version 1 contract.
+			if _, err := s.db.Exec(`DELETE FROM node_capabilities WHERE node_id = $1 AND capability_key = 'server.reconcile'`, nodeID); err != nil {
+				t.Fatalf("delete valid reconcile capability: %v", err)
+			}
+			if _, err := s.db.Exec(`
+				INSERT INTO node_capabilities (node_id, capability_key, capability_version)
+				VALUES ($1, 'server.reconcile', '2'), ($1, 'server.reconcile/v1', '1')
+			`, nodeID); err != nil {
+				t.Fatalf("insert invalid reconcile declarations: %v", err)
+			}
+
+			var generation int64
+			if err := s.db.QueryRow(`SELECT generation FROM servers WHERE id = $1`, serverID).Scan(&generation); err != nil {
+				t.Fatalf("query server generation: %v", err)
+			}
+			before := capturePostgresReconcileSnapshot(t, s, serverID)
+			err := testCase.mutate(s, admin, serverID, primaryID, secondaryID, generation)
+			problem := requireProblemCode(t, err, "CAPABILITY_UNSUPPORTED")
+			if problem.Retryable || problem.Details["requiredCapability"] != "server.reconcile" ||
+				problem.Details["requiredVersion"] != "1" || problem.Details["nodeId"] != nodeID ||
+				problem.Details["nodeVersion"] != "agent-v1" {
+				t.Fatalf("capability problem = %+v", problem)
+			}
+			after := capturePostgresReconcileSnapshot(t, s, serverID)
+			if after != before {
+				t.Fatalf("capability rejection mutated PostgreSQL state:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
 	}
 }
 

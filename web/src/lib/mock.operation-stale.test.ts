@@ -12,11 +12,14 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function freshClient(): Promise<MockClientType> {
+async function freshClient(withRunnableCatalog = false): Promise<MockClientType> {
   vi.useFakeTimers();
   vi.resetModules();
   const { MockClient } = await import("./mock");
-  return new MockClient();
+  if (!withRunnableCatalog) return new MockClient();
+  const defaults = new MockClient();
+  const catalog = (await defaults.listGames()).map((game) => ({ ...game, runnable: true }));
+  return new MockClient({ catalog });
 }
 
 async function expectStaleOperation(client: MockClientType, operation: Operation): Promise<void> {
@@ -35,7 +38,7 @@ async function expectStaleOperation(client: MockClientType, operation: Operation
 
 describe("MockClient operation completion fencing", () => {
   test("fails stale provision without marking the server ready", async () => {
-    const client = await freshClient();
+    const client = await freshClient(true);
     const [game] = await client.listGames();
     const [node] = await client.listNodes();
     const operation = await client.createServer({

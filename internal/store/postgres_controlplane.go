@@ -310,7 +310,8 @@ func (s *Postgres) GameDefinitions() []domain.GameDefinition {
 			&game.Version, &game.GameVersion, &game.Servers); err != nil {
 			continue
 		}
-		if fixed, err := fixedCatalogGame(game.ID); err == nil {
+		markCatalogBundleUntrusted(&game, gameSourceDatabaseMetadata)
+		if fixed, err := fixedCatalogGame(game.ID); err == nil && fixed.BundleDigest == game.BundleDigest {
 			game.Summary = fixed.Summary
 			game.Capabilities = append([]string(nil), fixed.Capabilities...)
 			game.Platforms = append([]string(nil), fixed.Platforms...)
@@ -318,6 +319,13 @@ func (s *Postgres) GameDefinitions() []domain.GameDefinition {
 			game.DefaultMemory = fixed.DefaultMemory
 			game.DefaultDisk = fixed.DefaultDisk
 			game.BundleDocument = fixed.BundleDocument
+			game.Signed = fixed.Signed
+			game.Verified = fixed.Verified
+			game.Runnable = fixed.Runnable
+			game.Supported = fixed.Supported
+			game.TrustLevel = fixed.TrustLevel
+			game.Source = fixed.Source
+			game.SupportReasons = append([]string(nil), fixed.SupportReasons...)
 		}
 		games = append(games, game)
 	}
@@ -530,6 +538,55 @@ func generationFence(row serverRow, expectedGeneration int64) error {
 	problem := domain.NewProblem("PRECONDITION_FAILED", "服务器 generation 已变化，请刷新后重试", false)
 	problem.Details["currentGeneration"] = row.Generation
 	problem.Details["providedGeneration"] = expectedGeneration
+	return problem
+}
+
+// requireServerReconcileCapabilityTx verifies the target node's live state and
+// the exact versioned capability declaration while the caller holds the
+// server write lock. PostgreSQL persists capabilities as a split name/version
+// pair, so the canonical domain declaration must never be queried as a key.
+func (s *Postgres) requireServerReconcileCapabilityTx(ctx context.Context, tx *sql.Tx, nodeID string) error {
+	requiredCapability, requiredVersion, ok := domain.SplitNodeCapability(domain.NodeCapabilityServerReconcile)
+	if !ok {
+		return domain.NewProblem("INTERNAL_ERROR", "无法解析服务端所需的节点能力", false)
+	}
+
+	var condition string
+	var nodeVersion string
+	err := tx.QueryRowContext(ctx, `
+		SELECT n.condition, n.agent_version
+		FROM nodes n
+		WHERE n.id = $1 AND n.revoked_at IS NULL
+		FOR SHARE
+	`, nodeID).Scan(&condition, &nodeVersion)
+	if err == sql.ErrNoRows {
+		return domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
+	}
+	if err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法核验目标节点能力", true)
+	}
+	if condition != "available" {
+		return domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
+	}
+	var capabilityEvidence int
+	err = tx.QueryRowContext(ctx, `
+		SELECT 1
+		FROM node_capabilities
+		WHERE node_id = $1 AND capability_key = $2 AND capability_version = $3
+		FOR SHARE
+	`, nodeID, requiredCapability, requiredVersion).Scan(&capabilityEvidence)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return domain.NewProblem("INTERNAL_ERROR", "无法核验目标节点能力", true)
+	}
+
+	problem := domain.NewProblem("CAPABILITY_UNSUPPORTED", "目标节点未声明执行该操作所需的能力", false)
+	problem.Details["requiredCapability"] = requiredCapability
+	problem.Details["requiredVersion"] = requiredVersion
+	problem.Details["nodeId"] = nodeID
+	problem.Details["nodeVersion"] = nodeVersion
 	return problem
 }
 
@@ -852,8 +909,8 @@ func (s *Postgres) CreateAllocation(
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
 	}
-	if row.NodeCondition != "available" {
-		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
+	if err := s.requireServerReconcileCapabilityTx(ctx, tx, row.NodeID); err != nil {
+		return domain.Operation{}, err
 	}
 	if err := generationFence(row, expectedGeneration); err != nil {
 		return domain.Operation{}, err
@@ -965,8 +1022,8 @@ func (s *Postgres) SetPrimaryAllocation(
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
 	}
-	if row.NodeCondition != "available" {
-		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
+	if err := s.requireServerReconcileCapabilityTx(ctx, tx, row.NodeID); err != nil {
+		return domain.Operation{}, err
 	}
 	if err := generationFence(row, expectedGeneration); err != nil {
 		return domain.Operation{}, err
@@ -1060,8 +1117,8 @@ func (s *Postgres) DeleteAllocation(
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
 	}
-	if row.NodeCondition != "available" {
-		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
+	if err := s.requireServerReconcileCapabilityTx(ctx, tx, row.NodeID); err != nil {
+		return domain.Operation{}, err
 	}
 	if err := generationFence(row, expectedGeneration); err != nil {
 		return domain.Operation{}, err
@@ -1262,8 +1319,8 @@ func (s *Postgres) UpdateStartup(
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
 	}
-	if row.NodeCondition != "available" {
-		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
+	if err := s.requireServerReconcileCapabilityTx(ctx, tx, row.NodeID); err != nil {
+		return domain.Operation{}, err
 	}
 	if err := generationFence(row, expectedGeneration); err != nil {
 		return domain.Operation{}, err

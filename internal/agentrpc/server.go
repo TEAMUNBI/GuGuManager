@@ -37,6 +37,7 @@ const (
 	maxInFlightTasks      = 3
 	defaultClaimPeriod    = 2 * time.Second
 	consoleCommandTimeout = 10 * time.Second
+	nodeOutboundQueueSize = 64
 	// maxAgentMessageBytes 放宽单帧消息上限，容纳备份下载等大 payload
 	// （备份归档以 base64 回传时体积约为原始大小的 4/3）。
 	maxAgentMessageBytes = 512 << 20
@@ -88,10 +89,17 @@ func WithServerIPs(ips []net.IP) Option {
 // nodeStream 是节点当前 Connect 连接的发送句柄。注册进 Server.streams，
 // 供 SendConsoleCommand 在流上直接下发命令帧。
 type nodeStream struct {
-	nodeID   string
+	nodeID string
+	// send is owned exclusively by the outbound writer. Callers enqueue frames
+	// through sendFrame so one blocked transport send cannot block the HTTP
+	// request goroutine or create one goroutine per attempted command.
 	send     func(*agentv1.ConnectResponse) error
 	done     chan struct{}
 	doneOnce sync.Once
+
+	outbound   chan nodeOutboundFrame
+	writerOnce sync.Once
+	writerDone chan struct{}
 
 	consoleMu      sync.Mutex
 	consolePending map[string]consolePending
@@ -104,6 +112,91 @@ type nodeStream struct {
 type consolePending struct {
 	serverID string
 	result   chan domain.ConsoleCommandResult
+}
+
+type nodeOutboundFrame struct {
+	ctx    context.Context
+	frame  *agentv1.ConnectResponse
+	result chan error
+}
+
+func (f nodeOutboundFrame) complete(err error) {
+	select {
+	case f.result <- err:
+	default:
+	}
+}
+
+// startWriter starts exactly one bounded outbound worker for this connection.
+// A transport Send may block until the gRPC stream is torn down, but it can
+// consume at most this one lifecycle goroutine; callers remain bounded by their
+// own context and the fixed-size queue provides backpressure.
+func (s *nodeStream) startWriter() {
+	s.writerOnce.Do(func() {
+		go func() {
+			defer close(s.writerDone)
+			for {
+				select {
+				case <-s.done:
+					return
+				case outbound := <-s.outbound:
+					if err := outbound.ctx.Err(); err != nil {
+						outbound.complete(err)
+						continue
+					}
+					select {
+					case <-s.done:
+						outbound.complete(errNodeStreamClosed)
+						return
+					default:
+					}
+					if s.send == nil {
+						outbound.complete(errNodeStreamClosed)
+						s.close()
+						return
+					}
+					err := s.send(outbound.frame)
+					outbound.complete(err)
+					if err != nil {
+						s.close()
+						return
+					}
+				}
+			}
+		}()
+	})
+}
+
+var errNodeStreamClosed = errors.New("node connect stream is closed")
+
+// sendFrame enqueues a frame and waits for either its transport result, the
+// caller deadline, or disconnect. It never launches a per-request goroutine.
+func (s *nodeStream) sendFrame(ctx context.Context, frame *agentv1.ConnectResponse) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	outbound := nodeOutboundFrame{ctx: ctx, frame: frame, result: make(chan error, 1)}
+	select {
+	case <-s.done:
+		return errNodeStreamClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.outbound <- outbound:
+	}
+	select {
+	case err := <-outbound.result:
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return err
+	case <-s.done:
+		return errNodeStreamClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *nodeStream) close() {
@@ -123,6 +216,7 @@ type Server struct {
 	log               *slog.Logger
 	registrationToken string
 	claimPeriod       time.Duration
+	consoleTimeout    time.Duration
 	extraServerIPs    []net.IP
 
 	streamMu sync.Mutex
@@ -132,11 +226,12 @@ type Server struct {
 // NewServer 构造 Agent gRPC 服务器。
 func NewServer(ca *agentca.CA, store TaskStore, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{
-		ca:          ca,
-		store:       store,
-		log:         logger,
-		claimPeriod: defaultClaimPeriod,
-		streams:     make(map[string]*nodeStream),
+		ca:             ca,
+		store:          store,
+		log:            logger,
+		claimPeriod:    defaultClaimPeriod,
+		consoleTimeout: consoleCommandTimeout,
+		streams:        make(map[string]*nodeStream),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -144,14 +239,31 @@ func NewServer(ca *agentca.CA, store TaskStore, logger *slog.Logger, opts ...Opt
 	return s
 }
 
+// withConsoleCommandTimeout shortens the hard command deadline in tests. The
+// production default remains consoleCommandTimeout (10 seconds).
+func withConsoleCommandTimeout(timeout time.Duration) Option {
+	return func(s *Server) {
+		if timeout > 0 {
+			s.consoleTimeout = timeout
+		}
+	}
+}
+
 // registerStream 记录节点当前连接，供控制面命令下发定位。
 func (s *Server) registerStream(stream *nodeStream) {
 	if stream.done == nil {
 		stream.done = make(chan struct{})
 	}
+	if stream.outbound == nil {
+		stream.outbound = make(chan nodeOutboundFrame, nodeOutboundQueueSize)
+	}
+	if stream.writerDone == nil {
+		stream.writerDone = make(chan struct{})
+	}
 	if stream.consolePending == nil {
 		stream.consolePending = make(map[string]consolePending)
 	}
+	stream.startWriter()
 	s.streamMu.Lock()
 	previous := s.streams[stream.nodeID]
 	s.streams[stream.nodeID] = stream
@@ -185,7 +297,7 @@ func (s *Server) SendConsoleCommand(ctx context.Context, nodeID, serverID, comma
 		baseResult.Retryable = true
 		return baseResult, domain.NewProblem("NODE_OFFLINE", "node has no active connect stream", true)
 	}
-	ctx, cancel := context.WithTimeout(ctx, consoleCommandTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.consoleTimeout)
 	defer cancel()
 	resultCh := make(chan domain.ConsoleCommandResult, 1)
 	stream.consoleMu.Lock()
@@ -197,9 +309,18 @@ func (s *Server) SendConsoleCommand(ctx context.Context, nodeID, serverID, comma
 		stream.consoleMu.Unlock()
 	}()
 
-	if err := stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_ConsoleCommand{
+	if err := stream.sendFrame(ctx, &agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_ConsoleCommand{
 		ConsoleCommand: &agentv1.ConsoleCommand{RequestId: requestID, ServerId: serverID, Command: command},
 	}}); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			// The frame may already be inside a blocked transport Send. Retire the
+			// connection so the RPC handler cancels that Send and the command cannot
+			// be delivered later after the HTTP deadline has expired.
+			stream.close()
+			baseResult.ErrorCode = "CONSOLE_TIMEOUT"
+			baseResult.Retryable = true
+			return baseResult, domain.NewProblem("CONSOLE_TIMEOUT", "console command timed out", true)
+		}
 		baseResult.ErrorCode = "NODE_OFFLINE"
 		baseResult.Retryable = true
 		return baseResult, domain.NewProblem("NODE_OFFLINE", "failed to send console command", true)
@@ -207,6 +328,11 @@ func (s *Server) SendConsoleCommand(ctx context.Context, nodeID, serverID, comma
 
 	select {
 	case result := <-resultCh:
+		if ctx.Err() != nil {
+			baseResult.ErrorCode = "CONSOLE_TIMEOUT"
+			baseResult.Retryable = true
+			return baseResult, domain.NewProblem("CONSOLE_TIMEOUT", "console command timed out", true)
+		}
 		if result.Succeeded {
 			return result, nil
 		}
@@ -282,7 +408,7 @@ func (s *Server) DispatchFileOperation(ctx context.Context, nodeID string, req *
 		stream.fileMu.Unlock()
 	}()
 
-	if err := stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_FileOperationRequest{
+	if err := stream.sendFrame(ctx, &agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_FileOperationRequest{
 		FileOperationRequest: req,
 	}}); err != nil {
 		return nil, fmt.Errorf("send file operation request: %w", err)
@@ -349,8 +475,8 @@ func (s *Server) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agent
 		if capability == nil {
 			continue
 		}
-		if name := strings.TrimSpace(capability.Name); name != "" {
-			node.Capabilities = append(node.Capabilities, name)
+		if canonical, ok := domain.CanonicalNodeCapability(capability.GetName(), capability.GetVersion()); ok {
+			node.Capabilities = append(node.Capabilities, canonical)
 		}
 	}
 

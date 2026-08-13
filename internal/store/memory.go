@@ -387,7 +387,11 @@ func (m *Memory) GameDefinitions() []domain.GameDefinition {
 	defer m.mu.RUnlock()
 	result := make([]domain.GameDefinition, 0, len(m.gameOrder))
 	for _, gameID := range m.gameOrder {
-		result = append(result, m.games[gameID])
+		game := m.games[gameID]
+		game.Capabilities = append([]string(nil), game.Capabilities...)
+		game.Platforms = append([]string(nil), game.Platforms...)
+		game.SupportReasons = append([]string(nil), game.SupportReasons...)
+		result = append(result, game)
 	}
 	return result
 }
