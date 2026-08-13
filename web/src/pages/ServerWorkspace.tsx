@@ -72,7 +72,7 @@ const shellCopy = defineCopy({
     tabs: { overview: "概览", console: "控制台", files: "文件", backups: "备份", network: "网络", startup: "启动配置", activity: "任务记录", settings: "服务器详情" },
     powerStatus: { unknown: "未知", stopped: "已停止", starting: "启动中", running: "运行中", stopping: "停止中" },
     powerAction: { start: "启动", stop: "停止", restart: "重启", kill: "强制终止" },
-    operationStatus: { queued: "等待中", leased: "已领取", dispatched: "已下发", running: "执行中", succeeded: "已完成", failed: "失败", canceled: "已取消" },
+    operationStatus: { queued: "等待中", leased: "已领取", running: "执行中", succeeded: "已完成", failed: "失败" },
     powerAccepted: (action: string) => `${action}请求已受理`,
     powerCompleted: (action: string) => `${action}操作已完成`,
     powerTerminal: (action: string, status: string) => `${action}操作状态：${status}`,
@@ -97,7 +97,7 @@ const shellCopy = defineCopy({
     tabs: { overview: "Overview", console: "Console", files: "Files", backups: "Backups", network: "Network", startup: "Startup", activity: "Task history", settings: "Server details" },
     powerStatus: { unknown: "Unknown", stopped: "Stopped", starting: "Starting", running: "Running", stopping: "Stopping" },
     powerAction: { start: "Start", stop: "Stop", restart: "Restart", kill: "Force terminate" },
-    operationStatus: { queued: "Queued", leased: "Claimed", dispatched: "Dispatched", running: "Running", succeeded: "Succeeded", failed: "Failed", canceled: "Canceled" },
+    operationStatus: { queued: "Queued", leased: "Claimed", running: "Running", succeeded: "Succeeded", failed: "Failed" },
     powerAccepted: (action: string) => `${action} request accepted`,
     powerCompleted: (action: string) => `${action} completed`,
     powerTerminal: (action: string, status: string) => `${action} status: ${status}`,
@@ -122,7 +122,7 @@ const shellCopy = defineCopy({
     tabs: { overview: "概要", console: "コンソール", files: "ファイル", backups: "バックアップ", network: "ネットワーク", startup: "起動設定", activity: "タスク履歴", settings: "サーバー詳細" },
     powerStatus: { unknown: "不明", stopped: "停止済み", starting: "起動中", running: "稼働中", stopping: "停止中" },
     powerAction: { start: "起動", stop: "停止", restart: "再起動", kill: "強制終了" },
-    operationStatus: { queued: "待機中", leased: "取得済み", dispatched: "送信済み", running: "実行中", succeeded: "完了", failed: "失敗", canceled: "キャンセル済み" },
+    operationStatus: { queued: "待機中", leased: "取得済み", running: "実行中", succeeded: "完了", failed: "失敗" },
     powerAccepted: (action: string) => `${action}リクエストを受け付けました`,
     powerCompleted: (action: string) => `${action}操作が完了しました`,
     powerTerminal: (action: string, status: string) => `${action}操作の状態：${status}`,
@@ -147,7 +147,7 @@ const shellCopy = defineCopy({
     tabs: { overview: "개요", console: "콘솔", files: "파일", backups: "백업", network: "네트워크", startup: "시작 설정", activity: "작업 기록", settings: "서버 세부 정보" },
     powerStatus: { unknown: "알 수 없음", stopped: "중지됨", starting: "시작 중", running: "실행 중", stopping: "중지 중" },
     powerAction: { start: "시작", stop: "중지", restart: "재시작", kill: "강제 종료" },
-    operationStatus: { queued: "대기 중", leased: "할당됨", dispatched: "전송됨", running: "실행 중", succeeded: "완료", failed: "실패", canceled: "취소됨" },
+    operationStatus: { queued: "대기 중", leased: "할당됨", running: "실행 중", succeeded: "완료", failed: "실패" },
     powerAccepted: (action: string) => `${action} 요청이 접수되었습니다`,
     powerCompleted: (action: string) => `${action} 작업이 완료되었습니다`,
     powerTerminal: (action: string, status: string) => `${action} 작업 상태: ${status}`,
@@ -242,7 +242,7 @@ const filesCopy = defineCopy({
 
 const backupsCopy = defineCopy({
   "zh-CN": {
-    loadError: "无法加载备份", downloadBackup: "下载备份", downloading: "下载中…", downloadFailed: "无法下载备份", operationUnavailable: "暂时无法获取任务状态。请先重试状态检查，再执行其他备份操作。", terminal: (status: string) => `备份任务状态：${status}`, operationName: { backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份" }, operationStatus: { queued: "等待中", leased: "已领取", dispatched: "已下发", running: "执行中", succeeded: "已完成", failed: "失败", canceled: "已取消" }, acceptedCreate: "创建备份任务已受理", created: "备份已创建", requestFailed: "无法提交备份任务", acceptedRestore: "恢复备份任务已受理", restored: "备份已恢复", restoreFailed: "无法提交恢复任务", acceptedDelete: "删除备份任务已受理", deleted: "备份已删除", deleteFailed: "无法删除备份", statusFailed: "无法查询任务状态", checksumCopied: "校验摘要已复制", checksumCopyFailed: "无法复制校验摘要",
+    loadError: "无法加载备份", downloadBackup: "下载备份", downloading: "下载中…", downloadFailed: "无法下载备份", operationUnavailable: "暂时无法获取任务状态。请先重试状态检查，再执行其他备份操作。", terminal: (status: string) => `备份任务状态：${status}`, operationName: { backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份" }, operationStatus: { queued: "等待中", leased: "已领取", running: "执行中", succeeded: "已完成", failed: "失败" }, acceptedCreate: "创建备份任务已受理", created: "备份已创建", requestFailed: "无法提交备份任务", acceptedRestore: "恢复备份任务已受理", restored: "备份已恢复", restoreFailed: "无法提交恢复任务", acceptedDelete: "删除备份任务已受理", deleted: "备份已删除", deleteFailed: "无法删除备份", statusFailed: "无法查询任务状态", checksumCopied: "校验摘要已复制", checksumCopyFailed: "无法复制校验摘要",
     acceptedCleanup: "失败备份清理任务已受理", cleaned: "失败备份已清理", cleanupFailed: "无法清理失败备份",
     eyebrow: "恢复点", title: "备份", count: (count: number) => `此服务器记录了 ${count} 个快照。`, stopBeforeRestore: "恢复前请先停止服务器。", attempt: "尝试", retryStatus: "重试状态", transitionRunning: "已有备份转换操作仍在运行。", creating: (progress: number) => `创建中 · ${progress}%`, createBackup: "创建备份",
     checksumPending: "摘要待生成", copyChecksum: (name: string) => `复制 ${name} 的摘要`, status: { creating: "创建中", ready: "就绪", failed: "失败", restoring: "恢复中", deleting: "删除中" }, pending: "待处理", restoreAria: (name: string) => `恢复 ${name}`, deleteAria: (name: string) => `删除 ${name}`, stopServer: "先停止服务器", restoreBackup: "恢复备份", deleteBackup: "删除备份",
@@ -250,7 +250,7 @@ const backupsCopy = defineCopy({
     cleanupAria: (name: string) => `清理失败备份 ${name}`, cleanupFailedBackup: "清理失败备份", cleanupTitle: "清理此失败备份？", cleanupDescription: "清理操作会删除可能残留的归档和失败恢复点记录。", cleanup: "清理",
   },
   en: {
-    loadError: "Unable to load backups", downloadBackup: "Download backup", downloading: "Downloading...", downloadFailed: "Unable to download backup", operationUnavailable: "Operation status is unavailable. Retry the status check before starting another backup action.", terminal: (status: string) => `Backup operation status: ${status}`, operationName: { backup: "Create backup", restore: "Restore backup", "backup-delete": "Delete backup" }, operationStatus: { queued: "Queued", leased: "Claimed", dispatched: "Dispatched", running: "Running", succeeded: "Succeeded", failed: "Failed", canceled: "Canceled" }, acceptedCreate: "Backup operation accepted", created: "Backup created", requestFailed: "Backup request failed", acceptedRestore: "Restore operation accepted", restored: "Backup restored", restoreFailed: "Restore request failed", acceptedDelete: "Backup deletion accepted", deleted: "Backup deleted", deleteFailed: "Backup deletion failed", statusFailed: "Status check failed", checksumCopied: "Checksum copied", checksumCopyFailed: "Unable to copy checksum",
+    loadError: "Unable to load backups", downloadBackup: "Download backup", downloading: "Downloading...", downloadFailed: "Unable to download backup", operationUnavailable: "Operation status is unavailable. Retry the status check before starting another backup action.", terminal: (status: string) => `Backup operation status: ${status}`, operationName: { backup: "Create backup", restore: "Restore backup", "backup-delete": "Delete backup" }, operationStatus: { queued: "Queued", leased: "Claimed", running: "Running", succeeded: "Succeeded", failed: "Failed" }, acceptedCreate: "Backup operation accepted", created: "Backup created", requestFailed: "Backup request failed", acceptedRestore: "Restore operation accepted", restored: "Backup restored", restoreFailed: "Restore request failed", acceptedDelete: "Backup deletion accepted", deleted: "Backup deleted", deleteFailed: "Backup deletion failed", statusFailed: "Status check failed", checksumCopied: "Checksum copied", checksumCopyFailed: "Unable to copy checksum",
     acceptedCleanup: "Failed backup cleanup accepted", cleaned: "Failed backup cleaned up", cleanupFailed: "Failed backup cleanup failed",
     eyebrow: "RECOVERY POINTS", title: "Backups", count: (count: number) => `${count} ${count === 1 ? "snapshot" : "snapshots"} recorded for this server.`, stopBeforeRestore: "Stop the server before restoring a recovery point.", attempt: "attempt", retryStatus: "Retry status", transitionRunning: "An existing backup transition is still running.", creating: (progress: number) => `Creating · ${progress}%`, createBackup: "Create backup",
     checksumPending: "Checksum pending", copyChecksum: (name: string) => `Copy checksum for ${name}`, status: { creating: "Creating", ready: "Ready", failed: "Failed", restoring: "Restoring", deleting: "Deleting" }, pending: "Pending", restoreAria: (name: string) => `Restore ${name}`, deleteAria: (name: string) => `Delete ${name}`, stopServer: "Stop the server first", restoreBackup: "Restore backup", deleteBackup: "Delete backup",
@@ -258,7 +258,7 @@ const backupsCopy = defineCopy({
     cleanupAria: (name: string) => `Clean up failed backup ${name}`, cleanupFailedBackup: "Clean up failed backup", cleanupTitle: "Clean up this failed backup?", cleanupDescription: "This removes any leftover archive and the failed recovery-point record.", cleanup: "Clean up",
   },
   ja: {
-    loadError: "バックアップを読み込めません", downloadBackup: "バックアップをダウンロード", downloading: "ダウンロード中…", downloadFailed: "バックアップをダウンロードできません", operationUnavailable: "操作状態を確認できません。別のバックアップ操作を始める前に、状態確認を再試行してください。", terminal: (status: string) => `バックアップ操作の状態：${status}`, operationName: { backup: "バックアップを作成", restore: "バックアップを復元", "backup-delete": "バックアップを削除" }, operationStatus: { queued: "待機中", leased: "取得済み", dispatched: "送信済み", running: "実行中", succeeded: "成功", failed: "失敗", canceled: "キャンセル済み" }, acceptedCreate: "バックアップ操作を受け付けました", created: "バックアップを作成しました", requestFailed: "バックアップ要求に失敗しました", acceptedRestore: "復元操作を受け付けました", restored: "バックアップを復元しました", restoreFailed: "復元要求に失敗しました", acceptedDelete: "バックアップ削除を受け付けました", deleted: "バックアップを削除しました", deleteFailed: "バックアップを削除できません", statusFailed: "状態を確認できません", checksumCopied: "チェックサムをコピーしました", checksumCopyFailed: "チェックサムをコピーできません",
+    loadError: "バックアップを読み込めません", downloadBackup: "バックアップをダウンロード", downloading: "ダウンロード中…", downloadFailed: "バックアップをダウンロードできません", operationUnavailable: "操作状態を確認できません。別のバックアップ操作を始める前に、状態確認を再試行してください。", terminal: (status: string) => `バックアップ操作の状態：${status}`, operationName: { backup: "バックアップを作成", restore: "バックアップを復元", "backup-delete": "バックアップを削除" }, operationStatus: { queued: "待機中", leased: "取得済み", running: "実行中", succeeded: "成功", failed: "失敗" }, acceptedCreate: "バックアップ操作を受け付けました", created: "バックアップを作成しました", requestFailed: "バックアップ要求に失敗しました", acceptedRestore: "復元操作を受け付けました", restored: "バックアップを復元しました", restoreFailed: "復元要求に失敗しました", acceptedDelete: "バックアップ削除を受け付けました", deleted: "バックアップを削除しました", deleteFailed: "バックアップを削除できません", statusFailed: "状態を確認できません", checksumCopied: "チェックサムをコピーしました", checksumCopyFailed: "チェックサムをコピーできません",
     acceptedCleanup: "失敗したバックアップのクリーンアップを受け付けました", cleaned: "失敗したバックアップをクリーンアップしました", cleanupFailed: "失敗したバックアップをクリーンアップできません",
     eyebrow: "復元ポイント", title: "バックアップ", count: (count: number) => `このサーバーには ${count} 件のスナップショットがあります。`, stopBeforeRestore: "復元する前にサーバーを停止してください。", attempt: "試行", retryStatus: "状態を再確認", transitionRunning: "既存のバックアップ処理がまだ実行中です。", creating: (progress: number) => `作成中 · ${progress}%`, createBackup: "バックアップを作成",
     checksumPending: "チェックサム待機中", copyChecksum: (name: string) => `${name} のチェックサムをコピー`, status: { creating: "作成中", ready: "準備完了", failed: "失敗", restoring: "復元中", deleting: "削除中" }, pending: "処理待ち", restoreAria: (name: string) => `${name} を復元`, deleteAria: (name: string) => `${name} を削除`, stopServer: "先にサーバーを停止", restoreBackup: "バックアップを復元", deleteBackup: "バックアップを削除",
@@ -266,7 +266,7 @@ const backupsCopy = defineCopy({
     cleanupAria: (name: string) => `${name} の失敗したバックアップをクリーンアップ`, cleanupFailedBackup: "失敗したバックアップをクリーンアップ", cleanupTitle: "この失敗したバックアップをクリーンアップしますか？", cleanupDescription: "残っている可能性のあるアーカイブと、失敗した復元ポイントの記録を削除します。", cleanup: "クリーンアップ",
   },
   ko: {
-    loadError: "백업을 불러올 수 없습니다", downloadBackup: "백업 다운로드", downloading: "다운로드 중…", downloadFailed: "백업을 다운로드할 수 없습니다", operationUnavailable: "작업 상태를 확인할 수 없습니다. 다른 백업 작업을 시작하기 전에 상태 확인을 다시 시도하세요.", terminal: (status: string) => `백업 작업 상태: ${status}`, operationName: { backup: "백업 만들기", restore: "백업 복원", "backup-delete": "백업 삭제" }, operationStatus: { queued: "대기 중", leased: "할당됨", dispatched: "전송됨", running: "실행 중", succeeded: "성공", failed: "실패", canceled: "취소됨" }, acceptedCreate: "백업 작업이 접수되었습니다", created: "백업을 만들었습니다", requestFailed: "백업 요청에 실패했습니다", acceptedRestore: "복원 작업이 접수되었습니다", restored: "백업을 복원했습니다", restoreFailed: "복원 요청에 실패했습니다", acceptedDelete: "백업 삭제가 접수되었습니다", deleted: "백업을 삭제했습니다", deleteFailed: "백업을 삭제할 수 없습니다", statusFailed: "상태를 확인할 수 없습니다", checksumCopied: "체크섬을 복사했습니다", checksumCopyFailed: "체크섬을 복사할 수 없습니다",
+    loadError: "백업을 불러올 수 없습니다", downloadBackup: "백업 다운로드", downloading: "다운로드 중…", downloadFailed: "백업을 다운로드할 수 없습니다", operationUnavailable: "작업 상태를 확인할 수 없습니다. 다른 백업 작업을 시작하기 전에 상태 확인을 다시 시도하세요.", terminal: (status: string) => `백업 작업 상태: ${status}`, operationName: { backup: "백업 만들기", restore: "백업 복원", "backup-delete": "백업 삭제" }, operationStatus: { queued: "대기 중", leased: "할당됨", running: "실행 중", succeeded: "성공", failed: "실패" }, acceptedCreate: "백업 작업이 접수되었습니다", created: "백업을 만들었습니다", requestFailed: "백업 요청에 실패했습니다", acceptedRestore: "복원 작업이 접수되었습니다", restored: "백업을 복원했습니다", restoreFailed: "복원 요청에 실패했습니다", acceptedDelete: "백업 삭제가 접수되었습니다", deleted: "백업을 삭제했습니다", deleteFailed: "백업을 삭제할 수 없습니다", statusFailed: "상태를 확인할 수 없습니다", checksumCopied: "체크섬을 복사했습니다", checksumCopyFailed: "체크섬을 복사할 수 없습니다",
     acceptedCleanup: "실패한 백업 정리 작업이 접수되었습니다", cleaned: "실패한 백업을 정리했습니다", cleanupFailed: "실패한 백업을 정리할 수 없습니다",
     eyebrow: "복원 지점", title: "백업", count: (count: number) => `이 서버에 ${count}개의 스냅샷이 기록되어 있습니다.`, stopBeforeRestore: "복원하기 전에 서버를 중지하세요.", attempt: "시도", retryStatus: "상태 다시 확인", transitionRunning: "기존 백업 전환 작업이 아직 실행 중입니다.", creating: (progress: number) => `생성 중 · ${progress}%`, createBackup: "백업 만들기",
     checksumPending: "체크섬 대기 중", copyChecksum: (name: string) => `${name} 체크섬 복사`, status: { creating: "생성 중", ready: "준비됨", failed: "실패", restoring: "복원 중", deleting: "삭제 중" }, pending: "대기 중", restoreAria: (name: string) => `${name} 복원`, deleteAria: (name: string) => `${name} 삭제`, stopServer: "먼저 서버 중지", restoreBackup: "백업 복원", deleteBackup: "백업 삭제",
@@ -315,16 +315,16 @@ const startupCopy = defineCopy({
 
 const activityCopy = defineCopy({
   "zh-CN": {
-    loadError: "无法加载服务器任务。", eyebrow: "服务器记录", title: "任务记录", refresh: "刷新任务记录", loading: "正在加载任务记录", retry: "重试", emptyTitle: "这台服务器还没有任务记录。", emptyDetail: "启停、备份和配置同步等任务会显示在这里。", status: { queued: "等待中", leased: "已领取", dispatched: "已下发", running: "执行中", succeeded: "已完成", failed: "失败", canceled: "已取消" }, operationType: { provision: "创建服务器", start: "启动服务器", stop: "停止服务器", restart: "重启服务器", kill: "强制终止服务器", backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份", delete: "删除服务器", reconcile: "同步服务器状态" },
+    loadError: "无法加载服务器任务。", eyebrow: "服务器记录", title: "任务记录", refresh: "刷新任务记录", loading: "正在加载任务记录", retry: "重试", emptyTitle: "这台服务器还没有任务记录。", emptyDetail: "启停、备份和配置同步等任务会显示在这里。", status: { queued: "等待中", leased: "已领取", running: "执行中", succeeded: "已完成", failed: "失败" }, operationType: { provision: "创建服务器", start: "启动服务器", stop: "停止服务器", restart: "重启服务器", kill: "强制终止服务器", backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份", delete: "删除服务器", reconcile: "同步服务器状态" },
   },
   en: {
-    loadError: "Unable to load server tasks.", eyebrow: "SERVER HISTORY", title: "Task history", refresh: "Refresh task history", loading: "Loading task history", retry: "Retry", emptyTitle: "No task history yet.", emptyDetail: "Power, backup, and configuration sync tasks will appear here.", status: { queued: "Queued", leased: "Claimed", dispatched: "Dispatched", running: "Running", succeeded: "Succeeded", failed: "Failed", canceled: "Canceled" }, operationType: { provision: "Create server", start: "Start server", stop: "Stop server", restart: "Restart server", kill: "Force terminate server", backup: "Create backup", restore: "Restore backup", "backup-delete": "Delete backup", delete: "Delete server", reconcile: "Sync server state" },
+    loadError: "Unable to load server tasks.", eyebrow: "SERVER HISTORY", title: "Task history", refresh: "Refresh task history", loading: "Loading task history", retry: "Retry", emptyTitle: "No task history yet.", emptyDetail: "Power, backup, and configuration sync tasks will appear here.", status: { queued: "Queued", leased: "Claimed", running: "Running", succeeded: "Succeeded", failed: "Failed" }, operationType: { provision: "Create server", start: "Start server", stop: "Stop server", restart: "Restart server", kill: "Force terminate server", backup: "Create backup", restore: "Restore backup", "backup-delete": "Delete backup", delete: "Delete server", reconcile: "Sync server state" },
   },
   ja: {
-    loadError: "サーバーのタスク履歴を読み込めません。", eyebrow: "サーバー履歴", title: "タスク履歴", refresh: "タスク履歴を更新", loading: "タスク履歴を読み込み中", retry: "再試行", emptyTitle: "タスク履歴はまだありません。", emptyDetail: "電源操作、バックアップ、設定同期のタスクがここに表示されます。", status: { queued: "待機中", leased: "取得済み", dispatched: "送信済み", running: "実行中", succeeded: "成功", failed: "失敗", canceled: "キャンセル済み" }, operationType: { provision: "サーバーを作成", start: "サーバーを起動", stop: "サーバーを停止", restart: "サーバーを再起動", kill: "サーバーを強制終了", backup: "バックアップを作成", restore: "バックアップを復元", "backup-delete": "バックアップを削除", delete: "サーバーを削除", reconcile: "サーバー状態を同期" },
+    loadError: "サーバーのタスク履歴を読み込めません。", eyebrow: "サーバー履歴", title: "タスク履歴", refresh: "タスク履歴を更新", loading: "タスク履歴を読み込み中", retry: "再試行", emptyTitle: "タスク履歴はまだありません。", emptyDetail: "電源操作、バックアップ、設定同期のタスクがここに表示されます。", status: { queued: "待機中", leased: "取得済み", running: "実行中", succeeded: "成功", failed: "失敗" }, operationType: { provision: "サーバーを作成", start: "サーバーを起動", stop: "サーバーを停止", restart: "サーバーを再起動", kill: "サーバーを強制終了", backup: "バックアップを作成", restore: "バックアップを復元", "backup-delete": "バックアップを削除", delete: "サーバーを削除", reconcile: "サーバー状態を同期" },
   },
   ko: {
-    loadError: "서버 작업 기록을 불러올 수 없습니다.", eyebrow: "서버 기록", title: "작업 기록", refresh: "작업 기록 새로 고침", loading: "작업 기록을 불러오는 중", retry: "다시 시도", emptyTitle: "아직 작업 기록이 없습니다.", emptyDetail: "전원, 백업, 설정 동기화 작업이 여기에 표시됩니다.", status: { queued: "대기 중", leased: "할당됨", dispatched: "전송됨", running: "실행 중", succeeded: "성공", failed: "실패", canceled: "취소됨" }, operationType: { provision: "서버 생성", start: "서버 시작", stop: "서버 중지", restart: "서버 재시작", kill: "서버 강제 종료", backup: "백업 생성", restore: "백업 복원", "backup-delete": "백업 삭제", delete: "서버 삭제", reconcile: "서버 상태 동기화" },
+    loadError: "서버 작업 기록을 불러올 수 없습니다.", eyebrow: "서버 기록", title: "작업 기록", refresh: "작업 기록 새로 고침", loading: "작업 기록을 불러오는 중", retry: "다시 시도", emptyTitle: "아직 작업 기록이 없습니다.", emptyDetail: "전원, 백업, 설정 동기화 작업이 여기에 표시됩니다.", status: { queued: "대기 중", leased: "할당됨", running: "실행 중", succeeded: "성공", failed: "실패" }, operationType: { provision: "서버 생성", start: "서버 시작", stop: "서버 중지", restart: "서버 재시작", kill: "서버 강제 종료", backup: "백업 생성", restore: "백업 복원", "backup-delete": "백업 삭제", delete: "서버 삭제", reconcile: "서버 상태 동기화" },
   },
 });
 
@@ -1322,7 +1322,6 @@ function ActivityTab({ server }: { server: Server }) {
 function activityTone(status: Operation["status"]): "accepted" | "success" | "failure" | "neutral" {
   if (status === "succeeded") return "success";
   if (status === "failed") return "failure";
-  if (status === "canceled") return "neutral";
   return "accepted";
 }
 

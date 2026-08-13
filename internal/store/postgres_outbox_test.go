@@ -76,11 +76,17 @@ func TestPostgresOutboxTaskLifecycle(t *testing.T) {
 	}
 
 	// 完成任务产生一条 task.completed（终态与事件同事务）。
-	if _, err := s.ClaimTask(context.Background(), nodeID); err != nil {
+	claimed, err := s.ClaimTask(context.Background(), nodeID, 1)
+	if err != nil || claimed == nil {
 		t.Fatalf("claim task: %v", err)
 	}
 	failureCode := "TEST_ERROR"
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, false, &failureCode, nil); err != nil {
+	fence := TaskLeaseFence{
+		OperationID: claimed.OperationID, NodeID: nodeID,
+		Epoch: claimed.ConnectionEpoch, Attempt: claimed.Attempt,
+		LeaseToken: claimed.LeaseToken,
+	}
+	if err := s.CompleteTask(context.Background(), fence, false, &failureCode, nil); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 	if got := countOutboxEvents(t, s, "task.completed", false); got != 1 {
@@ -134,7 +140,7 @@ func TestPostgresReconcileTaskLeasesRequeues(t *testing.T) {
 	}
 
 	// 领取后任务进入 leased；模拟 Agent 失联（租约已过期）。
-	claimed, err := s.ClaimTask(context.Background(), nodeID)
+	claimed, err := s.ClaimTask(context.Background(), nodeID, 1)
 	if err != nil || claimed == nil {
 		t.Fatalf("claim task: %v", err)
 	}
@@ -152,7 +158,7 @@ func TestPostgresReconcileTaskLeasesRequeues(t *testing.T) {
 	}
 
 	// 重新入队后仍可领取，attempt 累加到 2。
-	again, err := s.ClaimTask(context.Background(), nodeID)
+	again, err := s.ClaimTask(context.Background(), nodeID, 1)
 	if err != nil || again == nil {
 		t.Fatalf("claim task after reconcile: %v", err)
 	}
@@ -190,7 +196,7 @@ func TestPostgresReconcileTaskLeasesFailsAfterMaxAttempts(t *testing.T) {
 
 	// 反复领取并让租约过期，直到 attempt 达到 max_attempts（3）。
 	for attempt := 1; attempt <= 3; attempt++ {
-		claimed, err := s.ClaimTask(context.Background(), nodeID)
+		claimed, err := s.ClaimTask(context.Background(), nodeID, 1)
 		if err != nil || claimed == nil {
 			t.Fatalf("claim %d: %v", attempt, err)
 		}
@@ -228,7 +234,7 @@ func TestPostgresReconcileTaskLeasesFailsAfterMaxAttempts(t *testing.T) {
 	}
 
 	// 判失败后不会再被领取。
-	if again, err := s.ClaimTask(context.Background(), nodeID); err != nil || again != nil {
+	if again, err := s.ClaimTask(context.Background(), nodeID, 1); err != nil || again != nil {
 		t.Fatalf("expected no claimable task, got %+v (%v)", again, err)
 	}
 }
@@ -267,7 +273,7 @@ func TestPostgresClaimTaskRespectsMaxAttempts(t *testing.T) {
 		t.Fatalf("bump attempt: %v", err)
 	}
 
-	if again, err := s.ClaimTask(context.Background(), nodeID); err != nil || again != nil {
+	if again, err := s.ClaimTask(context.Background(), nodeID, 1); err != nil || again != nil {
 		t.Fatalf("expected no claimable task at attempt cap, got %+v (%v)", again, err)
 	}
 }

@@ -3263,7 +3263,6 @@ body * {
 
 .operation-running::before,
 .operation-leased::before,
-.operation-dispatched::before,
 .operation-queued::before {
   background: var(--swatch-kraft);
 }

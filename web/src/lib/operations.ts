@@ -10,7 +10,7 @@ interface PollOperationOptions {
   maxConsecutiveFailures?: number;
 }
 
-const terminalStatuses = new Set<Operation["status"]>(["succeeded", "failed", "canceled"]);
+const terminalStatuses = new Set<Operation["status"]>(["succeeded", "failed"]);
 
 const operationTypeLabels: LocalizedCopy<Record<Operation["type"], string>> = {
   "zh-CN": { provision: "创建服务器", start: "启动服务器", stop: "停止服务器", restart: "重启服务器", kill: "强制终止服务器", backup: "创建备份", restore: "恢复备份", "backup-delete": "删除备份", delete: "删除服务器", reconcile: "同步服务器状态" },

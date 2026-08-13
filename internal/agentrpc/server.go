@@ -43,13 +43,18 @@ const (
 	maxAgentMessageBytes = 512 << 20
 )
 
-// TaskStore 是 gRPC server 依赖的 Store 最小接口。
+// TaskStore 是 gRPC server 依赖的 Store 最小接口。任务消息必须携带
+// TaskLeaseFence（operation、node、connection epoch、attempt、lease token）；
+// 栅栏不匹配或任务已终态时，Ack/Progress/Renew/Complete 都只成为 no-op。
 type TaskStore interface {
 	RegisterNode(ctx context.Context, node domain.Node) (string, error)
 	NodeByID(ctx context.Context, nodeID string) (domain.Node, error)
 	EnqueueTask(ctx context.Context, serverID, nodeID, taskType string, generation int64, actorID string, idemKey string, requestDigest []byte) (string, error)
-	ClaimTask(ctx context.Context, nodeID string) (*store.ClaimedTask, error)
-	CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error
+	ClaimTask(ctx context.Context, nodeID string, connectionEpoch int64) (*store.ClaimedTask, error)
+	AckTask(ctx context.Context, fence store.TaskLeaseFence, accepted bool, errCode string) error
+	ReportTaskProgress(ctx context.Context, fence store.TaskLeaseFence, percent int, checkpoint string) error
+	RenewTaskLease(ctx context.Context, fence store.TaskLeaseFence) error
+	CompleteTask(ctx context.Context, fence store.TaskLeaseFence, succeeded bool, errCode *string, resultJSON []byte) error
 	RecordAgentHeartbeat(ctx context.Context, nodeID string, hb domain.Heartbeat) error
 	ApplyServerObserved(ctx context.Context, obs domain.ServerObserved) error
 	RecordAudit(ctx context.Context, event domain.AuditEvent) error
@@ -221,22 +226,38 @@ type Server struct {
 
 	streamMu sync.Mutex
 	streams  map[string]*nodeStream
+
+	// connectionEpochs 为每个节点维护单调递增的连接序号。每次 Connect 会话
+	// 领取一个新 epoch；claim 的任务绑定该 epoch，Ack/Progress/Heartbeat/
+	// Result 必须原样回显，旧连接的迟到消息因此无法影响新连接的任务。
+	epochMu          sync.Mutex
+	connectionEpochs map[string]int64
 }
 
 // NewServer 构造 Agent gRPC 服务器。
 func NewServer(ca *agentca.CA, store TaskStore, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{
-		ca:             ca,
-		store:          store,
-		log:            logger,
-		claimPeriod:    defaultClaimPeriod,
-		consoleTimeout: consoleCommandTimeout,
-		streams:        make(map[string]*nodeStream),
+		ca:               ca,
+		store:            store,
+		log:              logger,
+		claimPeriod:      defaultClaimPeriod,
+		consoleTimeout:   consoleCommandTimeout,
+		streams:          make(map[string]*nodeStream),
+		connectionEpochs: make(map[string]int64),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// nextConnectionEpoch 为节点的新连接分配严格递增的 epoch（首个为 1）。
+// 任务 fence 中 epoch=0 永远匹配不到新行，因此旧协议消息只能走 legacy 校验。
+func (s *Server) nextConnectionEpoch(nodeID string) int64 {
+	s.epochMu.Lock()
+	defer s.epochMu.Unlock()
+	s.connectionEpochs[nodeID]++
+	return s.connectionEpochs[nodeID]
 }
 
 // withConsoleCommandTimeout shortens the hard command deadline in tests. The

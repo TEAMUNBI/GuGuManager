@@ -169,7 +169,7 @@ export interface Operation {
   serverId: string;
   nodeId: string;
   type: "provision" | "start" | "stop" | "restart" | "kill" | "backup" | "restore" | "backup-delete" | "delete" | "reconcile";
-  status: "queued" | "leased" | "dispatched" | "running" | "succeeded" | "failed" | "canceled";
+  status: "queued" | "leased" | "running" | "succeeded" | "failed";
   progress: number;
   generation: number;
   attempt: number;

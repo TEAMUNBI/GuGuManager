@@ -794,7 +794,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .operation-row::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: #4a545d; opacity: .72; }
 .operation-row:last-child { border-bottom: 0; }
 .operation-row:hover { background: #1a2025; }
-.operation-running::before, .operation-leased::before, .operation-dispatched::before, .operation-queued::before { background: var(--warning); }
+.operation-running::before, .operation-leased::before, .operation-queued::before { background: var(--warning); }
 .operation-succeeded::before { background: var(--mint); }
 .operation-failed::before { background: var(--danger); }
 .operation-kind { min-width: 0; display: flex; align-items: center; gap: 11px; }
@@ -810,7 +810,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .operation-progress i { display: block; height: 100%; background: var(--warning); transition: width .2s ease; }
 .operation-succeeded .operation-progress i { background: var(--mint); }
 .operation-failed .operation-progress i { background: var(--danger); }
-.operation-canceled .operation-progress i { background: var(--muted); }
 .operation-state > small { min-width: 0; overflow: hidden; color: var(--dim); font-family: "Cascadia Code", monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .operation-execution { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .operation-execution > span { min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }

@@ -332,7 +332,7 @@ func (m *Memory) Overview() domain.Overview {
 		}
 	}
 	for _, operation := range m.operations {
-		if operation.Status != "succeeded" && operation.Status != "failed" && operation.Status != "canceled" {
+		if operation.Status != "succeeded" && operation.Status != "failed" {
 			result.QueuedOperationCount++
 		}
 	}

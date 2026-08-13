@@ -548,12 +548,14 @@ func TestAgentExecutesPowerTask(t *testing.T) {
 	cp := &fakeControlPlane{ca: ca}
 	cp.onConnect = func(stream agentv1.AgentGatewayService_ConnectServer) error {
 		return stream.Send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Task{Task: &agentv1.Task{
-			OperationId: "op-1",
-			ServerId:    "server-1",
-			Generation:  1,
-			Type:        "power",
-			Attempt:     1,
-			Payload:     &agentv1.Task_Power{Power: &agentv1.PowerTaskPayload{Action: agentv1.PowerAction_POWER_ACTION_START}},
+			OperationId:     "op-1",
+			ServerId:        "server-1",
+			Generation:      1,
+			Type:            "power",
+			Attempt:         1,
+			LeaseToken:      "lease-op-1",
+			ConnectionEpoch: 4,
+			Payload:         &agentv1.Task_Power{Power: &agentv1.PowerTaskPayload{Action: agentv1.PowerAction_POWER_ACTION_START}},
 		}}})
 	}
 	dialer, serverName := startFakeServer(t, cp)
@@ -592,6 +594,10 @@ func TestAgentExecutesPowerTask(t *testing.T) {
 	if ack.GetOperationId() != "op-1" || !ack.GetAccepted() {
 		t.Errorf("task ack wrong: %+v", ack)
 	}
+	// 000009 栅栏：Agent 必须在 Ack/Result 中原样回显租约凭据与连接 epoch。
+	if ack.GetLeaseToken() != "lease-op-1" || ack.GetConnectionEpoch() != 4 {
+		t.Errorf("task ack did not echo the lease fence: %+v", ack)
+	}
 
 	waitFor(t, "task result", 10*time.Second, func() bool { return cp.taskResultCount() == 1 })
 	result := cp.lastResult()
@@ -600,6 +606,9 @@ func TestAgentExecutesPowerTask(t *testing.T) {
 	}
 	if result.GetAttempt() != 1 {
 		t.Errorf("task result attempt = %d, want 1", result.GetAttempt())
+	}
+	if result.GetLeaseToken() != "lease-op-1" || result.GetConnectionEpoch() != 4 {
+		t.Errorf("task result did not echo the lease fence: %+v", result)
 	}
 
 	cancel()

@@ -261,7 +261,7 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 		t.Fatalf("create server: %v", err)
 	}
 
-	claimed, err := s.ClaimTask(context.Background(), nodeID)
+	claimed, err := s.ClaimTask(context.Background(), nodeID, 1)
 	if err != nil {
 		t.Fatalf("claim task: %v", err)
 	}
@@ -272,11 +272,16 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 		claimed.Generation != 1 || claimed.Attempt < 1 {
 		t.Fatalf("claimed task mismatch: %+v (operation %s)", claimed, op.ID)
 	}
-	// The provision payload must be materialized at CreateServer time and
-	// carried to the agent via PayloadJSON; an empty payload fails every
-	// provision on the agent with PROVISION_FAILED.
-	if len(claimed.PayloadJSON) == 0 {
-		t.Fatal("claimed provision task carries no payload")
+	// 000009 起 provision 输入与 checkpoint 分离：新任务输入必须位于
+	// task_input，legacy 的 checkpoint 载体不得再被新任务使用。
+	if len(claimed.TaskInputJSON) == 0 {
+		t.Fatal("claimed provision task carries no task input")
+	}
+	if len(claimed.PayloadJSON) != 0 {
+		t.Fatalf("claimed provision task must not use the legacy checkpoint payload: %q", claimed.PayloadJSON)
+	}
+	if claimed.LeaseToken == "" || claimed.ConnectionEpoch != 1 || claimed.StateVersion < 1 {
+		t.Fatalf("claimed task fence fields wrong: %+v", claimed)
 	}
 	var payload struct {
 		GameDefinitionID string `json:"gameDefinitionId"`
@@ -286,7 +291,7 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 			ContainerPort uint32 `json:"containerPort"`
 		} `json:"allocations"`
 	}
-	if err := json.Unmarshal(claimed.PayloadJSON, &payload); err != nil {
+	if err := json.Unmarshal(claimed.TaskInputJSON, &payload); err != nil {
 		t.Fatalf("decode provision payload: %v", err)
 	}
 	if payload.GameDefinitionID != "pg-task-game" || len(payload.Allocations) != 1 ||
@@ -294,7 +299,12 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 		t.Fatalf("provision payload mismatch: %s", claimed.PayloadJSON)
 	}
 
-	if err := s.CompleteTask(context.Background(), claimed.OperationID, nodeID, true, nil, nil); err != nil {
+	fence := TaskLeaseFence{
+		OperationID: claimed.OperationID, NodeID: nodeID,
+		Epoch: claimed.ConnectionEpoch, Attempt: claimed.Attempt,
+		LeaseToken: claimed.LeaseToken,
+	}
+	if err := s.CompleteTask(context.Background(), fence, true, nil, nil); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 
@@ -307,7 +317,7 @@ func TestPostgresTaskClaimComplete(t *testing.T) {
 		t.Fatalf("server lifecycle after provision = %q, want ready", after.LifecycleState)
 	}
 
-	again, err := s.ClaimTask(context.Background(), nodeID)
+	again, err := s.ClaimTask(context.Background(), nodeID, 1)
 	if err != nil {
 		t.Fatalf("claim task after completion: %v", err)
 	}

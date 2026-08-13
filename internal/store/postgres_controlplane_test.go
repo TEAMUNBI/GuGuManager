@@ -200,7 +200,7 @@ func controlPlaneFixture(t *testing.T, s *Postgres) (domain.User, string, string
 	}
 	// Simulate the agent completing the provision task so later operations are
 	// not blocked by the exclusive provision task (mirrors Memory semantics).
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete provision: %v", err)
 	}
 	if _, err := s.db.Exec(`UPDATE servers SET lifecycle_state = 'ready' WHERE id = $1`, op.ServerID); err != nil {
@@ -347,7 +347,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("create allocation operation = %+v, want reconcile/generation %d", op, generation+1)
 	}
 	generation = op.Generation
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete reconcile task: %v", err)
 	}
 
@@ -387,7 +387,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("set primary generation = %d, want %d", setOp.Generation, generation+1)
 	}
 	generation = setOp.Generation
-	if err := s.CompleteTask(context.Background(), setOp.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, setOp.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete primary reconcile task: %v", err)
 	}
 	allocs, _ = s.Allocations(serverID)
@@ -411,7 +411,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("delete allocation generation = %d, want %d", delOp.Generation, generation+1)
 	}
 	generation = delOp.Generation
-	if err := s.CompleteTask(context.Background(), delOp.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, delOp.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete delete reconcile task: %v", err)
 	}
 	allocs, _ = s.Allocations(serverID)
@@ -448,7 +448,7 @@ func TestPostgresControlPlaneAllocationsAndStartup(t *testing.T) {
 		t.Fatalf("update startup generation = %d, want %d", updOp.Generation, generation+1)
 	}
 	generation = updOp.Generation
-	if err := s.CompleteTask(context.Background(), updOp.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, updOp.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete startup reconcile task: %v", err)
 	}
 	startup, err = s.Startup(serverID)
@@ -686,7 +686,7 @@ func TestPostgresControlPlaneBackupsConsoleHeartbeat(t *testing.T) {
 	}
 
 	// Simulate a valid Agent result so the state machine advances creating -> ready.
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, []byte("control-plane-backup"))); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, []byte("control-plane-backup"))); err != nil {
 		t.Fatalf("complete backup task: %v", err)
 	}
 	backups, _ = s.Backups(serverID)
@@ -733,7 +733,7 @@ func TestPostgresControlPlaneBackupsConsoleHeartbeat(t *testing.T) {
 	}
 }
 
-func TestCreateBackupWritesCheckpointPayload(t *testing.T) {
+func TestCreateBackupWritesTaskInputPayload(t *testing.T) {
 	s := testPostgres(t)
 	admin, _, serverID := controlPlaneFixture(t, s)
 
@@ -741,22 +741,28 @@ func TestCreateBackupWritesCheckpointPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create backup: %v", err)
 	}
-	var checkpoint string
-	if err := s.db.QueryRow(`SELECT COALESCE(checkpoint::text, '') FROM server_tasks WHERE id = $1`, op.ID).Scan(&checkpoint); err != nil {
-		t.Fatalf("query checkpoint: %v", err)
+	// 000009 起备份任务输入写入 task_input，checkpoint 在 claim 前必须为空。
+	var taskInput, checkpoint string
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(task_input::text, ''), COALESCE(checkpoint::text, '')
+		FROM server_tasks WHERE id = $1`, op.ID).Scan(&taskInput, &checkpoint); err != nil {
+		t.Fatalf("query task input: %v", err)
 	}
-	if checkpoint == "" {
-		t.Fatal("expected non-empty checkpoint for backup task")
+	if taskInput == "" {
+		t.Fatal("expected non-empty task_input for backup task")
+	}
+	if checkpoint != "" {
+		t.Fatalf("backup task must not carry payload in checkpoint: %q", checkpoint)
 	}
 	var payload struct {
 		BackupID         string `json:"backupId"`
 		StorageObjectKey string `json:"storageObjectKey"`
 	}
-	if err := json.Unmarshal([]byte(checkpoint), &payload); err != nil {
-		t.Fatalf("decode checkpoint: %v", err)
+	if err := json.Unmarshal([]byte(taskInput), &payload); err != nil {
+		t.Fatalf("decode task input: %v", err)
 	}
 	if payload.BackupID == "" {
-		t.Error("expected backupId in checkpoint")
+		t.Error("expected backupId in task input")
 	}
 	if want := "backups/" + payload.BackupID + ".tar.gz"; payload.StorageObjectKey != want {
 		t.Errorf("storageObjectKey = %q, want %q", payload.StorageObjectKey, want)
@@ -780,7 +786,7 @@ func TestCompleteBackupTaskMarksBackupReady(t *testing.T) {
 	}
 	backupID := backups[0].ID
 	result := []byte(`{"backupId":"` + backupID + `","checksum":"sha256:` + strings.Repeat("ab", 32) + `","manifestDigest":"sha256:` + strings.Repeat("cd", 32) + `","sizeBytes":42,"storageLocation":"backups/` + backupID + `.tar.gz"}`)
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, result); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, true, nil, result); err != nil {
 		t.Fatalf("complete backup task: %v", err)
 	}
 
@@ -822,7 +828,7 @@ func TestInvalidBackupResultPersistsIntegrityFailureMetadata(t *testing.T) {
 	}
 	backupID := backups[0].ID
 	malformed := []byte(`{"backupId":"` + backupID + `","checksum":"sha256:` + strings.Repeat("ab", 32) + `","sizeBytes":42,"storageLocation":"backups/` + backupID + `.tar.gz"}`)
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, malformed); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, true, nil, malformed); err != nil {
 		t.Fatalf("complete malformed backup task: %v", err)
 	}
 	backups, err = s.Backups(serverID)
@@ -856,7 +862,18 @@ func TestCompleteBackupTaskRejectsUnexpectedBackupState(t *testing.T) {
 		t.Fatalf("inject backup state conflict: %v", err)
 	}
 
-	err = s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, []byte("archive")))
+	// 新状态机先 claim 再完成：状态冲突返回结构化错误并整体回滚，
+	// 任务保持 claim 后的 leased（租约过期后由对账器重新入队）。
+	claimed, err := s.ClaimTask(context.Background(), nodeID, 1)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim backup task: %v", err)
+	}
+	fence := TaskLeaseFence{
+		OperationID: claimed.OperationID, NodeID: nodeID,
+		Epoch: claimed.ConnectionEpoch, Attempt: claimed.Attempt,
+		LeaseToken: claimed.LeaseToken,
+	}
+	err = s.CompleteTask(context.Background(), fence, true, nil, postgresBackupResult(t, backupID, []byte("archive")))
 	requireProblemCode(t, err, "BACKUP_STATE_CONFLICT")
 	var backupStatus, taskStatus string
 	if err := s.db.QueryRow(`SELECT status FROM backups WHERE id = $1`, backupID).Scan(&backupStatus); err != nil {
@@ -865,7 +882,7 @@ func TestCompleteBackupTaskRejectsUnexpectedBackupState(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT status FROM server_tasks WHERE id = $1`, op.ID).Scan(&taskStatus); err != nil {
 		t.Fatalf("query task status: %v", err)
 	}
-	if backupStatus != "failed" || taskStatus != "queued" {
+	if backupStatus != "failed" || taskStatus != "leased" {
 		t.Fatalf("state conflict committed partial writes: backup=%q task=%q", backupStatus, taskStatus)
 	}
 }
@@ -886,7 +903,7 @@ func TestPostgresRestoreCompletionConvergesObservedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore backup: %v", err)
 	}
-	if err := s.CompleteTask(context.Background(), restore.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, restore.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete restore: %v", err)
 	}
 
@@ -913,7 +930,7 @@ func TestPostgresFailedBackupCanBeDeleted(t *testing.T) {
 	backups, _ := s.Backups(serverID)
 	backupID := backups[0].ID
 	failureCode := "BACKUP_FAILED"
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, false, &failureCode, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, false, &failureCode, nil); err != nil {
 		t.Fatalf("fail backup: %v", err)
 	}
 
@@ -921,7 +938,7 @@ func TestPostgresFailedBackupCanBeDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete failed backup: %v", err)
 	}
-	if err := s.CompleteTask(context.Background(), deleteOperation.ID, nodeID, true, nil, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, deleteOperation.ID, nodeID, true, nil, nil); err != nil {
 		t.Fatalf("complete failed-backup deletion: %v", err)
 	}
 	backups, err = s.Backups(serverID)
@@ -940,7 +957,7 @@ func TestPostgresFailedBackupDeleteCompensationReturnsToFailed(t *testing.T) {
 	backups, _ := s.Backups(serverID)
 	backupID := backups[0].ID
 	failureCode := "BACKUP_FAILED"
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, false, &failureCode, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, false, &failureCode, nil); err != nil {
 		t.Fatalf("fail backup: %v", err)
 	}
 	deleteOperation, err := s.DeleteBackup(serverID, backupID, "idem-cp-failed-delete-comp-0002", admin)
@@ -948,7 +965,7 @@ func TestPostgresFailedBackupDeleteCompensationReturnsToFailed(t *testing.T) {
 		t.Fatalf("delete failed backup: %v", err)
 	}
 	deleteFailure := "RUNTIME_UNAVAILABLE"
-	if err := s.CompleteTask(context.Background(), deleteOperation.ID, nodeID, false, &deleteFailure, nil); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, deleteOperation.ID, nodeID, false, &deleteFailure, nil); err != nil {
 		t.Fatalf("compensate failed deletion: %v", err)
 	}
 	backups, err = s.Backups(serverID)
@@ -1009,7 +1026,7 @@ func completePostgresBackup(t *testing.T, s *Postgres, admin domain.User, nodeID
 		t.Fatalf("creating backup = %+v, err=%v", backups, err)
 	}
 	backupID := backups[0].ID
-	if err := s.CompleteTask(context.Background(), op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, content)); err != nil {
+	if err := completeTaskWithCurrentFence(t, s, op.ID, nodeID, true, nil, postgresBackupResult(t, backupID, content)); err != nil {
 		t.Fatalf("complete backup: %v", err)
 	}
 	return backupID

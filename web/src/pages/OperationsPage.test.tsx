@@ -102,7 +102,7 @@ describe("OperationsPage", () => {
     expect(screen.getByText("Synchronize server state")).toBeInTheDocument();
   });
 
-  it("classifies leased and canceled work and falls back to immutable server identifiers", async () => {
+  it("classifies leased and succeeded work and falls back to immutable server identifiers", async () => {
     const unknownServerId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     const leasedOperation: Operation = {
       ...activeOperation,
@@ -112,18 +112,18 @@ describe("OperationsPage", () => {
       progress: 8,
       checkpoint: "lease-acquired",
     };
-    const canceledOperation: Operation = {
+    const succeededOperation: Operation = {
       ...activeOperation,
       id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
       serverId: unknownServerId,
       type: "delete",
-      status: "canceled",
-      progress: 20,
-      checkpoint: "canceled",
+      status: "succeeded",
+      progress: 100,
+      checkpoint: "completed",
       leaseOwner: null,
       leaseExpiresAt: null,
     };
-    mocks.operations.mockResolvedValue([leasedOperation, canceledOperation]);
+    mocks.operations.mockResolvedValue([leasedOperation, succeededOperation]);
     mocks.servers.mockResolvedValue([]);
 
     render(<MemoryRouter><OperationsPage /></MemoryRouter>);
@@ -135,7 +135,7 @@ describe("OperationsPage", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: /Completed/ }));
     expect(screen.getByText("Delete server")).toBeInTheDocument();
-    expect(screen.getByText("Canceled")).toBeInTheDocument();
+    expect(screen.getByText("Succeeded")).toBeInTheDocument();
     expect(screen.queryByText("Restart server")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: /Active/ }));

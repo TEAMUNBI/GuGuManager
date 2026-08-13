@@ -122,6 +122,13 @@ message Task {
   repeated CapabilityRequirement required_capabilities = 9;
   string bundle_digest = 10;
 
+  // Fenced lease fields. New agents MUST echo these back on TaskAck,
+  // TaskProgress, RunningTaskHeartbeat and TaskResult. An empty lease_token
+  // marks a legacy agent: the control plane falls back to node + attempt
+  // validation without lease fencing for that message.
+  string lease_token = 15;
+  uint64 connection_epoch = 16;
+
   oneof payload {
     // Legacy JSON payload. New protocol versions MUST use a typed arm.
     bytes payload_json = 5 [deprecated = true];
@@ -219,6 +226,9 @@ message TaskAck {
   bool accepted = 2;
   string error_code = 3;
   uint32 attempt = 4;
+  // Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+  string lease_token = 5;
+  uint64 connection_epoch = 6;
 }
 
 message TaskProgress {
@@ -227,6 +237,9 @@ message TaskProgress {
   string checkpoint = 3;
   string message = 4;
   uint32 attempt = 5;
+  // Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+  string lease_token = 6;
+  uint64 connection_epoch = 7;
 }
 
 message TaskResult {
@@ -236,6 +249,9 @@ message TaskResult {
   bool retryable = 4;
   bytes result_json = 5;
   uint32 attempt = 6;
+  // Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+  string lease_token = 7;
+  uint64 connection_epoch = 8;
 }
 
 message LogBatch {
@@ -281,6 +297,9 @@ message RunningTaskHeartbeat {
   google.protobuf.Timestamp observed_at = 3;
   string checkpoint = 4;
   uint32 percent = 5;
+  // Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+  string lease_token = 6;
+  uint64 connection_epoch = 7;
 }
 
 message MetricsBatch {

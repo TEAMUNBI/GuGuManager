@@ -397,21 +397,74 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	}
 }
 
-// handleTask 处理下行任务：先回 TaskAck，执行后回 TaskResult（含 Observed）。
+// handleTask 处理下行任务：先回 TaskAck（回显租约栅栏），执行期每 10 秒
+// 发 RunningTaskHeartbeat 续租，执行完回 TaskResult（含 Observed）。
 func (a *agent) handleTask(ctx context.Context, outbound connectRequestSender, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
+	// 回显栅栏：新协议必须原样带回 lease_token 与 connection_epoch，
+	// 旧服务端不下发这两个字段（空值），旧行为保持不变。
+	leaseToken := task.GetLeaseToken()
+	connectionEpoch := task.GetConnectionEpoch()
 	ack := &agentv1.TaskAck{
-		OperationId: task.GetOperationId(),
-		Accepted:    true,
-		Attempt:     task.GetAttempt(),
+		OperationId:     task.GetOperationId(),
+		Accepted:        true,
+		Attempt:         task.GetAttempt(),
+		LeaseToken:      leaseToken,
+		ConnectionEpoch: connectionEpoch,
 	}
 	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskAck{TaskAck: ack}}); err != nil {
 		return fmt.Errorf("send task ack: %w", err)
 	}
 
+	// 有栅栏的任务在执行期每 10 秒续租，防止长任务（备份/恢复）在 30 秒
+	// 租约窗口内被对账重新入队造成重复执行。
+	stopRenew := make(chan struct{})
+	defer close(stopRenew)
+	if leaseToken != "" {
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopRenew:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					heartbeat := &agentv1.RunningTaskHeartbeat{
+						OperationId:     task.GetOperationId(),
+						Attempt:         task.GetAttempt(),
+						ObservedAt:      timestamppb.Now(),
+						LeaseToken:      leaseToken,
+						ConnectionEpoch: connectionEpoch,
+					}
+					if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_RunningTaskHeartbeat{RunningTaskHeartbeat: heartbeat}}); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	result := func(outcome *ExecutionOutcome, errCode string) error {
+		frame := &agentv1.TaskResult{
+			OperationId:     task.GetOperationId(),
+			Succeeded:       outcome.Succeeded,
+			ErrorCode:       outcome.ErrorCode,
+			Retryable:       outcome.Retryable,
+			ResultJson:      outcome.ResultJSON,
+			Attempt:         task.GetAttempt(),
+			LeaseToken:      leaseToken,
+			ConnectionEpoch: connectionEpoch,
+		}
+		if errCode != "" {
+			frame.ErrorCode = errCode
+		}
+		return outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: frame}})
+	}
+
 	if err := resolveTaskSecretHandles(ctx, gateway, task); err != nil {
 		outcome := &ExecutionOutcome{Succeeded: false, ErrorCode: "SECRET_HANDLE_FAILED", Retryable: true}
-		result := &agentv1.TaskResult{OperationId: task.GetOperationId(), Succeeded: false, ErrorCode: outcome.ErrorCode, Retryable: outcome.Retryable, Attempt: task.GetAttempt()}
-		if sendErr := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); sendErr != nil {
+		if sendErr := result(outcome, ""); sendErr != nil {
 			return fmt.Errorf("send secret handle failure: %w", sendErr)
 		}
 		return nil
@@ -420,15 +473,7 @@ func (a *agent) handleTask(ctx context.Context, outbound connectRequestSender, g
 	if err != nil || outcome == nil {
 		outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "EXECUTION_ERROR", Retryable: true}
 	}
-	result := &agentv1.TaskResult{
-		OperationId: task.GetOperationId(),
-		Succeeded:   outcome.Succeeded,
-		ErrorCode:   outcome.ErrorCode,
-		Retryable:   outcome.Retryable,
-		ResultJson:  outcome.ResultJSON,
-		Attempt:     task.GetAttempt(),
-	}
-	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: result}}); err != nil {
+	if err := result(outcome, ""); err != nil {
 		return fmt.Errorf("send task result: %w", err)
 	}
 	if outcome.Observed != nil {

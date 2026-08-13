@@ -488,7 +488,7 @@ export class MockClient {
     return { serverId, permissions: [...membership.permissions].sort() };
   }
   async getOverview(): Promise<Overview> {
-    return { environment: "development", serverCount: servers.length, runningServerCount: servers.filter((server) => server.observedPower === "running").length, onlineNodeCount: nodes.filter((node) => node.condition === "available").length, totalNodeCount: nodes.length, queuedOperationCount: [...this.operations.values()].filter((operation) => !["succeeded", "failed", "canceled"].includes(operation.status)).length, cpuPercent: 42, memoryUsedBytes: 4_241_225_472, memoryTotalBytes: 103_079_215_104, recentActivity: audit.slice(0, 5) };
+    return { environment: "development", serverCount: servers.length, runningServerCount: servers.filter((server) => server.observedPower === "running").length, onlineNodeCount: nodes.filter((node) => node.condition === "available").length, totalNodeCount: nodes.length, queuedOperationCount: [...this.operations.values()].filter((operation) => !["succeeded", "failed"].includes(operation.status)).length, cpuPercent: 42, memoryUsedBytes: 4_241_225_472, memoryTotalBytes: 103_079_215_104, recentActivity: audit.slice(0, 5) };
   }
   async listServers(query = ""): Promise<Server[]> {
     const lower = query.toLowerCase();
@@ -529,7 +529,7 @@ export class MockClient {
     const node = nodes.find((item) => item.id === server.nodeId);
     if (!node || node.condition !== "available") throw new Error("NODE_OFFLINE");
     if (server.lifecycleState !== "ready") throw new Error("OPERATION_IN_PROGRESS");
-    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed", "canceled"].includes(item.status));
+    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed"].includes(item.status));
     if (active) {
       if (active.type !== action) throw new Error("OPERATION_IN_PROGRESS");
       this.idempotency.set(scope, { operationId: active.id, signature });
@@ -722,7 +722,7 @@ export class MockClient {
       const existing = this.operations.get(record.operationId);
       if (existing) return existing;
     }
-    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed", "canceled"].includes(item.status));
+    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed"].includes(item.status));
     if (active) throw new Error("OPERATION_IN_PROGRESS");
     const operation = queuedOperation({ id: id("op"), serverId, nodeId: server.nodeId, type: "backup", generation: server.generation, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     this.operations.set(operation.id, operation);
@@ -742,7 +742,7 @@ export class MockClient {
     const scope = `backup:restore:${serverId}:${backupId}:${key}`;
     const record = this.idempotency.get(scope);
     if (record) return this.operations.get(record.operationId) as Operation;
-    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed", "canceled"].includes(item.status));
+    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed"].includes(item.status));
     if (active) throw new Error("OPERATION_IN_PROGRESS");
     const operation = queuedOperation({ id: id("op"), serverId, nodeId: server.nodeId, type: "restore", generation: server.generation + 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     this.operations.set(operation.id, operation);
@@ -766,7 +766,7 @@ export class MockClient {
     const scope = `backup:delete:${serverId}:${backupId}:${key}`;
     const record = this.idempotency.get(scope);
     if (record) return this.operations.get(record.operationId) as Operation;
-    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed", "canceled"].includes(item.status));
+    const active = [...this.operations.values()].find((item) => item.serverId === serverId && !["succeeded", "failed"].includes(item.status));
     if (active) throw new Error("OPERATION_IN_PROGRESS");
     const operation = queuedOperation({ id: id("op"), serverId, nodeId: server.nodeId, type: "backup-delete", generation: server.generation, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     this.operations.set(operation.id, operation);
@@ -896,7 +896,7 @@ export class MockClient {
     if (currentServer.generation !== expectedGeneration) throw new Error("PRECONDITION_FAILED");
     const node = nodes.find((item) => item.id === currentServer.nodeId);
     if (!node || node.condition !== "available") throw new Error("NODE_OFFLINE");
-    const active = [...this.operations.values()].find((item) => item.serverId === server.id && !["succeeded", "failed", "canceled"].includes(item.status));
+    const active = [...this.operations.values()].find((item) => item.serverId === server.id && !["succeeded", "failed"].includes(item.status));
     if (active) throw new Error("OPERATION_IN_PROGRESS");
 
     const timestamp = new Date().toISOString();
@@ -917,7 +917,7 @@ export class MockClient {
 
   private completeOperationForServer(operationId: string): Server | null {
     const operation = this.operations.get(operationId);
-    if (!operation || ["succeeded", "failed", "canceled"].includes(operation.status)) return null;
+    if (!operation || ["succeeded", "failed"].includes(operation.status)) return null;
     const server = servers.find((item) => item.id === operation.serverId);
     if (!server || server.generation !== operation.generation || server.nodeId !== operation.nodeId) {
       this.operations.set(operation.id, failedOperation(operation, {

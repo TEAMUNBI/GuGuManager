@@ -24,15 +24,14 @@
 stateDiagram-v2
     [*] --> queued
     queued --> leased
-    leased --> dispatched
-    dispatched --> running
+    leased --> running: agent ack (fence matched)
+    leased --> queued: lease expired
     running --> succeeded
     running --> failed
-    queued --> canceled
-    leased --> queued: lease expired
-    dispatched --> queued: delivery timeout
     failed --> queued: retryable and attempts remain
 ```
+
+状态固定为 `queued → leased → running → succeeded/failed`；`dispatched` 与 `canceled` 已退出状态域（000009 把历史行压缩为 queued/failed）。`failed → queued` 只在重试模型允许且 attempt 未耗尽时发生，由 `ReconcileTaskLeases` 对账执行。
 
 每次操作至少保存：`operationId`、`serverId`、`nodeId`、`type`、`status`、`generation`、`idempotencyKey`、`attempt`、`maxAttempts`、`leaseOwner`、`leaseExpiresAt`、`checkpoint`、结构化错误和时间戳。`nodeId` 是 operation 受理时固定的执行与投递节点快照；幂等回放、查询、重试和终态提交都不得从服务器当前节点动态回填或改写它。节点重分配必须使旧 operation 失败或取消，并为新 generation 在新节点创建新的 operation。
 
@@ -56,6 +55,15 @@ stateDiagram-v2
 生产实现以 PostgreSQL 的 `server_tasks` 与事务 Outbox 为事实源。Worker 使用 `FOR UPDATE SKIP LOCKED` 领取有限租约，投递成功后更新状态；Redis 只负责唤醒，不参与唯一事实提交。
 
 Agent 通信是至少一次投递，不承诺恰好一次。租约过期、连接中断或 Worker 崩溃后任务可重新入队。重试只适用于被错误模型标记为 `retryable` 的阶段；破坏性步骤必须保存可判定的检查点。
+
+### 任务栅栏（000009）
+
+- 状态机固定为 `queued → leased → running → succeeded/failed`；每次状态转换 `state_version` 单调 +1。
+- 领取（claim）为任务签发一次性 `lease_token`（随机 UUID），并绑定领取该任务的 `connection_epoch`（每节点每次 Connect 会话严格递增）。
+- `TaskAck`、`TaskProgress`、`RunningTaskHeartbeat`、`TaskResult` 必须回显 `node + epoch + attempt + lease_token` 四元组；任何一项不匹配或任务已终态时只能成为 stale no-op，绝不能覆盖终态或复活已重新入队的任务。
+- 未携带 `lease_token` 的 legacy 消息（前一个稳定 Agent）只校验 `node + attempt`，保持兼容；新协议消息缺失租约凭据不享受栅栏保护。
+- 租约 30 秒，Agent 执行期间每 10 秒以 `RunningTaskHeartbeat` 续租；过期后对账器清空租约与凭据并把未耗尽 attempt 的任务重新入队，attempt 耗尽的任务判 `MAX_ATTEMPTS` 终态失败。
+- 任务输入与 checkpoint 分离：不可变输入存 `task_input`（jsonb），checkpoint 只承载执行期进度。新任务一律通过 typed proto arm（provision/power/backup）下发，不再创建 `payload_json` 任务；pre-000009 行仍以 legacy 载体兼容旧 Agent。
 
 ## 5. 核心实体与不变量
 

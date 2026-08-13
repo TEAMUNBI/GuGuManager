@@ -393,7 +393,7 @@ func (m *Memory) VisibleOperations(userID string) []domain.Operation {
 }
 
 func isTerminalOperation(status string) bool {
-	return status == "succeeded" || status == "failed" || status == "canceled"
+	return status == "succeeded" || status == "failed"
 }
 
 func isExclusiveOperation(operationType domain.PowerAction) bool {

@@ -30,18 +30,31 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// fakeStore 是 TaskStore 接口的内存实现，用于集成测试。
+// fakeStore 是 TaskStore 接口的内存实现，用于集成测试。它复刻 Postgres
+// 的栅栏语义：带 lease_token 的消息必须与 claim 时的 fence 精确匹配，
+// 不匹配或已终态只能成为 no-op；不带 lease_token 的 legacy 消息按旧行为
+// 直接透传（兼容当前稳定 Agent）。
 type fakeStore struct {
 	mu           sync.Mutex
 	nodes        map[string]domain.Node
 	nextNode     int
+	nextLease    int
 	heartbeats   []domain.Heartbeat
 	observed     []domain.ServerObserved
 	completed    []taskCompleted
 	queued       []*store.ClaimedTask
+	leases       map[string]*fakeLease
 	audits       []domain.AuditEvent
 	consoleLines []domain.ConsoleLine
 	metrics      []domain.ServerMetrics
+}
+
+type fakeLease struct {
+	nodeID  string
+	epoch   int64
+	attempt int
+	token   string
+	status  string // leased | running | succeeded | failed
 }
 
 type taskCompleted struct {
@@ -50,10 +63,13 @@ type taskCompleted struct {
 	Succeeded   bool
 	ErrorCode   *string
 	ResultJSON  []byte
+	Attempt     int
+	LeaseToken  string
+	Epoch       int64
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{nodes: map[string]domain.Node{}}
+	return &fakeStore{nodes: map[string]domain.Node{}, leases: map[string]*fakeLease{}}
 }
 
 func (f *fakeStore) RegisterNode(ctx context.Context, node domain.Node) (string, error) {
@@ -93,7 +109,7 @@ func (f *fakeStore) EnqueueTask(ctx context.Context, serverID, nodeID, taskType 
 	return operationID, nil
 }
 
-func (f *fakeStore) ClaimTask(ctx context.Context, nodeID string) (*store.ClaimedTask, error) {
+func (f *fakeStore) ClaimTask(ctx context.Context, nodeID string, connectionEpoch int64) (*store.ClaimedTask, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i, task := range f.queued {
@@ -101,16 +117,119 @@ func (f *fakeStore) ClaimTask(ctx context.Context, nodeID string) (*store.Claime
 			continue
 		}
 		f.queued = append(f.queued[:i], f.queued[i+1:]...)
+		f.nextLease++
+		task.LeaseToken = fmt.Sprintf("lease-%d", f.nextLease)
+		task.ConnectionEpoch = connectionEpoch
+		task.Attempt = 1
+		task.StateVersion = 1
+		f.leases[task.OperationID] = &fakeLease{
+			nodeID: nodeID, epoch: connectionEpoch, attempt: 1,
+			token: task.LeaseToken, status: "leased",
+		}
 		return task, nil
 	}
 	return nil, nil
 }
 
-func (f *fakeStore) CompleteTask(ctx context.Context, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error {
+func (f *fakeStore) fenceLocked(fence store.TaskLeaseFence) (*fakeLease, bool) {
+	lease, ok := f.leases[fence.OperationID]
+	if !ok {
+		return nil, false
+	}
+	if lease.nodeID != fence.NodeID {
+		return nil, false
+	}
+	if fence.LeaseToken == "" {
+		// Legacy message: node + attempt 校验（与 Postgres 一致的兼容路径）。
+		if fence.Attempt != lease.attempt {
+			return nil, false
+		}
+		return lease, true
+	}
+	if fence.Epoch != lease.epoch || fence.Attempt != lease.attempt || fence.LeaseToken != lease.token {
+		return nil, false
+	}
+	return lease, true
+}
+
+func (f *fakeStore) AckTask(ctx context.Context, fence store.TaskLeaseFence, accepted bool, errCode string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.completed = append(f.completed, taskCompleted{OperationID: operationID, NodeID: nodeID, Succeeded: succeeded, ErrorCode: errCode, ResultJSON: resultJSON})
+	if fence.LeaseToken == "" {
+		return nil
+	}
+	lease, ok := f.fenceLocked(fence)
+	if !ok || lease.status != "leased" {
+		return nil
+	}
+	if accepted {
+		lease.status = "running"
+	} else {
+		lease.status = "failed"
+	}
 	return nil
+}
+
+func (f *fakeStore) ReportTaskProgress(ctx context.Context, fence store.TaskLeaseFence, percent int, checkpoint string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if fence.LeaseToken == "" {
+		return nil
+	}
+	lease, ok := f.fenceLocked(fence)
+	if !ok || (lease.status != "leased" && lease.status != "running") {
+		return nil
+	}
+	if lease.status == "leased" {
+		lease.status = "running"
+	}
+	return nil
+}
+
+func (f *fakeStore) RenewTaskLease(ctx context.Context, fence store.TaskLeaseFence) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if fence.LeaseToken == "" {
+		return nil
+	}
+	lease, ok := f.fenceLocked(fence)
+	if !ok || (lease.status != "leased" && lease.status != "running") {
+		return nil
+	}
+	return nil
+}
+
+func (f *fakeStore) CompleteTask(ctx context.Context, fence store.TaskLeaseFence, succeeded bool, errCode *string, resultJSON []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if fence.LeaseToken != "" {
+		lease, ok := f.fenceLocked(fence)
+		if !ok || (lease.status != "leased" && lease.status != "running") {
+			// 栅栏不匹配或已终态：迟到结果只能成为 no-op。
+			return nil
+		}
+		if succeeded {
+			lease.status = "succeeded"
+		} else {
+			lease.status = "failed"
+		}
+	}
+	f.completed = append(f.completed, taskCompleted{
+		OperationID: fence.OperationID, NodeID: fence.NodeID, Succeeded: succeeded,
+		ErrorCode: errCode, ResultJSON: resultJSON, Attempt: fence.Attempt,
+		LeaseToken: fence.LeaseToken, Epoch: fence.Epoch,
+	})
+	return nil
+}
+
+func (f *fakeStore) leaseStatus(operationID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lease, ok := f.leases[operationID]
+	if !ok {
+		return ""
+	}
+	return lease.status
 }
 
 func (f *fakeStore) RecordAgentHeartbeat(ctx context.Context, nodeID string, hb domain.Heartbeat) error {
@@ -174,6 +293,15 @@ func (f *fakeStore) completedCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.completed)
+}
+
+func (f *fakeStore) lastCompleted() taskCompleted {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.completed) == 0 {
+		return taskCompleted{}
+	}
+	return f.completed[len(f.completed)-1]
 }
 
 func discardLogger() *slog.Logger {
@@ -419,7 +547,7 @@ func TestEnrollAndConnect(t *testing.T) {
 	if fs.completedCount() != 1 {
 		t.Fatalf("completed tasks = %d, want 1", fs.completedCount())
 	}
-	if !fs.completed[0].Succeeded {
+	if !fs.lastCompleted().Succeeded {
 		t.Errorf("expected succeeded task completion")
 	}
 
@@ -448,6 +576,132 @@ func TestEnrollAndConnect(t *testing.T) {
 	}
 	if !bytes.Equal(dispatched.GetPayloadJson(), []byte(`{"game":"factorio"}`)) {
 		t.Errorf("dispatched payload = %q", dispatched.GetPayloadJson())
+	}
+	// 000009 起下发的任务必须携带栅栏：租约凭据与领取该任务的连接 epoch。
+	if dispatched.LeaseToken == "" {
+		t.Error("dispatched task lacks lease token")
+	}
+	if dispatched.ConnectionEpoch == 0 {
+		t.Error("dispatched task lacks connection epoch")
+	}
+}
+
+// TestConnectTaskFencingStaleResultsAreNoOps 验证栅栏语义：伪造租约凭据、
+// 旧 attempt 和终态后的迟到结果都不能改变任务状态，只有精确匹配栅栏的
+// Ack/Result 生效。
+func TestConnectTaskFencingStaleResultsAreNoOps(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	const nodeID = "fence-node-1"
+	_, conn := newTestServer(t, ca, fs, "reg-token", nodeID)
+	client := agentv1.NewAgentGatewayServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Hello{Hello: &agentv1.Hello{
+		NodeId: nodeID, AgentVersion: "0.2.0",
+	}}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("recv welcome: %v", err)
+	}
+
+	enqueuedID, err := fs.EnqueueTask(ctx, "server-fence", nodeID, "stop", 2, "actor-1", "test-idempotency-fence-01", []byte(`{"action":"stop"}`))
+	if err != nil {
+		t.Fatalf("enqueue task: %v", err)
+	}
+	var task *agentv1.Task
+	deadline := time.Now().Add(8 * time.Second)
+	for task == nil && time.Now().Before(deadline) {
+		msg, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("recv task: %v", recvErr)
+		}
+		task = msg.GetTask()
+	}
+	if task == nil {
+		t.Fatal("timed out waiting for fenced task")
+	}
+	if task.OperationId != enqueuedID || task.LeaseToken == "" || task.ConnectionEpoch == 0 {
+		t.Fatalf("fenced task fields wrong: %+v", task)
+	}
+
+	send := func(req *agentv1.ConnectRequest) {
+		t.Helper()
+		if err := stream.Send(req); err != nil {
+			t.Fatalf("send frame: %v", err)
+		}
+	}
+	waitCompleted := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for fs.completedCount() < want && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// 1. 伪造租约凭据的结果只能成为 no-op。
+	send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: &agentv1.TaskResult{
+		OperationId: task.OperationId, Succeeded: true, Attempt: task.Attempt,
+		LeaseToken: "lease-forged", ConnectionEpoch: task.ConnectionEpoch,
+	}}})
+	time.Sleep(300 * time.Millisecond)
+	if fs.completedCount() != 0 {
+		t.Fatalf("forged lease result was accepted: %d completions", fs.completedCount())
+	}
+
+	// 2. 旧 attempt 的结果同样只能成为 no-op。
+	send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: &agentv1.TaskResult{
+		OperationId: task.OperationId, Succeeded: true, Attempt: task.Attempt - 1,
+		LeaseToken: task.LeaseToken, ConnectionEpoch: task.ConnectionEpoch,
+	}}})
+	time.Sleep(300 * time.Millisecond)
+	if fs.completedCount() != 0 {
+		t.Fatalf("stale attempt result was accepted: %d completions", fs.completedCount())
+	}
+
+	// 3. 精确匹配的 Ack 推进 leased -> running。
+	send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskAck{TaskAck: &agentv1.TaskAck{
+		OperationId: task.OperationId, Accepted: true, Attempt: task.Attempt,
+		LeaseToken: task.LeaseToken, ConnectionEpoch: task.ConnectionEpoch,
+	}}})
+	deadline = time.Now().Add(3 * time.Second)
+	for fs.leaseStatus(task.OperationId) != "running" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fs.leaseStatus(task.OperationId) != "running" {
+		t.Fatal("matched ack did not move the task to running")
+	}
+
+	// 4. 精确匹配的结果完成终态转换。
+	send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: &agentv1.TaskResult{
+		OperationId: task.OperationId, Succeeded: true, Attempt: task.Attempt,
+		LeaseToken: task.LeaseToken, ConnectionEpoch: task.ConnectionEpoch,
+	}}})
+	waitCompleted(1)
+	if fs.completedCount() != 1 {
+		t.Fatalf("completed tasks = %d, want 1", fs.completedCount())
+	}
+	if fs.leaseStatus(task.OperationId) != "succeeded" {
+		t.Fatalf("lease status after result = %q, want succeeded", fs.leaseStatus(task.OperationId))
+	}
+
+	// 5. 终态后的迟到结果不得重复记录。
+	send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: &agentv1.TaskResult{
+		OperationId: task.OperationId, Succeeded: true, Attempt: task.Attempt,
+		LeaseToken: task.LeaseToken, ConnectionEpoch: task.ConnectionEpoch,
+	}}})
+	time.Sleep(300 * time.Millisecond)
+	if fs.completedCount() != 1 {
+		t.Fatalf("late result after terminal state was recorded: %d completions", fs.completedCount())
 	}
 }
 

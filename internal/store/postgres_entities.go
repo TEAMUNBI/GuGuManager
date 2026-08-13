@@ -485,9 +485,10 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		}
 	}
 
-	// The agent claims queued tasks via checkpoint::text as its payload, so
-	// the provision payload must be materialized here. Previously it was left
+	// The agent claims queued tasks via task_input as its payload, so the
+	// provision payload must be materialized here. Previously it was left
 	// empty and every provision failed on the agent with PROVISION_FAILED.
+	// Since 000009 the immutable input is separated from the checkpoint column.
 	payloadJSON, marshalErr := json.Marshal(provisionTaskPayload{
 		GameDefinitionID:    input.GameDefinitionID,
 		ResourceLimits:      provisionResourceLimits{MemoryBytes: uint64(memoryBytes), DiskBytes: uint64(diskBytes)},
@@ -507,7 +508,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO server_tasks (
 			id, server_id, node_id, task_type, status, generation, actor_id,
-			idempotency_scope, idempotency_key, request_digest, checkpoint, attempt, max_attempts, created_at, updated_at
+			idempotency_scope, idempotency_key, request_digest, task_input, attempt, max_attempts, created_at, updated_at
 		)
 		VALUES ($1, $2, $3, 'provision', 'queued', $4, $5, $6, $7, $8, $9, 0, 3, $10, $10)
 		ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING

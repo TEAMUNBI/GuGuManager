@@ -54,12 +54,12 @@ func secretHandleSnapshot(values map[string]any, key string) (string, bool, erro
 }
 
 func (s *Postgres) materializeSecretHandlesTx(ctx context.Context, tx *sql.Tx, task *ClaimedTask) error {
-	if task == nil || task.TaskType != "provision" || len(task.PayloadJSON) == 0 {
+	if task == nil || task.TaskType != "provision" || len(task.InputJSON()) == 0 {
 		return nil
 	}
 	var payload provisionTaskPayload
-	if err := json.Unmarshal(task.PayloadJSON, &payload); err != nil {
-		return fmt.Errorf("decode provision checkpoint: %w", err)
+	if err := json.Unmarshal(task.InputJSON(), &payload); err != nil {
+		return fmt.Errorf("decode provision task input: %w", err)
 	}
 	if len(payload.SecretKeys) == 0 {
 		return nil
@@ -101,7 +101,7 @@ func (s *Postgres) materializeSecretHandlesTx(ctx context.Context, tx *sql.Tx, t
 	if err != nil {
 		return fmt.Errorf("encode leased provision payload: %w", err)
 	}
-	task.PayloadJSON = encoded
+	task.SetInputJSON(encoded)
 	return nil
 }
 
@@ -138,7 +138,7 @@ func (s *Postgres) ResolveSecretHandle(ctx context.Context, operationID, serverI
 	if err := tx.QueryRowContext(ctx, `SELECT status, attempt FROM server_tasks WHERE id = $1 AND server_id = $2 AND node_id = $3`, operationID, serverID, nodeID).Scan(&taskStatus, &currentAttempt); err != nil {
 		return "", time.Time{}, fmt.Errorf("verify secret handle task: %w", err)
 	}
-	if currentAttempt != attempt || (taskStatus != "leased" && taskStatus != "dispatched" && taskStatus != "running") {
+	if currentAttempt != attempt || (taskStatus != "leased" && taskStatus != "running") {
 		return "", time.Time{}, errors.New("secret handle is no longer valid for this task attempt")
 	}
 	values := map[string]any{variableKey: encryptedValue}

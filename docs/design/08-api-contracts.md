@@ -94,7 +94,7 @@ membership 的写入必须包含 `servers.read`，后续服务器列表、详情
 
 当前开发切片的服务器创建、电源、备份创建、备份恢复、备份删除、Allocation 写入和 Startup 更新要求 `Idempotency-Key`，长度为 16 至 128 个可打印 ASCII 字符。同一 actor、路由作用域、键和请求摘要返回原 operation；同键不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`。Startup 摘要包含 Secret，但使用每进程随机密钥的 HMAC-SHA256，不保存普通 SHA-256 指纹。开发模式的内存幂等记录和密钥随进程退出而丢失；生产模式将幂等记录持久化到数据库任务表。
 
-`Operation` 响应要求返回必填 UUID `nodeId`，以及 `attempt`、`maxAttempts`、`leaseOwner`、`leaseExpiresAt`、`checkpoint` 和 `error`。`nodeId` 是受理时不可变的执行节点快照，不是查询时从 Server 动态派生的展示字段；幂等回放必须返回原 operation 及其原节点。nullable 字段即使为空也必须显式返回 `null`；`error` 非空时固定包含 `code`、`message` 和 `retryable`。当前 queued operation 固定为第一次也是唯一一次尝试；运行阶段只模拟一个 `development-memory-worker` lease；终态清除 lease。`OPERATION_STALE` 表示开发 Store 在提交 provision、电源、备份创建、恢复、备份删除或 reconcile 结果前发现目标服务器不存在、operation generation 已不再匹配，或服务器当前节点不再等于 operation 的节点快照；它是不可重试的终态错误，并优先于同一完成时刻观察到的备份摘要损坏或备份缺失。development-memory Web Mock 使用相同的服务器存在、generation 和 `nodeId` 完成栅栏，不能把未提交资源副作用的 operation 标记为成功。Web 可以展示安全的错误 message、checkpoint 和尝试次数，但不得向普通用户暴露或依赖 lease owner。创建服务器和电源界面只把 `accepted` 显示为 warning，必须轮询终态后才能显示成功或跳转；failed/canceled 优先展示结构化错误 message。
+`Operation` 响应要求返回必填 UUID `nodeId`，以及 `attempt`、`maxAttempts`、`leaseOwner`、`leaseExpiresAt`、`checkpoint` 和 `error`。`nodeId` 是受理时不可变的执行节点快照，不是查询时从 Server 动态派生的展示字段；幂等回放必须返回原 operation 及其原节点。nullable 字段即使为空也必须显式返回 `null`；`error` 非空时固定包含 `code`、`message` 和 `retryable`。当前 queued operation 固定为第一次也是唯一一次尝试；运行阶段只模拟一个 `development-memory-worker` lease；终态清除 lease。`OPERATION_STALE` 表示开发 Store 在提交 provision、电源、备份创建、恢复、备份删除或 reconcile 结果前发现目标服务器不存在、operation generation 已不再匹配，或服务器当前节点不再等于 operation 的节点快照；它是不可重试的终态错误，并优先于同一完成时刻观察到的备份摘要损坏或备份缺失。development-memory Web Mock 使用相同的服务器存在、generation 和 `nodeId` 完成栅栏，不能把未提交资源副作用的 operation 标记为成功。Web 可以展示安全的错误 message、checkpoint 和尝试次数，但不得向普通用户暴露或依赖 lease owner。创建服务器和电源界面只把 `accepted` 显示为 warning，必须轮询终态后才能显示成功或跳转；`failed` 优先展示结构化错误 message。生产任务状态机固定为 `queued → leased → running → succeeded/failed`（000009），`dispatched` 与 `canceled` 已退出状态域。
 
 上述开发契约不构成持久任务执行保证。开发模式进程退出会同时丢失 operation、lease、checkpoint 和幂等记录；生产模式通过数据库任务表持久化 operation/lease/checkpoint，由 Worker 领取租约并经 mTLS 流投递给 Agent，再持久化 Agent 检查点与结果。生产客户端不得把固定 lease 当作任务超时、互斥锁或重试依据。
 
@@ -104,7 +104,7 @@ Allocation 与 Startup 写入还要求 `If-Match`，当前值是服务器 genera
 
 Startup 只接受固定 Bundle GameDefinition 可执行子集声明的变量；integer 更新限于 JavaScript 安全整数域。Secret 响应不含 `value`、`default`、`constValue` 或 `enumValues`，只用 `hasValue` 表示是否已有值；`null` 表示清除 optional 值。OpenAPI 3.1 Schema 对 `secret: true` 的响应机器约束这四个字段不得出现。Start/Restart 会在创建 operation 和改变 generation/power 前拒绝尚未配置的 required 变量。
 
-上述异步请求成功受理时写入 `result: accepted` 的审计事件。备份、Network 和 Startup 操作还会在开发适配器收敛后记录终态结果；目标 Server 已不存在时使用稳定的 `serverId` 作为审计目标名称，仍写入 `failure`。`accepted` 只表示请求已通过同步校验并创建或复用 operation，不表示异步工作成功；最终结果以 operation 的 `succeeded`、`failed` 或 `canceled` 终态为准。受理审计与 operation 终态是不同事实，不得把 `accepted` 映射为 `success`，也不得仅凭该审计事件推断任务完成。
+上述异步请求成功受理时写入 `result: accepted` 的审计事件。备份、Network 和 Startup 操作还会在开发适配器收敛后记录终态结果；目标 Server 已不存在时使用稳定的 `serverId` 作为审计目标名称，仍写入 `failure`。`accepted` 只表示请求已通过同步校验并创建或复用 operation，不表示异步工作成功；最终结果以 operation 的 `succeeded` 或 `failed` 终态为准。受理审计与 operation 终态是不同事实，不得把 `accepted` 映射为 `success`，也不得仅凭该审计事件推断任务完成。
 
 生产 MVP 还必须满足：
 

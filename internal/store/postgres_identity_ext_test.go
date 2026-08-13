@@ -58,6 +58,33 @@ func resetTestDatabase(t *testing.T, s *Postgres) {
 	}
 }
 
+// completeTaskWithCurrentFence 领取目标任务（该节点上最老的排队任务）并用
+// 其栅栏完成它。000009 起 CompleteTask 只接受 leased/running 状态且栅栏必须
+// 与 claim 一致，因此测试必须先走 claim 路径模拟真实 Agent 行为。
+func completeTaskWithCurrentFence(t *testing.T, s *Postgres, operationID, nodeID string, succeeded bool, errCode *string, resultJSON []byte) error {
+	t.Helper()
+	claimed, err := s.ClaimTask(context.Background(), nodeID, 1)
+	if err != nil {
+		t.Fatalf("claim task %s: %v", operationID, err)
+	}
+	if claimed == nil {
+		t.Fatalf("no claimable task for %s", operationID)
+	}
+	if claimed.OperationID != operationID {
+		t.Fatalf("claimed task %s, want %s", claimed.OperationID, operationID)
+	}
+	fence := TaskLeaseFence{
+		OperationID: operationID, NodeID: nodeID,
+		Epoch: claimed.ConnectionEpoch, Attempt: claimed.Attempt,
+		LeaseToken: claimed.LeaseToken,
+	}
+	err = s.CompleteTask(context.Background(), fence, succeeded, errCode, resultJSON)
+	if err != nil {
+		t.Fatalf("complete task %s: %v", operationID, err)
+	}
+	return nil
+}
+
 // createServerFixture inserts the smallest valid servers row. server_members
 // has a foreign key to servers(id), which in turn requires node, game
 // definition and game bundle rows.

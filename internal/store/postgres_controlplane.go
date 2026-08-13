@@ -234,7 +234,7 @@ func (s *Postgres) Overview() domain.Overview {
 			(SELECT COUNT(*) FROM servers WHERE deleted_at IS NULL AND observed_power = 'running'),
 			(SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL),
 			(SELECT COUNT(*) FROM nodes WHERE revoked_at IS NULL AND condition = 'available'),
-			(SELECT COUNT(*) FROM server_tasks WHERE status NOT IN ('succeeded', 'failed', 'canceled')),
+			(SELECT COUNT(*) FROM server_tasks WHERE status IN ('queued', 'leased', 'running')),
 			(SELECT COALESCE(SUM(memory_limit_bytes), 0) FROM servers WHERE deleted_at IS NULL),
 			(SELECT COALESCE(SUM(memory_bytes), 0) FROM server_metrics),
 			(SELECT COALESCE(AVG(cpu_percent), 0) FROM server_metrics)
@@ -427,11 +427,13 @@ func (s *Postgres) Operation(operationID string) (domain.Operation, error) {
 }
 
 // taskSelect maps one server_tasks row onto a domain.Operation. The id column
-// doubles as the operation id.
+// doubles as the operation id. 000009 起 checkpoint 只承载执行期进度（以
+// JSON 字符串形式存放），读取时用 #>> '{}' 还原原始字符串；pre-000009 的
+// 对象型 checkpoint 同样原样返回 JSON 文本。
 const taskSelect = `
 	SELECT st.id::text, st.server_id::text, st.node_id::text, st.task_type, st.status,
 	       st.generation, st.attempt, st.max_attempts, st.lease_owner,
-	       st.lease_expires_at, st.checkpoint::text, st.progress,
+	       st.lease_expires_at, st.checkpoint #>> '{}', st.progress,
 	       st.error_code, st.error_retryable, st.idempotency_key,
 	       st.created_at, st.updated_at, st.completed_at
 	FROM server_tasks st`
@@ -517,7 +519,7 @@ func (s *Postgres) lockServerRow(ctx context.Context, tx *sql.Tx, serverID strin
 // partial unique index on server_tasks guarantees at most one.
 func (s *Postgres) activeTaskInTx(ctx context.Context, tx *sql.Tx, serverID string) (domain.Operation, bool, error) {
 	operation, err := operationFromTask(tx.QueryRowContext(ctx, taskSelect+`
-		WHERE st.server_id = $1 AND st.status IN ('queued', 'leased', 'dispatched', 'running')
+		WHERE st.server_id = $1 AND st.status IN ('queued', 'leased', 'running')
 		ORDER BY st.created_at
 		LIMIT 1
 	`, serverID))
@@ -590,30 +592,31 @@ func (s *Postgres) requireServerReconcileCapabilityTx(ctx context.Context, tx *s
 	return problem
 }
 
-// enqueueTaskTx inserts a queued server_tasks row inside tx. checkpoint is the
-// task payload materialized for the agent (provision/backup payload JSON);
-// empty means no checkpoint. It returns ("", nil) when the idempotency pair
-// already exists so the caller can roll back and replay via lookupIdempotentTask.
-func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, serverID, nodeID, taskType string, generation int64, actorID, idemKey string, requestDigest []byte, checkpoint string) (string, error) {
+// enqueueTaskTx inserts a queued server_tasks row inside tx. taskInput is the
+// immutable task input materialized for the agent (provision/backup payload
+// JSON); empty means the task needs no input. It returns ("", nil) when the
+// idempotency pair already exists so the caller can roll back and replay via
+// lookupIdempotentTask.
+func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, serverID, nodeID, taskType string, generation int64, actorID, idemKey string, requestDigest []byte, taskInput string) (string, error) {
 	var actorIDValue any
 	if actorID != "" {
 		actorIDValue = actorID
 	}
-	var checkpointValue any
-	if checkpoint != "" {
-		checkpointValue = checkpoint
+	var taskInputValue any
+	if taskInput != "" {
+		taskInputValue = taskInput
 	}
 	var inserted string
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO server_tasks (
 			id, server_id, node_id, task_type, status, generation, actor_id,
-			idempotency_scope, idempotency_key, request_digest, checkpoint, attempt, max_attempts, created_at, updated_at
+			idempotency_scope, idempotency_key, request_digest, task_input, attempt, max_attempts, created_at, updated_at
 		)
 		VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, 0, 3, now(), now())
 		ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
 		RETURNING id::text
 	`, taskID, serverID, nodeID, taskType, generation, actorIDValue,
-		taskIdempotencyScope(taskType, actorID, idemKey), idemKey, requestDigest, checkpointValue).Scan(&inserted)
+		taskIdempotencyScope(taskType, actorID, idemKey), idemKey, requestDigest, taskInputValue).Scan(&inserted)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -637,8 +640,8 @@ func (s *Postgres) enqueueTaskTx(ctx context.Context, tx *sql.Tx, taskID, server
 	return inserted, nil
 }
 
-// commitWriteTask enqueues the task (optionally with a materialized checkpoint
-// payload), records the audit row, commits, and returns the accepted operation.
+// commitWriteTask enqueues the task (optionally with a materialized task
+// input), records the audit row, commits, and returns the accepted operation.
 // A task conflict rolls back and replays the recorded idempotent operation.
 func (s *Postgres) commitWriteTask(
 	ctx context.Context,
@@ -652,9 +655,9 @@ func (s *Postgres) commitWriteTask(
 	actor domain.User,
 	auditAction string,
 	now time.Time,
-	checkpoint string,
+	taskInput string,
 ) (domain.Operation, error) {
-	inserted, err := s.enqueueTaskTx(ctx, tx, operationID, serverID, nodeID, taskType, generation, actorID, idemKey, digest[:], checkpoint)
+	inserted, err := s.enqueueTaskTx(ctx, tx, operationID, serverID, nodeID, taskType, generation, actorID, idemKey, digest[:], taskInput)
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法创建任务", true)
 	}
@@ -1615,7 +1618,7 @@ func (s *Postgres) beginFileMutation(serverID string, actorID string) (domain.Se
 		SELECT EXISTS(
 			SELECT 1 FROM server_tasks
 			WHERE server_id = $1 AND task_type = 'restore'
-			  AND status IN ('queued', 'leased', 'dispatched', 'running')
+			  AND status IN ('queued', 'leased', 'running')
 		)
 	`, serverID).Scan(&restoring); err != nil {
 		gate.(*sync.RWMutex).Unlock()
@@ -1644,7 +1647,7 @@ func (s *Postgres) beginFileMutation(serverID string, actorID string) (domain.Se
 func (s *Postgres) activeRestoreOperation(ctx context.Context, serverID string) (domain.Operation, bool) {
 	operation, err := operationFromTask(s.db.QueryRowContext(ctx, taskSelect+`
 		WHERE st.server_id = $1 AND st.task_type = 'restore'
-		  AND st.status IN ('queued', 'leased', 'dispatched', 'running')
+		  AND st.status IN ('queued', 'leased', 'running')
 		ORDER BY st.created_at
 		LIMIT 1
 	`, serverID))
@@ -1902,8 +1905,9 @@ func (s *Postgres) CreateBackup(serverID string, idempotencyKey string, actor do
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法记录备份元数据", true)
 	}
 
-	// 把备份任务负载写入 checkpoint，Agent claim 后以其执行 docker exec tar。
-	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
+	// 把备份任务输入写入 task_input（000009 起与 checkpoint 分离），
+	// Agent claim 后以其执行 docker exec tar。
+	taskInput, marshalErr := json.Marshal(backupTaskPayload{
 		BackupID:         backupID,
 		FormatVersion:    "v1",
 		StorageObjectKey: "backups/" + backupID + ".tar.gz",
@@ -1915,7 +1919,7 @@ func (s *Postgres) CreateBackup(serverID string, idempotencyKey string, actor do
 	operationID := id.New()
 	// Backups do not advance the server generation; they snapshot current state.
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		row.Generation, actor.ID, currentActor, "backup.create", now, string(checkpoint))
+		row.Generation, actor.ID, currentActor, "backup.create", now, string(taskInput))
 }
 
 // RestoreBackup validates the backup integrity and server state, advances the
@@ -2006,8 +2010,8 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 	}
 
 	operationID := id.New()
-	// 恢复任务负载：storageObjectKey 指向备份归档在节点上的相对路径。
-	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
+	// 恢复任务输入：storageObjectKey 指向备份归档在节点上的相对路径。
+	taskInput, marshalErr := json.Marshal(backupTaskPayload{
 		BackupID:               backupID,
 		StorageObjectKey:       backupObjectKey(backupID, storageLocation),
 		ExpectedManifestDigest: manifestDigest,
@@ -2017,7 +2021,7 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
 	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "backup.restore", now, string(checkpoint))
+		nextGeneration, actor.ID, currentActor, "backup.restore", now, string(taskInput))
 }
 
 // backupObjectKey 返回备份归档在节点备份目录下的相对路径；storageLocation
@@ -2101,8 +2105,8 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 	}
 
 	operationID := id.New()
-	// 删除任务负载：告知 Agent 归档相对路径并请求删除远端对象。
-	checkpoint, marshalErr := json.Marshal(backupTaskPayload{
+	// 删除任务输入：告知 Agent 归档相对路径并请求删除远端对象。
+	taskInput, marshalErr := json.Marshal(backupTaskPayload{
 		BackupID:           backupID,
 		StorageObjectKey:   backupObjectKey(backupID, storageLocation),
 		DeleteRemoteObject: true,
@@ -2111,7 +2115,7 @@ func (s *Postgres) DeleteBackup(serverID string, backupID string, idempotencyKey
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
 	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		row.Generation, actor.ID, currentActor, "backup.delete", now, string(checkpoint))
+		row.Generation, actor.ID, currentActor, "backup.delete", now, string(taskInput))
 }
 
 // DownloadBackup 校验备份就绪且节点在线后，从目标节点读取备份归档内容。

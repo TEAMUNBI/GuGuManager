@@ -168,6 +168,135 @@ func TestBackupFailureMetadataMigrationBackfillsAndConstrainsState(t *testing.T)
 	applyMigration(t, ctx, conn, "000001_core.down.sql")
 }
 
+func TestTaskFencingMigrationCompactsLegacyStates(t *testing.T) {
+	config := testDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect to PostgreSQL test database %q: %v", config.Database, err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+
+	schema := uniqueTestSchema(t)
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+quotedSchema); err != nil {
+		t.Fatalf("create isolated schema %q: %v", schema, err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := dropIsolatedSchema(cleanupCtx, config, quotedSchema); err != nil {
+			t.Errorf("drop isolated schema %q: %v", schema, err)
+		}
+	}()
+	if _, err := conn.Exec(ctx, "SET search_path TO "+quotedSchema); err != nil {
+		t.Fatalf("set search_path to isolated schema %q: %v", schema, err)
+	}
+
+	applyMigration(t, ctx, conn, "000001_core.up.sql")
+	serverID, _ := createServerMemberFixture(t, ctx, conn)
+	var nodeID string
+	if err := conn.QueryRow(ctx, `SELECT node_id::text FROM servers WHERE id = $1`, serverID).Scan(&nodeID); err != nil {
+		t.Fatalf("read fixture node: %v", err)
+	}
+	digest := make([]byte, 32)
+	for i := range digest {
+		digest[i] = byte(i)
+	}
+
+	var dispatchedID, canceledID string
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO server_tasks (id, server_id, node_id, task_type, status, generation,
+			idempotency_scope, idempotency_key, request_digest)
+		VALUES (gen_random_uuid(), $1, $2, 'start', 'dispatched', 1,
+			'test-dispatched-scope', 'test-dispatched-key-00000001', $3)
+		RETURNING id::text`, serverID, nodeID, digest).Scan(&dispatchedID); err != nil {
+		t.Fatalf("insert legacy dispatched task: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO server_tasks (id, server_id, node_id, task_type, status, generation,
+			idempotency_scope, idempotency_key, request_digest)
+		VALUES (gen_random_uuid(), $1, $2, 'stop', 'canceled', 1,
+			'test-canceled-scope', 'test-canceled-key-000000001', $3)
+		RETURNING id::text`, serverID, nodeID, digest).Scan(&canceledID); err != nil {
+		t.Fatalf("insert legacy canceled task: %v", err)
+	}
+
+	applyMigration(t, ctx, conn, "000009_task_fencing.up.sql")
+
+	for _, column := range []string{"task_input", "lease_token", "connection_epoch", "state_version", "lease_renewed_at"} {
+		assertColumnExists(t, ctx, conn, schema, "server_tasks", column, true)
+	}
+
+	// dispatched → queued（重新入队），租约字段清空。
+	var status string
+	if err := conn.QueryRow(ctx, `SELECT status FROM server_tasks WHERE id = $1`, dispatchedID).Scan(&status); err != nil {
+		t.Fatalf("read converted dispatched task: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("dispatched task converted to %q, want queued", status)
+	}
+	// canceled → failed（结构化终态），completed_at 补全。
+	var errorCode string
+	var retryable bool
+	var completedAt time.Time
+	if err := conn.QueryRow(ctx, `
+		SELECT COALESCE(error_code, ''), COALESCE(error_retryable, false), completed_at
+		FROM server_tasks WHERE id = $1`, canceledID).Scan(&errorCode, &retryable, &completedAt); err != nil {
+		t.Fatalf("read converted canceled task: %v", err)
+	}
+	if errorCode != "CANCELED" || retryable {
+		t.Fatalf("canceled task conversion = %q/%t, want CANCELED/false", errorCode, retryable)
+	}
+	if completedAt.IsZero() {
+		t.Fatal("canceled task did not receive completed_at")
+	}
+
+	// 新状态域：dispatched/canceled 被 CHECK 拒绝。
+	_, err = conn.Exec(ctx, `
+		INSERT INTO server_tasks (id, server_id, node_id, task_type, status, generation,
+			idempotency_scope, idempotency_key, request_digest)
+		VALUES (gen_random_uuid(), $1, $2, 'start', 'dispatched', 1,
+			'test-dispatched-reject', 'test-dispatched-reject-0001', $3)
+	`, serverID, nodeID, digest)
+	requireSQLState(t, err, "23514", "server_tasks.status must reject dispatched after 000009")
+
+	// 新索引存在（租约到期对账用）。
+	var leaseIndexExists bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE schemaname = $1 AND indexname = 'server_tasks_lease_expiry_idx'
+		)`, schema).Scan(&leaseIndexExists); err != nil {
+		t.Fatalf("inspect lease expiry index: %v", err)
+	}
+	if !leaseIndexExists {
+		t.Fatal("server_tasks_lease_expiry_idx missing after 000009")
+	}
+
+	applyMigration(t, ctx, conn, "000009_task_fencing.down.sql")
+	for _, column := range []string{"task_input", "lease_token", "connection_epoch", "state_version", "lease_renewed_at"} {
+		assertColumnExists(t, ctx, conn, schema, "server_tasks", column, false)
+	}
+	// 清掉被 up 压缩成 queued 的历史行，否则它与下面的 dispatched 行在
+	// 恢复后的互斥索引上冲突。
+	if _, err := conn.Exec(ctx, `DELETE FROM server_tasks WHERE id = $1`, dispatchedID); err != nil {
+		t.Fatalf("delete converted task before down-phase insert: %v", err)
+	}
+	// 旧状态域恢复：dispatched 可再次写入。
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO server_tasks (id, server_id, node_id, task_type, status, generation,
+			idempotency_scope, idempotency_key, request_digest)
+		VALUES (gen_random_uuid(), $1, $2, 'start', 'dispatched', 1,
+			'test-dispatched-restored', 'test-dispatched-restored-001', $3)
+	`, serverID, nodeID, digest); err != nil {
+		t.Fatalf("dispatched insert after down migration: %v", err)
+	}
+	applyMigration(t, ctx, conn, "000001_core.down.sql")
+}
+
 func TestPostgresMigrationFailureCleansIsolatedSchema(t *testing.T) {
 	config := testDatabaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -1263,6 +1263,12 @@ type Task struct {
 	Attempt              uint32                   `protobuf:"varint,8,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	RequiredCapabilities []*CapabilityRequirement `protobuf:"bytes,9,rep,name=required_capabilities,json=requiredCapabilities,proto3" json:"required_capabilities,omitempty"`
 	BundleDigest         string                   `protobuf:"bytes,10,opt,name=bundle_digest,json=bundleDigest,proto3" json:"bundle_digest,omitempty"`
+	// Fenced lease fields. New agents MUST echo these back on TaskAck,
+	// TaskProgress, RunningTaskHeartbeat and TaskResult. An empty lease_token
+	// marks a legacy agent: the control plane falls back to node + attempt
+	// validation without lease fencing for that message.
+	LeaseToken      string `protobuf:"bytes,15,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	ConnectionEpoch uint64 `protobuf:"varint,16,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*Task_PayloadJson
@@ -1366,6 +1372,20 @@ func (x *Task) GetBundleDigest() string {
 		return x.BundleDigest
 	}
 	return ""
+}
+
+func (x *Task) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *Task) GetConnectionEpoch() uint64 {
+	if x != nil {
+		return x.ConnectionEpoch
+	}
+	return 0
 }
 
 func (x *Task) GetPayload() isTask_Payload {
@@ -2145,13 +2165,16 @@ func (x *ExtensionTaskPayload) GetValue() []byte {
 }
 
 type TaskAck struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Accepted      bool                   `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	ErrorCode     string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
-	Attempt       uint32                 `protobuf:"varint,4,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Accepted    bool                   `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	ErrorCode   string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	Attempt     uint32                 `protobuf:"varint,4,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+	LeaseToken      string `protobuf:"bytes,5,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	ConnectionEpoch uint64 `protobuf:"varint,6,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TaskAck) Reset() {
@@ -2212,15 +2235,32 @@ func (x *TaskAck) GetAttempt() uint32 {
 	return 0
 }
 
+func (x *TaskAck) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *TaskAck) GetConnectionEpoch() uint64 {
+	if x != nil {
+		return x.ConnectionEpoch
+	}
+	return 0
+}
+
 type TaskProgress struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Percent       uint32                 `protobuf:"varint,2,opt,name=percent,proto3" json:"percent,omitempty"`
-	Checkpoint    string                 `protobuf:"bytes,3,opt,name=checkpoint,proto3" json:"checkpoint,omitempty"`
-	Message       string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
-	Attempt       uint32                 `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Percent     uint32                 `protobuf:"varint,2,opt,name=percent,proto3" json:"percent,omitempty"`
+	Checkpoint  string                 `protobuf:"bytes,3,opt,name=checkpoint,proto3" json:"checkpoint,omitempty"`
+	Message     string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	Attempt     uint32                 `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+	LeaseToken      string `protobuf:"bytes,6,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	ConnectionEpoch uint64 `protobuf:"varint,7,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TaskProgress) Reset() {
@@ -2288,16 +2328,33 @@ func (x *TaskProgress) GetAttempt() uint32 {
 	return 0
 }
 
+func (x *TaskProgress) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *TaskProgress) GetConnectionEpoch() uint64 {
+	if x != nil {
+		return x.ConnectionEpoch
+	}
+	return 0
+}
+
 type TaskResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Succeeded     bool                   `protobuf:"varint,2,opt,name=succeeded,proto3" json:"succeeded,omitempty"`
-	ErrorCode     string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
-	Retryable     bool                   `protobuf:"varint,4,opt,name=retryable,proto3" json:"retryable,omitempty"`
-	ResultJson    []byte                 `protobuf:"bytes,5,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
-	Attempt       uint32                 `protobuf:"varint,6,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Succeeded   bool                   `protobuf:"varint,2,opt,name=succeeded,proto3" json:"succeeded,omitempty"`
+	ErrorCode   string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	Retryable   bool                   `protobuf:"varint,4,opt,name=retryable,proto3" json:"retryable,omitempty"`
+	ResultJson  []byte                 `protobuf:"bytes,5,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
+	Attempt     uint32                 `protobuf:"varint,6,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+	LeaseToken      string `protobuf:"bytes,7,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	ConnectionEpoch uint64 `protobuf:"varint,8,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *TaskResult) Reset() {
@@ -2368,6 +2425,20 @@ func (x *TaskResult) GetResultJson() []byte {
 func (x *TaskResult) GetAttempt() uint32 {
 	if x != nil {
 		return x.Attempt
+	}
+	return 0
+}
+
+func (x *TaskResult) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *TaskResult) GetConnectionEpoch() uint64 {
+	if x != nil {
+		return x.ConnectionEpoch
 	}
 	return 0
 }
@@ -2541,14 +2612,17 @@ func (x *ServerObserved) GetDetail() string {
 }
 
 type RunningTaskHeartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Attempt       uint32                 `protobuf:"varint,2,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
-	Checkpoint    string                 `protobuf:"bytes,4,opt,name=checkpoint,proto3" json:"checkpoint,omitempty"`
-	Percent       uint32                 `protobuf:"varint,5,opt,name=percent,proto3" json:"percent,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Attempt     uint32                 `protobuf:"varint,2,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	ObservedAt  *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Checkpoint  string                 `protobuf:"bytes,4,opt,name=checkpoint,proto3" json:"checkpoint,omitempty"`
+	Percent     uint32                 `protobuf:"varint,5,opt,name=percent,proto3" json:"percent,omitempty"`
+	// Echoed from Task. Empty lease_token marks a legacy agent (no fencing).
+	LeaseToken      string `protobuf:"bytes,6,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	ConnectionEpoch uint64 `protobuf:"varint,7,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RunningTaskHeartbeat) Reset() {
@@ -2612,6 +2686,20 @@ func (x *RunningTaskHeartbeat) GetCheckpoint() string {
 func (x *RunningTaskHeartbeat) GetPercent() uint32 {
 	if x != nil {
 		return x.Percent
+	}
+	return 0
+}
+
+func (x *RunningTaskHeartbeat) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *RunningTaskHeartbeat) GetConnectionEpoch() uint64 {
+	if x != nil {
+		return x.ConnectionEpoch
 	}
 	return 0
 }
@@ -4364,7 +4452,7 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\x14disk_available_bytes\x18\x05 \x01(\x04R\x12diskAvailableBytes\x12\x19\n" +
 	"\bcpu_load\x18\x06 \x01(\x01R\acpuLoad\x12#\n" +
 	"\ragent_version\x18\a \x01(\tR\fagentVersion\x12U\n" +
-	"\x12running_operations\x18\b \x03(\v2&.gugumanager.agent.v1.RunningOperationR\x11runningOperations\"\xcb\x05\n" +
+	"\x12running_operations\x18\b \x03(\v2&.gugumanager.agent.v1.RunningOperationR\x11runningOperations\"\x97\x06\n" +
 	"\x04Task\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1e\n" +
@@ -4377,7 +4465,10 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\aattempt\x18\b \x01(\rR\aattempt\x12`\n" +
 	"\x15required_capabilities\x18\t \x03(\v2+.gugumanager.agent.v1.CapabilityRequirementR\x14requiredCapabilities\x12#\n" +
 	"\rbundle_digest\x18\n" +
-	" \x01(\tR\fbundleDigest\x12'\n" +
+	" \x01(\tR\fbundleDigest\x12\x1f\n" +
+	"\vlease_token\x18\x0f \x01(\tR\n" +
+	"leaseToken\x12)\n" +
+	"\x10connection_epoch\x18\x10 \x01(\x04R\x0fconnectionEpoch\x12'\n" +
 	"\fpayload_json\x18\x05 \x01(\fB\x02\x18\x01H\x00R\vpayloadJson\x12J\n" +
 	"\tprovision\x18\v \x01(\v2*.gugumanager.agent.v1.ProvisionTaskPayloadH\x00R\tprovision\x12>\n" +
 	"\x05power\x18\f \x01(\v2&.gugumanager.agent.v1.PowerTaskPayloadH\x00R\x05power\x12A\n" +
@@ -4434,13 +4525,16 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\x14delete_remote_object\x18\x03 \x01(\bR\x12deleteRemoteObject\"G\n" +
 	"\x14ExtensionTaskPayload\x12\x19\n" +
 	"\btype_url\x18\x01 \x01(\tR\atypeUrl\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value\"\x81\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\"\xcd\x01\n" +
 	"\aTaskAck\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x1d\n" +
 	"\n" +
 	"error_code\x18\x03 \x01(\tR\terrorCode\x12\x18\n" +
-	"\aattempt\x18\x04 \x01(\rR\aattempt\"\x9f\x01\n" +
+	"\aattempt\x18\x04 \x01(\rR\aattempt\x12\x1f\n" +
+	"\vlease_token\x18\x05 \x01(\tR\n" +
+	"leaseToken\x12)\n" +
+	"\x10connection_epoch\x18\x06 \x01(\x04R\x0fconnectionEpoch\"\xeb\x01\n" +
 	"\fTaskProgress\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x18\n" +
 	"\apercent\x18\x02 \x01(\rR\apercent\x12\x1e\n" +
@@ -4448,7 +4542,10 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"checkpoint\x18\x03 \x01(\tR\n" +
 	"checkpoint\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12\x18\n" +
-	"\aattempt\x18\x05 \x01(\rR\aattempt\"\xc5\x01\n" +
+	"\aattempt\x18\x05 \x01(\rR\aattempt\x12\x1f\n" +
+	"\vlease_token\x18\x06 \x01(\tR\n" +
+	"leaseToken\x12)\n" +
+	"\x10connection_epoch\x18\a \x01(\x04R\x0fconnectionEpoch\"\x91\x02\n" +
 	"\n" +
 	"TaskResult\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1c\n" +
@@ -4458,7 +4555,10 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\tretryable\x18\x04 \x01(\bR\tretryable\x12\x1f\n" +
 	"\vresult_json\x18\x05 \x01(\fR\n" +
 	"resultJson\x12\x18\n" +
-	"\aattempt\x18\x06 \x01(\rR\aattempt\"\x89\x01\n" +
+	"\aattempt\x18\x06 \x01(\rR\aattempt\x12\x1f\n" +
+	"\vlease_token\x18\a \x01(\tR\n" +
+	"leaseToken\x12)\n" +
+	"\x10connection_epoch\x18\b \x01(\x04R\x0fconnectionEpoch\"\x89\x01\n" +
 	"\bLogBatch\x12\x1b\n" +
 	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12%\n" +
 	"\x0efirst_sequence\x18\x02 \x01(\x04R\rfirstSequence\x12\x14\n" +
@@ -4474,7 +4574,7 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"runtime_id\x18\x06 \x01(\tR\truntimeId\x12#\n" +
 	"\rbundle_digest\x18\a \x01(\tR\fbundleDigest\x12\x16\n" +
-	"\x06detail\x18\b \x01(\tR\x06detail\"\xca\x01\n" +
+	"\x06detail\x18\b \x01(\tR\x06detail\"\x96\x02\n" +
 	"\x14RunningTaskHeartbeat\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x18\n" +
 	"\aattempt\x18\x02 \x01(\rR\aattempt\x12;\n" +
@@ -4483,7 +4583,10 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"checkpoint\x18\x04 \x01(\tR\n" +
 	"checkpoint\x12\x18\n" +
-	"\apercent\x18\x05 \x01(\rR\apercent\"\xb3\x01\n" +
+	"\apercent\x18\x05 \x01(\rR\apercent\x12\x1f\n" +
+	"\vlease_token\x18\x06 \x01(\tR\n" +
+	"leaseToken\x12)\n" +
+	"\x10connection_epoch\x18\a \x01(\x04R\x0fconnectionEpoch\"\xb3\x01\n" +
 	"\fMetricsBatch\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12=\n" +

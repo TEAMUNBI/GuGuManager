@@ -55,7 +55,10 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 	}
 	s.log.Info("agent connected", "node", nodeID, "version", hello.Hello.GetAgentVersion())
 
-	go s.claimLoop(ctx, nodeID, send)
+	// 每个 Connect 会话领取一个新 epoch；本会话 claim 的任务绑定该 epoch，
+	// Agent 必须在 Ack/Progress/Heartbeat/Result 中原样回显。
+	connectionEpoch := s.nextConnectionEpoch(nodeID)
+	go s.claimLoop(ctx, nodeID, connectionEpoch, send)
 	type receivedFrame struct {
 		request *agentv1.ConnectRequest
 		err     error
@@ -109,11 +112,11 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 		case *agentv1.ConnectRequest_CertificateSigningRequest:
 			s.handleCertificateRotation(ctx, nodeID, p.CertificateSigningRequest, send)
 		case *agentv1.ConnectRequest_TaskAck:
-			s.log.Debug("task ack", "node", nodeID, "operation", p.TaskAck.GetOperationId(), "accepted", p.TaskAck.GetAccepted())
+			s.handleTaskAck(ctx, nodeID, p.TaskAck)
 		case *agentv1.ConnectRequest_TaskProgress:
-			s.log.Debug("task progress", "node", nodeID, "operation", p.TaskProgress.GetOperationId(), "percent", p.TaskProgress.GetPercent())
+			s.handleTaskProgress(ctx, nodeID, p.TaskProgress)
 		case *agentv1.ConnectRequest_RunningTaskHeartbeat:
-			s.log.Debug("running task heartbeat", "node", nodeID, "operation", p.RunningTaskHeartbeat.GetOperationId())
+			s.handleRunningTaskHeartbeat(ctx, nodeID, p.RunningTaskHeartbeat)
 		case *agentv1.ConnectRequest_LogBatch:
 			s.handleLogBatch(ctx, nodeID, p.LogBatch)
 		case *agentv1.ConnectRequest_MetricsBatch:
@@ -129,7 +132,8 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 }
 
 // claimLoop 周期性为节点 claim 任务并通过流下发。ctx 取消或 Send 失败即退出。
-func (s *Server) claimLoop(ctx context.Context, nodeID string, send func(*agentv1.ConnectResponse) error) {
+// 领取到的任务绑定本连接的 epoch，Agent 回显的 fence 必须与之匹配。
+func (s *Server) claimLoop(ctx context.Context, nodeID string, connectionEpoch int64, send func(*agentv1.ConnectResponse) error) {
 	period := s.claimPeriod
 	if period <= 0 {
 		period = defaultClaimPeriod
@@ -141,7 +145,7 @@ func (s *Server) claimLoop(ctx context.Context, nodeID string, send func(*agentv
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			task, err := s.store.ClaimTask(ctx, nodeID)
+			task, err := s.store.ClaimTask(ctx, nodeID, connectionEpoch)
 			if err != nil {
 				s.log.Warn("claim task", "node", nodeID, "error", err)
 				continue
@@ -153,7 +157,7 @@ func (s *Server) claimLoop(ctx context.Context, nodeID string, send func(*agentv
 				s.log.Debug("send task", "node", nodeID, "operation", task.OperationID, "error", err)
 				return
 			}
-			s.log.Info("task dispatched", "node", nodeID, "operation", task.OperationID, "type", task.TaskType)
+			s.log.Info("task dispatched", "node", nodeID, "operation", task.OperationID, "type", task.TaskType, "epoch", connectionEpoch, "attempt", task.Attempt)
 		}
 	}
 }
@@ -167,15 +171,81 @@ func (s *Server) handleHeartbeat(ctx context.Context, nodeID string, hb *agentv1
 	}
 }
 
+// handleTaskAck 应用 Agent 的 TaskAck：fence 匹配时 leased -> running，
+// 拒绝时终态失败；fence 不匹配或已终态则静默成为 no-op。
+func (s *Server) handleTaskAck(ctx context.Context, nodeID string, ack *agentv1.TaskAck) {
+	if ack == nil || ack.GetOperationId() == "" {
+		return
+	}
+	fence := store.TaskLeaseFence{
+		OperationID: ack.GetOperationId(),
+		NodeID:      nodeID,
+		Epoch:       int64(ack.GetConnectionEpoch()),
+		Attempt:     int(ack.GetAttempt()),
+		LeaseToken:  ack.GetLeaseToken(),
+	}
+	if err := s.store.AckTask(ctx, fence, ack.GetAccepted(), ack.GetErrorCode()); err != nil {
+		s.log.Warn("ack task", "node", nodeID, "operation", fence.OperationID, "error", err)
+		return
+	}
+	s.log.Debug("task ack", "node", nodeID, "operation", fence.OperationID, "accepted", ack.GetAccepted(), "epoch", fence.Epoch, "attempt", fence.Attempt)
+}
+
+// handleTaskProgress 应用 Agent 的进度帧：单调推进 progress/checkpoint 并续租。
+func (s *Server) handleTaskProgress(ctx context.Context, nodeID string, progress *agentv1.TaskProgress) {
+	if progress == nil || progress.GetOperationId() == "" {
+		return
+	}
+	fence := store.TaskLeaseFence{
+		OperationID: progress.GetOperationId(),
+		NodeID:      nodeID,
+		Epoch:       int64(progress.GetConnectionEpoch()),
+		Attempt:     int(progress.GetAttempt()),
+		LeaseToken:  progress.GetLeaseToken(),
+	}
+	if err := s.store.ReportTaskProgress(ctx, fence, int(progress.GetPercent()), progress.GetCheckpoint()); err != nil {
+		s.log.Warn("task progress", "node", nodeID, "operation", fence.OperationID, "error", err)
+		return
+	}
+	s.log.Debug("task progress", "node", nodeID, "operation", fence.OperationID, "percent", progress.GetPercent())
+}
+
+// handleRunningTaskHeartbeat 续租运行中任务的租约；旧 attempt/旧连接的
+// 心跳在 store 层被 fence 判为 stale，不会复活已重新入队的任务。
+func (s *Server) handleRunningTaskHeartbeat(ctx context.Context, nodeID string, heartbeat *agentv1.RunningTaskHeartbeat) {
+	if heartbeat == nil || heartbeat.GetOperationId() == "" {
+		return
+	}
+	fence := store.TaskLeaseFence{
+		OperationID: heartbeat.GetOperationId(),
+		NodeID:      nodeID,
+		Epoch:       int64(heartbeat.GetConnectionEpoch()),
+		Attempt:     int(heartbeat.GetAttempt()),
+		LeaseToken:  heartbeat.GetLeaseToken(),
+	}
+	if err := s.store.RenewTaskLease(ctx, fence); err != nil {
+		s.log.Warn("renew task lease", "node", nodeID, "operation", fence.OperationID, "error", err)
+		return
+	}
+	s.log.Debug("running task heartbeat", "node", nodeID, "operation", fence.OperationID)
+}
+
 func (s *Server) handleTaskResult(ctx context.Context, nodeID string, result *agentv1.TaskResult) {
-	if result == nil {
+	if result == nil || result.GetOperationId() == "" {
 		return
 	}
 	var errCode *string
 	if code := result.GetErrorCode(); code != "" {
 		errCode = &code
 	}
-	if err := s.store.CompleteTask(ctx, result.GetOperationId(), nodeID, result.GetSucceeded(), errCode, result.GetResultJson()); err != nil {
+	fence := store.TaskLeaseFence{
+		OperationID: result.GetOperationId(),
+		NodeID:      nodeID,
+		Epoch:       int64(result.GetConnectionEpoch()),
+		Attempt:     int(result.GetAttempt()),
+		LeaseToken:  result.GetLeaseToken(),
+	}
+	if err := s.store.CompleteTask(ctx, fence, result.GetSucceeded(), errCode, result.GetResultJson()); err != nil {
 		s.log.Warn("complete task", "node", nodeID, "operation", result.GetOperationId(), "error", err)
 	}
 }
@@ -356,15 +426,18 @@ func healthConditionString(h agentv1.HealthCondition) string {
 // claimedTaskToProto 把 store 领取到的任务转换为下发用的 proto Task。
 // 电源类任务在 server_tasks 中类型为 start/stop/restart/kill，Agent 执行器
 // 只按 provision/power 分发，因此下发前归一化为 Type="power" 并填充 Power
-// 字段（含动作与优雅停机超时）。其余任务透传 task_type 与 PayloadJson。
+// 字段（含动作与优雅停机超时）。000009 起新任务输入位于 task_input 并只
+// 通过 typed arm 下发（provision/backup），不再创建新的 payload_json 任务；
+// pre-000009 的旧行仍以 payload_json 兼容当前稳定 Agent。
 func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
 	proto := &agentv1.Task{
-		OperationId: task.OperationID,
-		ServerId:    task.ServerID,
-		Generation:  uint64(task.Generation),
-		Type:        task.TaskType,
-		Attempt:     uint32(task.Attempt),
-		Payload:     &agentv1.Task_PayloadJson{PayloadJson: task.PayloadJSON},
+		OperationId:     task.OperationID,
+		ServerId:        task.ServerID,
+		Generation:      uint64(task.Generation),
+		Type:            task.TaskType,
+		Attempt:         uint32(task.Attempt),
+		LeaseToken:      task.LeaseToken,
+		ConnectionEpoch: uint64(task.ConnectionEpoch),
 	}
 	if action, ok := powerActionForTaskType(task.TaskType); ok {
 		proto.Type = "power"
@@ -376,31 +449,52 @@ func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
 		}
 		return proto
 	}
+	if task.TaskType == "provision" && len(task.TaskInputJSON) > 0 {
+		payload := &agentv1.ProvisionTaskPayload{}
+		if err := protojson.Unmarshal(task.TaskInputJSON, payload); err == nil {
+			proto.Payload = &agentv1.Task_Provision{Provision: payload}
+			return proto
+		}
+		s2 := *task
+		proto.Payload = &agentv1.Task_PayloadJson{PayloadJson: s2.PayloadJSON}
+		return proto
+	}
 	if task.TaskType == "backup" || task.TaskType == "restore" || task.TaskType == "backup-delete" {
 		proto.Type = "backup"
 		payload := &agentv1.BackupTaskPayload{}
-		switch task.TaskType {
-		case "backup":
-			create := &agentv1.CreateBackupPayload{}
-			if len(task.PayloadJSON) > 0 {
-				_ = protojson.Unmarshal(task.PayloadJSON, create)
+		decoded := false
+		if input := task.InputJSON(); len(input) > 0 {
+			switch task.TaskType {
+			case "backup":
+				create := &agentv1.CreateBackupPayload{}
+				if err := protojson.Unmarshal(input, create); err == nil {
+					payload.Action = &agentv1.BackupTaskPayload_Create{Create: create}
+					decoded = true
+				}
+			case "restore":
+				restore := &agentv1.RestoreBackupPayload{}
+				if err := protojson.Unmarshal(input, restore); err == nil {
+					payload.Action = &agentv1.BackupTaskPayload_Restore{Restore: restore}
+					decoded = true
+				}
+			case "backup-delete":
+				del := &agentv1.DeleteBackupPayload{}
+				if err := protojson.Unmarshal(input, del); err == nil {
+					payload.Action = &agentv1.BackupTaskPayload_Delete{Delete: del}
+					decoded = true
+				}
 			}
-			payload.Action = &agentv1.BackupTaskPayload_Create{Create: create}
-		case "restore":
-			restore := &agentv1.RestoreBackupPayload{}
-			if len(task.PayloadJSON) > 0 {
-				_ = protojson.Unmarshal(task.PayloadJSON, restore)
-			}
-			payload.Action = &agentv1.BackupTaskPayload_Restore{Restore: restore}
-		case "backup-delete":
-			del := &agentv1.DeleteBackupPayload{}
-			if len(task.PayloadJSON) > 0 {
-				_ = protojson.Unmarshal(task.PayloadJSON, del)
-			}
-			payload.Action = &agentv1.BackupTaskPayload_Delete{Delete: del}
 		}
-		proto.Payload = &agentv1.Task_Backup{Backup: payload}
+		if decoded {
+			proto.Payload = &agentv1.Task_Backup{Backup: payload}
+			return proto
+		}
+		// 无法解析的旧行回退 legacy 载体，由 Agent 侧自行解码。
+		proto.Payload = &agentv1.Task_PayloadJson{PayloadJson: task.PayloadJSON}
+		return proto
 	}
+	// 其余任务类型（如 extension 占位）维持 legacy 载体。
+	proto.Payload = &agentv1.Task_PayloadJson{PayloadJson: task.PayloadJSON}
 	return proto
 }
 
