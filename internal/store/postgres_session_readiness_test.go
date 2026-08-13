@@ -122,6 +122,17 @@ func TestPostgresConcurrentSessionRecoveryHasOneUsableWinner(t *testing.T) {
 func TestPostgresReadinessChecksDatabaseMigrationsAndEncryptionKey(t *testing.T) {
 	s := testPostgres(t)
 	canonical := []string{"000001", "000002", "000003", "000004", "000005", "000006", "000007", "000008"}
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version text PRIMARY KEY,
+		applied_at timestamptz NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create migration ledger fixture: %v", err)
+	}
+	for _, version := range canonical {
+		if _, err := s.db.Exec(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING`, version); err != nil {
+			t.Fatalf("record canonical migration %s: %v", version, err)
+		}
+	}
 	s.SetRequiredMigrationVersions(canonical)
 
 	if err := s.Readiness(context.Background()); err == nil {
