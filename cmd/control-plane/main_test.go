@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/gugumanager/gugumanager/internal/agentrpc"
 	"github.com/gugumanager/gugumanager/internal/config"
 	"github.com/gugumanager/gugumanager/internal/domain"
 	"github.com/gugumanager/gugumanager/internal/store"
@@ -155,5 +156,18 @@ func TestBuildServiceDevelopment(t *testing.T) {
 	}
 	if _, ok := service.(*store.Memory); !ok {
 		t.Fatalf("buildService(development) returned %T, want *store.Memory", service)
+	}
+}
+
+func TestControlPlaneHTTPOptionsDoNotInstallTypedNilDispatcher(t *testing.T) {
+	options := controlPlaneHTTPOptions(config.Development, nil)
+	if len(options) != 1 {
+		t.Fatalf("development HTTP options = %d, want only environment option", len(options))
+	}
+
+	agentServer := &agentrpc.Server{}
+	options = controlPlaneHTTPOptions(config.Production, agentServer)
+	if len(options) != 2 {
+		t.Fatalf("production HTTP options = %d, want environment and dispatcher options", len(options))
 	}
 }

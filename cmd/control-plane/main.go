@@ -96,7 +96,8 @@ func main() {
 		go publishOutboxEvents(outboxCtx, pg, logger)
 	}
 
-	api := httpapi.New(service, logger, httpapi.WithCommandDispatcher(agentServer), httpapi.WithEnvironment(cfg.Environment))
+	apiOptions := controlPlaneHTTPOptions(cfg.Environment, agentServer)
+	api := httpapi.New(service, logger, apiOptions...)
 	handler := spa(api, cfg.WebRoot, logger)
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 
@@ -118,6 +119,17 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown", "error", err)
 	}
+}
+
+func controlPlaneHTTPOptions(environment string, agentServer *agentrpc.Server) []httpapi.Option {
+	options := []httpapi.Option{httpapi.WithEnvironment(environment)}
+	// A typed nil *agentrpc.Server becomes a non-nil interface value. Do not
+	// install it in development mode: the first console command would otherwise
+	// dispatch through a nil receiver and panic.
+	if agentServer != nil {
+		options = append(options, httpapi.WithCommandDispatcher(agentServer))
+	}
+	return options
 }
 
 // buildService 根据配置构建 httpapi.ControlPlane 实例。
