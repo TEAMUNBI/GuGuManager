@@ -87,7 +87,6 @@ func TestProductionValidationReportsAllRequiredGateFields(t *testing.T) {
 	for _, field := range []string{
 		"GUGU_PUBLIC_URL",
 		"GUGU_DATABASE_URL",
-		"GUGU_SESSION_KEY_FILE",
 		"GUGU_ENCRYPTION_KEY_FILE",
 		"GUGU_AGENT_CA_CERT_FILE",
 		"GUGU_AGENT_CA_KEY_FILE",
@@ -143,7 +142,6 @@ func TestValidateProductionConfigRejectsDevelopmentBootstrapToken(t *testing.T) 
 		PublicURL:         env["GUGU_PUBLIC_URL"],
 		DatabaseURL:       env["GUGU_DATABASE_URL"],
 		RedisURL:          env["GUGU_REDIS_URL"],
-		SessionKeyFile:    env["GUGU_SESSION_KEY_FILE"],
 		EncryptionKeyFile: env["GUGU_ENCRYPTION_KEY_FILE"],
 		AgentCACertFile:   env["GUGU_AGENT_CA_CERT_FILE"],
 		AgentCAKeyFile:    env["GUGU_AGENT_CA_KEY_FILE"],
@@ -167,7 +165,7 @@ func TestProductionConfigValidatesURLAndSecretFiles(t *testing.T) {
 	}{
 		{name: "public URL requires HTTPS", field: "GUGU_PUBLIC_URL", value: "http://panel.example.test"},
 		{name: "database URL requires PostgreSQL", field: "GUGU_DATABASE_URL", value: "mysql://db.internal/gugu"},
-		{name: "secret file must exist", field: "GUGU_SESSION_KEY_FILE", value: filepath.Join(t.TempDir(), "missing.key")},
+		{name: "secret file must exist", field: "GUGU_ENCRYPTION_KEY_FILE", value: filepath.Join(t.TempDir(), "missing.key")},
 	}
 
 	for _, test := range tests {
@@ -180,6 +178,20 @@ func TestProductionConfigValidatesURLAndSecretFiles(t *testing.T) {
 				t.Fatalf("error = %v, want validation error for %s", err, test.field)
 			}
 		})
+	}
+}
+
+func TestProductionConfigRejectsObsoleteSessionSigningKey(t *testing.T) {
+	env := completeProductionEnv(t)
+	env["GUGU_SESSION_KEY_FILE"] = filepath.Join(t.TempDir(), "retired-session.key")
+
+	_, err := load(mapLookup(env))
+	var validation *ValidationError
+	if !errors.As(err, &validation) || !validation.Has("GUGU_SESSION_KEY_FILE") {
+		t.Fatalf("error = %v, want obsolete GUGU_SESSION_KEY_FILE validation error", err)
+	}
+	if strings.Contains(err.Error(), env["GUGU_SESSION_KEY_FILE"]) {
+		t.Fatalf("validation error exposed the obsolete secret path: %v", err)
 	}
 }
 
@@ -231,7 +243,6 @@ func completeProductionEnv(t *testing.T) map[string]string {
 	t.Helper()
 	directory := t.TempDir()
 	files := map[string]string{
-		"GUGU_SESSION_KEY_FILE":    "session.key",
 		"GUGU_ENCRYPTION_KEY_FILE": "encryption.key",
 		"GUGU_AGENT_CA_CERT_FILE":  "agent-ca.crt",
 		"GUGU_AGENT_CA_KEY_FILE":   "agent-ca.key",
@@ -251,7 +262,6 @@ func completeProductionEnv(t *testing.T) map[string]string {
 		"GUGU_PUBLIC_URL":          "https://panel.example.test",
 		"GUGU_DATABASE_URL":        "postgres://gugu:secret@db.internal/gugu?sslmode=require",
 		"GUGU_REDIS_URL":           "redis://cache.internal:6379/0",
-		"GUGU_SESSION_KEY_FILE":    files["GUGU_SESSION_KEY_FILE"],
 		"GUGU_ENCRYPTION_KEY_FILE": files["GUGU_ENCRYPTION_KEY_FILE"],
 		"GUGU_AGENT_CA_CERT_FILE":  files["GUGU_AGENT_CA_CERT_FILE"],
 		"GUGU_AGENT_CA_KEY_FILE":   files["GUGU_AGENT_CA_KEY_FILE"],

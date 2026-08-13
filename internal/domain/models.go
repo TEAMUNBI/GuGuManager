@@ -184,6 +184,17 @@ type ConsoleLine struct {
 	Message   string    `json:"message"`
 }
 
+// ConsoleCommandResult is the runtime-neutral result returned by an Agent for
+// one console command dispatch. RequestID and ServerID are correlation fields,
+// not user-controlled display data.
+type ConsoleCommandResult struct {
+	RequestID string
+	ServerID  string
+	Succeeded bool
+	ErrorCode string
+	Retryable bool
+}
+
 type FileEntry struct {
 	Name       string    `json:"name"`
 	Path       string    `json:"path"`

@@ -1150,6 +1150,20 @@ export interface operations {
                     };
                 };
             };
+            /** @description A required dependency, canonical migration, or encryption key is not ready */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        status: "not_ready";
+                        /** @description Configured runtime adapter. */
+                        adapter: string;
+                    };
+                };
+            };
         };
     };
     getSetupStatus: {
@@ -1966,6 +1980,9 @@ export interface operations {
             409: components["responses"]["Error"];
             415: components["responses"]["Error"];
             422: components["responses"]["Error"];
+            502: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+            504: components["responses"]["Error"];
         };
     };
     listFiles: {

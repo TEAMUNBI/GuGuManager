@@ -255,7 +255,7 @@ func TestUserLifecycleNormalizesEmailAndDisabledUsersLoseSessions(t *testing.T) 
 	if updated.Status != "disabled" {
 		t.Fatalf("updated status = %q", updated.Status)
 	}
-	if _, err := service.Session(token); err == nil {
+	if _, err := service.AuthenticateSession(token); err == nil {
 		t.Fatal("disabled user's existing session remained valid")
 	}
 	if _, _, err := service.Login("player@example.test", "initial secure password"); err == nil {
@@ -301,7 +301,7 @@ func TestPasswordResetTokenIsSingleUseAndRevokesEveryOldSession(t *testing.T) {
 		t.Fatalf("ResetPassword returned error: %v", err)
 	}
 	for _, token := range []string{firstSession, secondSession} {
-		if _, err := service.Session(token); err == nil {
+		if _, err := service.AuthenticateSession(token); err == nil {
 			t.Fatal("password reset left an old session valid")
 		}
 	}

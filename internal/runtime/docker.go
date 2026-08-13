@@ -189,6 +189,14 @@ func (r *DockerRuntime) RestartContainer(ctx context.Context, containerID string
 	return err
 }
 
+// KillContainer sends Docker's default SIGKILL to the container's init
+// process. It deliberately leaves the stopped container in place so a force
+// stop cannot destroy the runtime that start/reconcile still owns.
+func (r *DockerRuntime) KillContainer(ctx context.Context, containerID string) error {
+	_, err := r.client.ContainerKill(ctx, containerID, client.ContainerKillOptions{})
+	return err
+}
+
 // RemoveContainer removes a container (must be stopped first unless force=true).
 func (r *DockerRuntime) RemoveContainer(ctx context.Context, containerID string, force bool) error {
 	_, err := r.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{

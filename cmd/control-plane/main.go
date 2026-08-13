@@ -155,6 +155,10 @@ func buildDevelopmentService(cfg config.Config, logger *slog.Logger) (httpapi.Co
 // 迁移与 store 各自维护独立的连接池：RunMigrations 需要 *sql.DB，
 // NewPostgres 内部自行建立连接，两者不共享连接。
 func buildProductionService(ctx context.Context, cfg config.Config, logger *slog.Logger) (httpapi.ControlPlane, error) {
+	migrationPlan, err := migrations.LoadMigrations(migrationsDir())
+	if err != nil {
+		return nil, fmt.Errorf("load canonical migrations: %w", err)
+	}
 	migrationDB, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open migration database: %w", err)
@@ -183,6 +187,7 @@ func buildProductionService(ctx context.Context, cfg config.Config, logger *slog
 	if err != nil {
 		return nil, fmt.Errorf("initialize postgres store: %w", err)
 	}
+	pg.SetRequiredMigrationVersions(migrations.Versions(migrationPlan))
 	pg.SetBootstrapToken(bootstrapToken)
 	if err := configureSecretCipher(pg, cfg); err != nil {
 		return nil, err

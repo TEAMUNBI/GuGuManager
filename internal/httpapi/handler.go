@@ -35,7 +35,8 @@ type ControlPlane interface {
 	SetupStatus() domain.SetupStatus
 	SetupAdmin(input domain.SetupAdminInput) (domain.User, error)
 	Login(email string, password string) (domain.SessionView, string, error)
-	Session(token string) (domain.SessionView, error)
+	AuthenticateSession(token string) (domain.SessionView, error)
+	RecoverSession(token string) (domain.SessionView, string, error)
 	Logout(token string)
 	ResetPassword(token string, password string) error
 	ValidateCSRF(token string, csrf string) bool
@@ -70,6 +71,7 @@ type ControlPlane interface {
 	Console(serverID string) ([]domain.ConsoleLine, error)
 	SubscribeConsoleLines(serverID string) (<-chan domain.ConsoleLine, func())
 	SendConsoleCommand(serverID string, command string, actor domain.User) error
+	RecordConsoleCommandResult(serverID string, actor domain.User, result domain.ConsoleCommandResult) error
 	Files(serverID string, requestedPath string) ([]domain.FileEntry, error)
 	ReadFile(serverID string, requestedPath string) (domain.FileContent, error)
 	WriteFile(serverID string, requestedPath string, content []byte, actor domain.User) error
@@ -87,7 +89,13 @@ type ControlPlane interface {
 // CommandDispatcher 向节点 Connect 流下发控制台命令帧。
 // 生产环境由 agentrpc.Server 实现；开发环境可注入 nil（仅校验+审计）。
 type CommandDispatcher interface {
-	SendConsoleCommand(nodeID, serverID, command string) error
+	SendConsoleCommand(ctx context.Context, nodeID, serverID, command string) (domain.ConsoleCommandResult, error)
+}
+
+// ReadinessChecker verifies live production dependencies. Development memory
+// stores intentionally do not implement it because they have no dependencies.
+type ReadinessChecker interface {
+	Readiness(context.Context) error
 }
 
 // Option 配置 Handler。
@@ -103,6 +111,12 @@ func WithEnvironment(environment string) Option {
 	return func(h *Handler) { h.environment = environment }
 }
 
+// WithReadinessChecker provides a test seam for readiness failures. New also
+// discovers this interface directly on a production store.
+func WithReadinessChecker(checker ReadinessChecker) Option {
+	return func(h *Handler) { h.readiness = checker }
+}
+
 type Handler struct {
 	service          ControlPlane
 	logger           *slog.Logger
@@ -110,6 +124,7 @@ type Handler struct {
 	loginLimiter     *identity.AttemptLimiter
 	sensitiveLimiter *identity.AttemptLimiter
 	environment      string
+	readiness        ReadinessChecker
 }
 
 type principal struct {
@@ -132,6 +147,9 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 			Maximum: 5, Window: 5 * time.Minute, BlockFor: 15 * time.Minute,
 		}, time.Now),
 	}
+	if checker, ok := service.(ReadinessChecker); ok {
+		h.readiness = checker
+	}
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -142,7 +160,7 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("POST /api/v1/setup/admin", h.setupAdmin)
 	mux.HandleFunc("POST /api/v1/auth/login", h.login)
 	mux.HandleFunc("POST /api/v1/auth/password-reset", h.passwordReset)
-	mux.HandleFunc("GET /api/v1/auth/session", h.auth(h.session))
+	mux.HandleFunc("GET /api/v1/auth/session", h.session)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.auth(h.logout))
 	mux.HandleFunc("GET /api/v1/users", h.auth(h.users))
 	mux.HandleFunc("POST /api/v1/users", h.auth(h.createUser))
@@ -212,7 +230,7 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 			h.writeError(w, traceID(r), domain.NewProblem("AUTH_REQUIRED", "请先登录", false))
 			return
 		}
-		session, err := h.service.Session(cookie.Value)
+		session, err := h.service.AuthenticateSession(cookie.Value)
 		if err != nil {
 			h.writeError(w, traceID(r), err)
 			return
@@ -266,10 +284,22 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-func (h *Handler) ready(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
 	adapter := h.environment
 	if adapter == "" {
 		adapter = "development-memory"
+	}
+	if h.readiness == nil && adapter == "production" {
+		h.logger.Error("readiness unavailable", "reason", "production readiness checker is not configured")
+		h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "adapter": adapter})
+		return
+	}
+	if h.readiness != nil {
+		if err := h.readiness.Readiness(r.Context()); err != nil {
+			h.logger.Warn("readiness check failed", "error", err)
+			h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "adapter": adapter})
+			return
+		}
 	}
 	h.writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "adapter": adapter})
 }
@@ -330,7 +360,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reservation.CompleteSuccess(accountKey)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: 12 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: session.Environment == "production"})
+	setSessionCookie(w, token, session.Environment)
 	h.writeData(w, http.StatusOK, session)
 }
 
@@ -357,7 +387,25 @@ func (h *Handler) passwordReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) session(w http.ResponseWriter, r *http.Request) {
-	h.writeData(w, http.StatusOK, principalFrom(r).Session)
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		h.writeError(w, traceID(r), domain.NewProblem("AUTH_REQUIRED", "请先登录", false))
+		return
+	}
+	session, token, err := h.service.RecoverSession(cookie.Value)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	setSessionCookie(w, token, session.Environment)
+	h.writeData(w, http.StatusOK, session)
+}
+
+func setSessionCookie(w http.ResponseWriter, token string, environment string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: token, Path: "/", MaxAge: 12 * 60 * 60,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: environment == "production",
+	})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
@@ -968,11 +1016,13 @@ func (h *Handler) consoleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverID := r.PathValue("serverID")
+	actor := principalFrom(r).Session.User
 	// store 层负责校验、权限与审计；校验通过后真实帧由 dispatcher 下发。
-	if err := h.service.SendConsoleCommand(serverID, request.Command, principalFrom(r).Session.User); err != nil {
+	if err := h.service.SendConsoleCommand(serverID, request.Command, actor); err != nil {
 		h.writeError(w, traceID(r), err)
 		return
 	}
+	result := domain.ConsoleCommandResult{RequestID: id.New(), ServerID: serverID, Succeeded: true}
 	if h.dispatcher != nil {
 		server, err := h.service.Server(serverID)
 		if err != nil {
@@ -983,11 +1033,18 @@ func (h *Handler) consoleCommand(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, traceID(r), domain.NewProblem("OPERATION_CONFLICT", "服务器未绑定节点", false))
 			return
 		}
-		if err := h.dispatcher.SendConsoleCommand(server.NodeID, serverID, request.Command); err != nil {
+		result, err = h.dispatcher.SendConsoleCommand(r.Context(), server.NodeID, serverID, request.Command)
+		if err != nil {
 			h.logger.Warn("dispatch console command", "server", serverID, "node", server.NodeID, "error", err)
-			h.writeError(w, traceID(r), domain.NewProblem("NODE_OFFLINE", "节点离线，命令未下发", false))
+			if auditErr := h.service.RecordConsoleCommandResult(serverID, actor, result); auditErr != nil {
+				h.logger.Error("audit console command failure", "server", serverID, "error", auditErr)
+			}
+			h.writeError(w, traceID(r), err)
 			return
 		}
+	}
+	if err := h.service.RecordConsoleCommandResult(serverID, actor, result); err != nil {
+		h.logger.Error("audit console command result", "server", serverID, "error", err)
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -1285,13 +1342,17 @@ func statusFor(code string) int {
 		return http.StatusConflict
 	case "PRECONDITION_FAILED":
 		return http.StatusPreconditionFailed
-	case "VALIDATION_FAILED", "PATH_ESCAPE_BLOCKED", "INSUFFICIENT_RESOURCE", "GAME_DEFINITION_NOT_APPROVED", "PACKAGE_INCOMPATIBLE":
+	case "VALIDATION_FAILED", "PATH_ESCAPE_BLOCKED", "INSUFFICIENT_RESOURCE", "GAME_DEFINITION_NOT_APPROVED", "PACKAGE_INCOMPATIBLE", "CONSOLE_UNSUPPORTED", "CAPABILITY_UNSUPPORTED":
 		return http.StatusUnprocessableEntity
 	case "BACKUP_INTEGRITY_FAILED":
 		return http.StatusUnprocessableEntity
 	case "RATE_LIMITED":
 		return http.StatusTooManyRequests
-	case "NODE_OFFLINE":
+	case "COMMAND_FAILED", "EXECUTION_ERROR":
+		return http.StatusBadGateway
+	case "CONSOLE_TIMEOUT":
+		return http.StatusGatewayTimeout
+	case "NODE_OFFLINE", "RUNTIME_UNAVAILABLE":
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError

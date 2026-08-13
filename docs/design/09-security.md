@@ -14,7 +14,7 @@
 
 当前开发适配器已经使用带随机盐和参数记录的 Argon2id PHC 口令，并只把 Session Token 的 SHA-256 摘要放入内存。退出与过期会撤销内存会话，过期会话不能通过 CSRF 校验。登录按规范化账号和直接来源 IP 两个维度执行 5 分钟窗口、5 次失败和 15 分钟阻断，返回 `429` 与 `Retry-After`；reservation 会把 in-flight 尝试计入阈值，避免并发请求在第一轮 Argon2 完成前绕过限流。setup 与 reset 使用独立来源 IP reservation；登录成功只清除账号维度状态，不抹去来源 IP 失败历史。Argon2id 派生在进程内最多同时执行 2 个任务；它不信任未经配置的代理转发头，也不是 Redis 分布式限流。限流表默认最多保留 4096 个维度，达到容量时先清理过期条目，再只淘汰最旧的未阻断且没有 in-flight reservation 的条目。
 
-生产模式（PostgreSQL store）对会话与 CSRF 都只保存不可逆摘要（`csrf_digest`）。由于无法从库中还原 CSRF 明文，Session(token) 恢复时会轮换 CSRF Token、更新数据库摘要并把新明文返回给前端，因此页面刷新后写操作不再被拦截。
+生产模式（PostgreSQL store）对会话与 CSRF 都只保存不可逆摘要。普通鉴权通过 `AuthenticateSession` 只读取身份，不返回或轮换 CSRF，因此普通 GET 不会使浏览器持有的令牌失效。页面刷新仅通过 `/auth/session` 显式恢复：服务端在单一事务内消费旧 opaque session，同时轮换 session 与 CSRF，并把新 session 写入 HttpOnly Cookie、把新 CSRF 明文返回一次；并发恢复只有一个请求成功，其余收到 401。session digest v2 使用用途分离摘要，使部署前的旧会话一次性失效。会话没有客户端可验证载荷，不使用签名密钥；已废弃的 `GUGU_SESSION_KEY_FILE` 会被配置校验拒绝。
 
 1A Identity 开发适配器还实现了 setup、本地用户、密码重置和 membership API，并提供对应的首次 setup、用户与访问管理及匿名密码重置页面。Bootstrap/reset 明文不会持久保存；setup 与 reset 在 Argon2 前和提交前都校验 Token 摘要、TTL 与消费状态。密码重置和用户停用会撤销目标用户全部会话；停用还会撤销未消费 reset token，因此“停用后重新启用”不会使旧 token 复活。setup、签发、消费、用户变更和 membership 变更写入审计。生产模式已把用户、令牌、会话、setup 与 membership 接入 PostgreSQL（只保存摘要）；Redis 协调、分布式限流、全局代理来源策略、密钥轮换、多副本一致性和实时连接撤销仍未完成。
 
@@ -61,6 +61,6 @@
 
 ## 7. 生产启动门禁
 
-生产模式缺少数据库、会话签名密钥、公开 URL、TLS 终止声明、Agent CA 或加密密钥时必须启动失败。默认凭据、开发种子数据、调试错误和宽松 CORS 不允许出现在生产构建配置中。
+生产模式缺少数据库、公开 URL、TLS 终止声明、Agent CA 或加密密钥时必须启动失败。默认凭据、开发种子数据、调试错误和宽松 CORS 不允许出现在生产构建配置中。
 
 当前配置加载器会聚合校验生产 URL、PostgreSQL URL、TLS 终止声明和 Secret/Agent CA 文件，并拒绝 `GUGU_DEV_ADMIN_EMAIL`、`GUGU_DEV_ADMIN_PASSWORD`、`GUGU_DEV_AGENT_TOKEN` 与 `GUGU_DEV_BOOTSTRAP_TOKEN`。`Config.Validate()` 与环境加载走同一 production 禁止项校验；字段全部有效后正常启动生产适配器（PostgreSQL store 与 mTLS gRPC Agent），不再返回 `ErrProductionAdapterUnavailable`。

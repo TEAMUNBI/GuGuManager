@@ -54,7 +54,7 @@ func (s *Postgres) Login(email string, password string) (domain.SessionView, str
 	// Create session token and CSRF token
 	token := randomToken()
 	csrf := randomToken()
-	tokenDigestValue := tokenDigest(token)
+	tokenDigestValue := sessionTokenDigest(token)
 	csrfDigestValue := tokenDigest(csrf)
 	expiresAt := time.Now().UTC().Add(sessionTTL)
 
@@ -83,18 +83,19 @@ func (s *Postgres) Login(email string, password string) (domain.SessionView, str
 	return domain.SessionView{User: user, CSRFToken: csrf, Environment: s.environment}, token, nil
 }
 
-// Session retrieves an active session by token.
-func (s *Postgres) Session(token string) (domain.SessionView, error) {
-	digest := tokenDigest(token)
+// AuthenticateSession validates an opaque session for ordinary authenticated
+// requests. It never rotates or returns a CSRF token.
+func (s *Postgres) AuthenticateSession(token string) (domain.SessionView, error) {
+	digest := sessionTokenDigest(token)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var userID, csrfToken, displayName, email, status string
+	var userID, displayName, email, status string
 	var roles []string
 	var expiresAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT s.user_id, s.csrf_digest, s.expires_at,
+		SELECT s.user_id, s.expires_at,
 		       u.email, u.display_name, u.status,
 		       COALESCE(array_agg(r.role_key) FILTER (WHERE r.role_key IS NOT NULL), '{}') as roles
 		FROM sessions s
@@ -102,29 +103,23 @@ func (s *Postgres) Session(token string) (domain.SessionView, error) {
 		LEFT JOIN user_roles ur ON u.id = ur.user_id
 		LEFT JOIN roles r ON ur.role_id = r.id
 		WHERE s.token_digest = $1 AND s.revoked_at IS NULL
-		GROUP BY s.user_id, s.csrf_digest, s.expires_at, u.email, u.display_name, u.status
-	`, digest[:]).Scan(&userID, &csrfToken, &expiresAt, &email, &displayName, &status, pq.Array(&roles))
+		GROUP BY s.user_id, s.expires_at, u.email, u.display_name, u.status
+	`, digest[:]).Scan(&userID, &expiresAt, &email, &displayName, &status, pq.Array(&roles))
 
-	if err == sql.ErrNoRows || status != "active" || time.Now().UTC().After(expiresAt) {
-		// Cleanup expired session
-		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET revoked_at = $1 WHERE token_digest = $2`, time.Now().UTC(), digest[:])
+	if err == sql.ErrNoRows {
 		return domain.SessionView{}, domain.NewProblem("AUTH_REQUIRED", "请先登录", false)
 	}
 	if err != nil {
 		return domain.SessionView{}, domain.NewProblem("INTERNAL_ERROR", "无法查询会话", true)
 	}
+	if status != "active" || time.Now().UTC().After(expiresAt) {
+		// Cleanup expired session
+		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET revoked_at = $1 WHERE token_digest = $2`, time.Now().UTC(), digest[:])
+		return domain.SessionView{}, domain.NewProblem("AUTH_REQUIRED", "请先登录", false)
+	}
 
 	// Update last_seen_at
 	_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = $1 WHERE token_digest = $2`, time.Now().UTC(), digest[:])
-
-	// csrf_digest 是不可逆摘要，无法从库中还原明文。会话恢复时轮换 CSRF
-	// token：生成新随机值并更新摘要，把明文返回给前端。这样页面刷新后
-	// 仍能继续携带有效的 X-CSRF-Token，写操作不被拦截。
-	csrf := randomToken()
-	csrfDigestValue := tokenDigest(csrf)
-	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET csrf_digest = $1 WHERE token_digest = $2`, csrfDigestValue[:], digest[:]); err != nil {
-		return domain.SessionView{}, domain.NewProblem("INTERNAL_ERROR", "无法恢复会话安全令牌", true)
-	}
 
 	user := domain.User{
 		ID:          userID,
@@ -134,12 +129,89 @@ func (s *Postgres) Session(token string) (domain.SessionView, error) {
 		Status:      status,
 	}
 
-	return domain.SessionView{User: user, CSRFToken: csrf, Environment: s.environment}, nil
+	return domain.SessionView{User: user, Environment: s.environment}, nil
+}
+
+// RecoverSession atomically consumes the old opaque session and returns a new
+// session cookie plus CSRF plaintext. Rotating both values makes concurrent
+// recovery deterministic: only one request can consume the old session, so a
+// successful response cannot be invalidated by another successful recovery.
+func (s *Postgres) RecoverSession(token string) (domain.SessionView, string, error) {
+	oldDigest := sessionTokenDigest(token)
+	newToken := randomToken()
+	newDigest := sessionTokenDigest(newToken)
+	csrf := randomToken()
+	csrfDigestValue := tokenDigest(csrf)
+	now := time.Now().UTC()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法恢复会话", true)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var userID, displayName, email, status string
+	var expiresAt time.Time
+	err = tx.QueryRowContext(ctx, `
+		SELECT s.user_id, s.expires_at, u.email, u.display_name, u.status
+		FROM sessions s
+		JOIN users u ON u.id = s.user_id
+		WHERE s.token_digest = $1 AND s.revoked_at IS NULL
+		FOR UPDATE OF s
+	`, oldDigest[:]).Scan(&userID, &expiresAt, &email, &displayName, &status)
+	if err == sql.ErrNoRows {
+		return domain.SessionView{}, "", domain.NewProblem("AUTH_REQUIRED", "请先登录", false)
+	}
+	if err != nil {
+		return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法查询会话", true)
+	}
+	if status != "active" || !expiresAt.After(now) {
+		if _, updateErr := tx.ExecContext(ctx, `UPDATE sessions SET revoked_at = $1 WHERE token_digest = $2`, now, oldDigest[:]); updateErr != nil {
+			return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法撤销过期会话", true)
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法撤销过期会话", true)
+		}
+		return domain.SessionView{}, "", domain.NewProblem("AUTH_REQUIRED", "请先登录", false)
+	}
+
+	var roles []string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(array_agg(r.role_key) FILTER (WHERE r.role_key IS NOT NULL), '{}')
+		FROM users u
+		LEFT JOIN user_roles ur ON u.id = ur.user_id
+		LEFT JOIN roles r ON ur.role_id = r.id
+		WHERE u.id = $1
+		GROUP BY u.id
+	`, userID).Scan(pq.Array(&roles)); err != nil {
+		return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法查询会话角色", true)
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE sessions
+		SET token_digest = $1, csrf_digest = $2, last_seen_at = $3
+		WHERE token_digest = $4 AND revoked_at IS NULL
+	`, newDigest[:], csrfDigestValue[:], now, oldDigest[:])
+	if err != nil {
+		return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法轮换会话安全令牌", true)
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		return domain.SessionView{}, "", domain.NewProblem("AUTH_REQUIRED", "请先登录", false)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.SessionView{}, "", domain.NewProblem("INTERNAL_ERROR", "无法提交会话恢复", true)
+	}
+
+	return domain.SessionView{User: domain.User{
+		ID: userID, Email: email, DisplayName: displayName, Roles: roles, Status: status,
+	}, CSRFToken: csrf, Environment: s.environment}, newToken, nil
 }
 
 // Logout revokes a session.
 func (s *Postgres) Logout(token string) {
-	digest := tokenDigest(token)
+	digest := sessionTokenDigest(token)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -164,7 +236,7 @@ func (s *Postgres) Logout(token string) {
 
 // ValidateCSRF checks if a CSRF token is valid for a session.
 func (s *Postgres) ValidateCSRF(token string, csrf string) bool {
-	digest := tokenDigest(token)
+	digest := sessionTokenDigest(token)
 	csrfDigest := tokenDigest(csrf)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

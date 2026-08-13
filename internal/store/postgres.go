@@ -56,6 +56,9 @@ type Postgres struct {
 	secretCipher *secretCipher
 	// secretKeyring is preferred for production writes and supports rotation.
 	secretKeyring *secretKeyring
+	// requiredMigrationVersions is the canonical migration plan loaded during
+	// startup. Readiness verifies that every version remains recorded in the DB.
+	requiredMigrationVersions []string
 }
 
 // NewPostgres creates a new PostgreSQL-backed store.
@@ -144,6 +147,15 @@ func (s *Postgres) SetSecretKeyring(activeID string, keys map[string][]byte) err
 	defer s.mu.Unlock()
 	s.secretKeyring = keyring
 	return nil
+}
+
+// SetRequiredMigrationVersions records the canonical schema versions that
+// this binary requires. The caller obtains them from the same plan used by the
+// migration runner, avoiding a runtime dependency on migration files.
+func (s *Postgres) SetRequiredMigrationVersions(versions []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requiredMigrationVersions = append([]string(nil), versions...)
 }
 
 // secretCipherLocked 返回当前加密器（无锁调用方持有 mu 时使用）。

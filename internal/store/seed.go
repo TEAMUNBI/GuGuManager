@@ -15,14 +15,14 @@ func (m *Memory) seed() error {
 		Region: "Shanghai / East", Address: "10.0.10.21", LastHeartbeatAt: now.Add(-8 * time.Second), CPUCores: 16,
 		MemoryBytes: 68_719_476_736, DiskBytes: 1_099_511_627_776, AllocatedMemoryBytes: 38_654_705_664,
 		AllocatedDiskBytes: 461_708_984_320, RunningServers: 6, TotalServers: 9,
-		Capabilities: []string{"container/v1", "console/v1", "backup/v1", "metrics/v1"},
+		Capabilities: []string{domain.NodeCapabilityRuntimeContainer, domain.NodeCapabilityServerReconcile, "console/v1", "backup/v1", "metrics/v1"},
 	})
 	m.addNode(domain.Node{
 		ID: "22222222-2222-4222-8222-222222222222", Name: "atlas-edge-02", Condition: "available", Version: "agent 0.1.0-dev",
 		Region: "Singapore / Edge", Address: "10.0.20.14", LastHeartbeatAt: now.Add(-12 * time.Second), CPUCores: 8,
 		MemoryBytes: 34_359_738_368, DiskBytes: 549_755_813_888, AllocatedMemoryBytes: 17_179_869_184,
 		AllocatedDiskBytes: 239_075_328_000, RunningServers: 3, TotalServers: 5,
-		Capabilities: []string{"container/v1", "console/v1", "metrics/v1"},
+		Capabilities: []string{domain.NodeCapabilityRuntimeContainer, domain.NodeCapabilityServerReconcile, "console/v1", "metrics/v1"},
 	})
 	m.addNode(domain.Node{
 		ID: "33333333-3333-4333-8333-333333333333", Name: "harbor-lab-03", Condition: "offline", Version: "agent 0.0.9",

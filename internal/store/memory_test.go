@@ -2,8 +2,11 @@ package store
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gugumanager/gugumanager/internal/domain"
 )
 
 func TestEmptyCollectionsRemainNonNilForJSONArrayResponses(t *testing.T) {
@@ -43,8 +46,114 @@ func TestDevelopmentIdentityUsesArgon2idAndStoresOnlySessionTokenDigest(t *testi
 	if token == "" || session.CSRFToken == "" {
 		t.Fatal("login did not return session and CSRF tokens")
 	}
-	if _, found := service.sessions[tokenDigest(token)]; !found {
+	if _, found := service.sessions[sessionTokenDigest(token)]; !found {
 		t.Fatal("session was not stored under its token digest")
+	}
+	if _, found := service.sessions[tokenDigest(token)]; found {
+		t.Fatal("session was stored under the legacy, non-domain-separated digest")
+	}
+}
+
+func TestMemorySessionAuthenticationAndSingleUseRecovery(t *testing.T) {
+	service := newTestMemory(time.Millisecond)
+	defer func() { _ = service.Close() }()
+
+	login, oldToken, err := service.Login("admin@gugu.local", "gugu-dev-2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := service.AuthenticateSession(oldToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authenticated.CSRFToken != "" {
+		t.Fatal("ordinary authentication exposed a CSRF plaintext")
+	}
+	if !service.ValidateCSRF(oldToken, login.CSRFToken) {
+		t.Fatal("ordinary authentication invalidated the current CSRF token")
+	}
+
+	recovered, newToken, err := service.RecoverSession(oldToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newToken == "" || newToken == oldToken || recovered.CSRFToken == "" || recovered.CSRFToken == login.CSRFToken {
+		t.Fatalf("recovery did not rotate both opaque values: old=%q new=%q csrfChanged=%v", oldToken, newToken, recovered.CSRFToken != login.CSRFToken)
+	}
+	if _, err := service.AuthenticateSession(oldToken); err == nil {
+		t.Fatal("recovery left the old session active")
+	}
+	if service.ValidateCSRF(oldToken, login.CSRFToken) {
+		t.Fatal("old session and CSRF remained valid after recovery")
+	}
+	if !service.ValidateCSRF(newToken, recovered.CSRFToken) {
+		t.Fatal("recovery response did not contain a usable CSRF token")
+	}
+}
+
+func TestMemoryLegacySessionDigestIsInvalidated(t *testing.T) {
+	service := newTestMemory(time.Millisecond)
+	defer func() { _ = service.Close() }()
+	login, token, err := service.Login("admin@gugu.local", "gugu-dev-2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentDigest := sessionTokenDigest(token)
+	legacyDigest := tokenDigest(token)
+	service.mu.Lock()
+	service.sessions[legacyDigest] = service.sessions[currentDigest]
+	delete(service.sessions, currentDigest)
+	service.mu.Unlock()
+
+	if _, err := service.AuthenticateSession(token); err == nil {
+		t.Fatal("legacy session digest remained valid after the v2 switch")
+	}
+	if service.ValidateCSRF(token, login.CSRFToken) {
+		t.Fatal("legacy session digest passed CSRF validation")
+	}
+}
+
+func TestMemoryConcurrentSessionRecoveryHasOneUsableWinner(t *testing.T) {
+	service := newTestMemory(time.Millisecond)
+	defer func() { _ = service.Close() }()
+	_, token, err := service.Login("admin@gugu.local", "gugu-dev-2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		view  domain.SessionView
+		token string
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			view, nextToken, recoverErr := service.RecoverSession(token)
+			results <- result{view: view, token: nextToken, err: recoverErr}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	successes := 0
+	for current := range results {
+		if current.err != nil {
+			continue
+		}
+		successes++
+		if !service.ValidateCSRF(current.token, current.view.CSRFToken) {
+			t.Fatal("winning recovery response was not usable")
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent recoveries = %d, want exactly 1", successes)
 	}
 }
 
@@ -54,7 +163,7 @@ func TestExpiredSessionCannotPassCSRFValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := tokenDigest(token)
+	digest := sessionTokenDigest(token)
 	stored := service.sessions[digest]
 	stored.ExpiresAt = time.Now().Add(-time.Second)
 	service.sessions[digest] = stored
@@ -62,7 +171,7 @@ func TestExpiredSessionCannotPassCSRFValidation(t *testing.T) {
 	if service.ValidateCSRF(token, session.CSRFToken) {
 		t.Fatal("expired session passed CSRF validation")
 	}
-	if _, err := service.Session(token); err == nil {
+	if _, err := service.AuthenticateSession(token); err == nil {
 		t.Fatal("expired session was accepted")
 	}
 	if _, found := service.sessions[digest]; found {

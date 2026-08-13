@@ -22,6 +22,16 @@ type Migration struct {
 	Down       []byte
 }
 
+// Versions returns a detached canonical version list suitable for readiness
+// checks after the migration files are no longer needed at runtime.
+func Versions(plan []Migration) []string {
+	versions := make([]string, 0, len(plan))
+	for _, item := range plan {
+		versions = append(versions, item.VersionKey)
+	}
+	return versions
+}
+
 var migrationFile = regexp.MustCompile(`^([0-9]{6})_([a-z0-9][a-z0-9_-]*)\.(up|down)\.sql$`)
 
 // LoadMigrations reads dir and returns its canonical migration pairs sorted by

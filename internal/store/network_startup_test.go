@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"strconv"
 	"strings"
@@ -133,6 +134,43 @@ func TestAllocationValidationIdempotencyExclusiveGateAndOfflineNode(t *testing.T
 	offline, _ := service.Server("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 	_, err = service.CreateAllocation(offline.ID, domain.CreateAllocationInput{BindIP: "10.0.30.18", Port: 42421, Protocol: "tcp"}, offline.Generation, "allocation-offline-001", actor)
 	requireProblemCode(t, err, "NODE_OFFLINE")
+}
+
+func TestReconcileMutationRejectsMissingCapabilityWithoutSideEffects(t *testing.T) {
+	service := newTestMemory(time.Second)
+	actor := testActor("admin-1", "GuGu Admin")
+	server, err := service.Server(stoppedServerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service.mu.Lock()
+	node := service.nodes[server.NodeID]
+	node.Capabilities = []string{domain.NodeCapabilityRuntimeContainer}
+	service.nodes[node.ID] = node
+	beforeAllocations := len(service.allocations)
+	beforeOperations := len(service.operations)
+	beforeValues := maps.Clone(service.startupValues[server.ID])
+	service.mu.Unlock()
+
+	_, err = service.CreateAllocation(server.ID, domain.CreateAllocationInput{
+		BindIP: "10.0.20.14", Port: 35123, Protocol: "udp",
+	}, server.Generation, "missing-reconcile-cap", actor)
+	problem := requireProblemCode(t, err, "CAPABILITY_UNSUPPORTED")
+	if problem.Details["requiredCapability"] != domain.NodeCapabilityServerReconcile || problem.Retryable {
+		t.Fatalf("capability problem = %+v", problem)
+	}
+
+	_, err = service.UpdateStartup(server.ID, map[string]any{"server_name": "must-not-persist"}, server.Generation, "missing-reconcile-startup", actor)
+	requireProblemCode(t, err, "CAPABILITY_UNSUPPORTED")
+
+	service.mu.RLock()
+	after := service.servers[server.ID]
+	if after.Generation != server.Generation || len(service.allocations) != beforeAllocations || len(service.operations) != beforeOperations || !reflect.DeepEqual(service.startupValues[server.ID], beforeValues) {
+		service.mu.RUnlock()
+		t.Fatalf("capability rejection mutated state: server=%+v allocations=%d operations=%d values=%+v", after, len(service.allocations), len(service.operations), service.startupValues[server.ID])
+	}
+	service.mu.RUnlock()
 }
 
 func TestStartupUpdateValidatesDeclarationsTypesConstraintsAndSecrets(t *testing.T) {

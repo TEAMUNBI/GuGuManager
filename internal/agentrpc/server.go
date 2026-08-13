@@ -30,12 +30,13 @@ import (
 )
 
 const (
-	protocolVersion    = "v1"
-	enrollCertTTL      = 24 * time.Hour
-	serverCertTTL      = 24 * time.Hour
-	heartbeatInterval  = 10 * time.Second
-	maxInFlightTasks   = 3
-	defaultClaimPeriod = 2 * time.Second
+	protocolVersion       = "v1"
+	enrollCertTTL         = 24 * time.Hour
+	serverCertTTL         = 24 * time.Hour
+	heartbeatInterval     = 10 * time.Second
+	maxInFlightTasks      = 3
+	defaultClaimPeriod    = 2 * time.Second
+	consoleCommandTimeout = 10 * time.Second
 	// maxAgentMessageBytes 放宽单帧消息上限，容纳备份下载等大 payload
 	// （备份归档以 base64 回传时体积约为原始大小的 4/3）。
 	maxAgentMessageBytes = 512 << 20
@@ -87,12 +88,30 @@ func WithServerIPs(ips []net.IP) Option {
 // nodeStream 是节点当前 Connect 连接的发送句柄。注册进 Server.streams，
 // 供 SendConsoleCommand 在流上直接下发命令帧。
 type nodeStream struct {
-	nodeID string
-	send   func(*agentv1.ConnectResponse) error
+	nodeID   string
+	send     func(*agentv1.ConnectResponse) error
+	done     chan struct{}
+	doneOnce sync.Once
+
+	consoleMu      sync.Mutex
+	consolePending map[string]consolePending
 
 	// 文件操作请求-响应关联：request_id → 响应通道。
 	fileMu      sync.Mutex
 	filePending map[string]chan *agentv1.FileOperationResponse
+}
+
+type consolePending struct {
+	serverID string
+	result   chan domain.ConsoleCommandResult
+}
+
+func (s *nodeStream) close() {
+	s.doneOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	})
 }
 
 // Server 是 AgentGatewayService 的实现。
@@ -127,29 +146,108 @@ func NewServer(ca *agentca.CA, store TaskStore, logger *slog.Logger, opts ...Opt
 
 // registerStream 记录节点当前连接，供控制面命令下发定位。
 func (s *Server) registerStream(stream *nodeStream) {
+	if stream.done == nil {
+		stream.done = make(chan struct{})
+	}
+	if stream.consolePending == nil {
+		stream.consolePending = make(map[string]consolePending)
+	}
 	s.streamMu.Lock()
-	defer s.streamMu.Unlock()
+	previous := s.streams[stream.nodeID]
 	s.streams[stream.nodeID] = stream
+	s.streamMu.Unlock()
+	if previous != nil && previous != stream {
+		previous.close()
+	}
 }
 
 // unregisterStream 在 Connect 退出时移除节点连接。
-func (s *Server) unregisterStream(nodeID string) {
+func (s *Server) unregisterStream(stream *nodeStream) {
 	s.streamMu.Lock()
-	defer s.streamMu.Unlock()
-	delete(s.streams, nodeID)
+	if s.streams[stream.nodeID] == stream {
+		delete(s.streams, stream.nodeID)
+	}
+	s.streamMu.Unlock()
+	stream.close()
 }
 
-// SendConsoleCommand 向节点流下发控制台命令帧；节点无活动连接时报错。
-func (s *Server) SendConsoleCommand(nodeID, serverID, command string) error {
+// SendConsoleCommand dispatches one command and waits for the correlated Agent
+// result. It fails closed on timeout, disconnect, a mismatched response, or an
+// Agent error code.
+func (s *Server) SendConsoleCommand(ctx context.Context, nodeID, serverID, command string) (domain.ConsoleCommandResult, error) {
+	requestID := id.New()
+	baseResult := domain.ConsoleCommandResult{RequestID: requestID, ServerID: serverID}
 	s.streamMu.Lock()
 	stream := s.streams[nodeID]
 	s.streamMu.Unlock()
 	if stream == nil {
-		return fmt.Errorf("node %s has no active connect stream", nodeID)
+		baseResult.ErrorCode = "NODE_OFFLINE"
+		baseResult.Retryable = true
+		return baseResult, domain.NewProblem("NODE_OFFLINE", "node has no active connect stream", true)
 	}
-	return stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_ConsoleCommand{
-		ConsoleCommand: &agentv1.ConsoleCommand{RequestId: id.New(), ServerId: serverID, Command: command},
-	}})
+	ctx, cancel := context.WithTimeout(ctx, consoleCommandTimeout)
+	defer cancel()
+	resultCh := make(chan domain.ConsoleCommandResult, 1)
+	stream.consoleMu.Lock()
+	stream.consolePending[requestID] = consolePending{serverID: serverID, result: resultCh}
+	stream.consoleMu.Unlock()
+	defer func() {
+		stream.consoleMu.Lock()
+		delete(stream.consolePending, requestID)
+		stream.consoleMu.Unlock()
+	}()
+
+	if err := stream.send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_ConsoleCommand{
+		ConsoleCommand: &agentv1.ConsoleCommand{RequestId: requestID, ServerId: serverID, Command: command},
+	}}); err != nil {
+		baseResult.ErrorCode = "NODE_OFFLINE"
+		baseResult.Retryable = true
+		return baseResult, domain.NewProblem("NODE_OFFLINE", "failed to send console command", true)
+	}
+
+	select {
+	case result := <-resultCh:
+		if result.Succeeded {
+			return result, nil
+		}
+		code := result.ErrorCode
+		if code == "" {
+			code = "COMMAND_FAILED"
+		}
+		problem := domain.NewProblem(code, "console command was rejected by the runtime", result.Retryable)
+		problem.Details["requestId"] = result.RequestID
+		return result, problem
+	case <-stream.done:
+		baseResult.ErrorCode = "NODE_OFFLINE"
+		baseResult.Retryable = true
+		return baseResult, domain.NewProblem("NODE_OFFLINE", "node disconnected before console command completed", true)
+	case <-ctx.Done():
+		baseResult.ErrorCode = "CONSOLE_TIMEOUT"
+		baseResult.Retryable = true
+		return baseResult, domain.NewProblem("CONSOLE_TIMEOUT", "console command timed out", true)
+	}
+}
+
+// completeConsoleCommand only accepts a result from the current node stream
+// when both correlation identifiers match the pending request.
+func (s *Server) completeConsoleCommand(stream *nodeStream, resp *agentv1.ConsoleCommandResult) {
+	if stream == nil || resp == nil || resp.GetRequestId() == "" {
+		return
+	}
+	stream.consoleMu.Lock()
+	pending, ok := stream.consolePending[resp.GetRequestId()]
+	stream.consoleMu.Unlock()
+	if !ok || pending.serverID != resp.GetServerId() {
+		return
+	}
+	result := domain.ConsoleCommandResult{
+		RequestID: resp.GetRequestId(), ServerID: resp.GetServerId(),
+		Succeeded: resp.GetSucceeded(), ErrorCode: resp.GetErrorCode(), Retryable: resp.GetRetryable(),
+	}
+	select {
+	case pending.result <- result:
+	default:
+	}
 }
 
 // DispatchFileOperation 在指定节点的 Connect 流上发送文件操作请求并等待结构化响应。
@@ -193,6 +291,8 @@ func (s *Server) DispatchFileOperation(ctx context.Context, nodeID string, req *
 	select {
 	case resp := <-ch:
 		return resp, nil
+	case <-stream.done:
+		return nil, fmt.Errorf("node %s disconnected during file operation", nodeID)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

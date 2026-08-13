@@ -53,35 +53,77 @@ func (s *Postgres) metricStateFor(serverID string) *metricState {
 // RecordConsoleLines 把 Agent 上报的日志行追加进服务器缓冲（超出上限丢弃最旧行），
 // 并批量持久化到 console_logs 表，使控制面重启后仍能恢复最近日志。
 func (s *Postgres) RecordConsoleLines(ctx context.Context, serverID string, lines []domain.ConsoleLine) error {
+	if len(lines) == 0 {
+		return nil
+	}
 	buf := s.consoleBufferFor(serverID)
 	buf.mu.Lock()
-	rows := make([][]any, 0, len(lines))
-	published := make([]domain.ConsoleLine, 0, len(lines))
+
+	next := buf.next
+	normalized := make([]domain.ConsoleLine, 0, len(lines))
 	for _, line := range lines {
 		if line.Sequence <= 0 {
-			line.Sequence = buf.next
+			line.Sequence = next
+			next++
+		} else if line.Sequence >= next {
+			next = line.Sequence + 1
 		}
-		buf.next = line.Sequence + 1
+		normalized = append(normalized, line)
+	}
+
+	// Persistence and retention form one transaction. Nothing becomes visible
+	// in the process-local buffer or WebSocket hub until the commit succeeds.
+	inserted, err := s.persistConsoleLines(ctx, serverID, normalized)
+	if err != nil {
+		buf.mu.Unlock()
+		return err
+	}
+	buf.next = next
+	for _, line := range inserted {
 		buf.lines = append(buf.lines, line)
-		published = append(published, line)
-		rows = append(rows, []any{serverID, line.Sequence, line.Stream, line.Message, line.Timestamp})
 	}
 	if len(buf.lines) > consoleBufferLimit {
 		buf.lines = append([]domain.ConsoleLine(nil), buf.lines[len(buf.lines)-consoleBufferLimit:]...)
 	}
 	buf.mu.Unlock()
+	// Rows rejected by ON CONFLICT are not DB-accepted facts and therefore are
+	// never exposed to subscribers.
+	s.consoleHub.Publish(serverID, inserted)
+	return nil
+}
 
-	// 实时广播给订阅者（WebSocket 推送），再落库；广播非阻塞，失败不影响上报。
-	s.consoleHub.Publish(serverID, published)
-
-	if len(rows) == 0 {
-		return nil
+// persistConsoleLines inserts the log batch and retention cleanup atomically,
+// returning only rows actually inserted by PostgreSQL.
+func (s *Postgres) persistConsoleLines(ctx context.Context, serverID string, lines []domain.ConsoleLine) ([]domain.ConsoleLine, error) {
+	if len(lines) == 0 {
+		return nil, nil
 	}
-	if err := s.persistConsoleLines(ctx, rows); err != nil {
-		return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
 	}
-	// 裁剪：每服务器仅保留最近 consoleBufferLimit 行，防止日志表无限膨胀。
-	_, _ = s.db.ExecContext(ctx, `
+	defer func() { _ = tx.Rollback() }()
+	inserted := make([]domain.ConsoleLine, 0, len(lines))
+	const batch = 200
+	for start := 0; start < len(lines); start += batch {
+		end := min(start+batch, len(lines))
+		stmt := `INSERT INTO console_logs (server_id, sequence, stream, message, created_at)
+			VALUES ($1, $2, $3, $4, $5) ON CONFLICT (server_id, sequence) DO NOTHING`
+		for _, line := range lines[start:end] {
+			result, err := tx.ExecContext(ctx, stmt, serverID, line.Sequence, line.Stream, line.Message, line.Timestamp)
+			if err != nil {
+				return nil, err
+			}
+			rowsAffected, err := result.RowsAffected()
+			if err != nil {
+				return nil, err
+			}
+			if rowsAffected == 1 {
+				inserted = append(inserted, line)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM console_logs
 		WHERE server_id = $1 AND sequence < (
 			SELECT MIN(sequence) FROM (
@@ -89,27 +131,13 @@ func (s *Postgres) RecordConsoleLines(ctx context.Context, serverID string, line
 				ORDER BY sequence DESC LIMIT $2
 			) keep
 		)
-	`, serverID, consoleBufferLimit)
-	return nil
-}
-
-// persistConsoleLines 批量写入日志行（幂等，重复 sequence 忽略）。
-func (s *Postgres) persistConsoleLines(ctx context.Context, rows [][]any) error {
-	if len(rows) == 0 {
-		return nil
+	`, serverID, consoleBufferLimit); err != nil {
+		return nil, err
 	}
-	const batch = 200
-	for start := 0; start < len(rows); start += batch {
-		end := min(start+batch, len(rows))
-		stmt := `INSERT INTO console_logs (server_id, sequence, stream, message, created_at)
-			VALUES ($1, $2, $3, $4, $5) ON CONFLICT (server_id, sequence) DO NOTHING`
-		for _, row := range rows[start:end] {
-			if _, err := s.db.ExecContext(ctx, stmt, row...); err != nil {
-				return err
-			}
-		}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
-	return nil
+	return inserted, nil
 }
 
 // ApplyServerMetrics 更新服务器指标当前值并追加历史点（时间窗内、上限 60 点），

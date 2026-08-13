@@ -29,6 +29,7 @@ type fakeDocker struct {
 	started   []string
 	stopped   []string
 	restarted []string
+	killed    []string
 	removed   []string
 	inspected []string
 	status    runtime.ContainerStatus
@@ -197,6 +198,13 @@ func (f *fakeDocker) RestartContainer(ctx context.Context, containerID string, t
 	return f.actionErr
 }
 
+func (f *fakeDocker) KillContainer(ctx context.Context, containerID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killed = append(f.killed, containerID)
+	return f.actionErr
+}
+
 func (f *fakeDocker) RemoveContainer(ctx context.Context, containerID string, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -354,6 +362,53 @@ func TestDockerExecutorProvisionPayloadJSON(t *testing.T) {
 	}
 }
 
+func TestDockerExecutorProvisionProtectsInternalConsoleAdapter(t *testing.T) {
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+	payload := provisionPayload()
+	payload.Variables["GUGU_CONSOLE_ADAPTER"] = "attacker-selected/v1"
+	payload.Variables["RCON_PASSWORD"] = "attacker-password"
+	task := &agentv1.Task{
+		OperationId: "op-prov-console-adapter", ServerId: "server-1", Type: "provision",
+		Payload: &agentv1.Task_Provision{Provision: payload},
+	}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("provision = %+v, %v", outcome, err)
+	}
+	cfg := fd.lastCreated()
+	if cfg.Env["GUGU_CONSOLE_ADAPTER"] != minecraftRCONAdapter {
+		t.Fatalf("console adapter = %q, want trusted %q", cfg.Env["GUGU_CONSOLE_ADAPTER"], minecraftRCONAdapter)
+	}
+	if cfg.Env["RCON_PASSWORD"] == "attacker-password" || cfg.Env["RCON_PASSWORD"] == "" {
+		t.Fatalf("internal RCON credential was overridden: %q", cfg.Env["RCON_PASSWORD"])
+	}
+}
+
+func TestDockerExecutorProvisionDoesNotInventAdapterForUnsupportedGame(t *testing.T) {
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+	payload := provisionPayload()
+	payload.GameDefinitionId = "io.gugumanager.velocity"
+	payload.Variables["GUGU_CONSOLE_ADAPTER"] = minecraftRCONAdapter
+	payload.Variables["RCON_PASSWORD"] = "user-password"
+	task := &agentv1.Task{
+		OperationId: "op-prov-no-console", ServerId: "server-velocity", Type: "provision",
+		Payload: &agentv1.Task_Provision{Provision: payload},
+	}
+	outcome, err := exec.ExecuteTask(context.Background(), task)
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("provision = %+v, %v", outcome, err)
+	}
+	cfg := fd.lastCreated()
+	if _, ok := cfg.Env["GUGU_CONSOLE_ADAPTER"]; ok {
+		t.Fatalf("unsupported game received console adapter: %+v", cfg.Env)
+	}
+	if _, ok := cfg.Env["RCON_PASSWORD"]; ok {
+		t.Fatalf("unsupported game retained user-supplied RCON password")
+	}
+}
+
 func TestDockerExecutorPowerStart(t *testing.T) {
 	fd := newFakeDocker()
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
@@ -472,10 +527,14 @@ func TestDockerExecutorPowerKill(t *testing.T) {
 		t.Fatalf("expected success, got %q", outcome.ErrorCode)
 	}
 	fd.mu.Lock()
+	killed := append([]string(nil), fd.killed...)
 	removed := len(fd.removed)
 	fd.mu.Unlock()
-	if removed != 1 || fd.removed[0] != "gugu-server-server-1" {
-		t.Errorf("removed = %v, want [gugu-server-server-1]", fd.removed)
+	if len(killed) != 1 || killed[0] != "gugu-server-server-1" {
+		t.Errorf("killed = %v, want [gugu-server-server-1]", killed)
+	}
+	if removed != 0 {
+		t.Errorf("remove calls = %d, want 0: kill must preserve the runtime", removed)
 	}
 	if outcome.Observed.GetObservedPower() != agentv1.ObservedPower_OBSERVED_POWER_STOPPED {
 		t.Errorf("observed power = %v, want STOPPED", outcome.Observed.GetObservedPower())
@@ -612,6 +671,7 @@ func TestDockerExecutorDefaultRuntimeLazy(t *testing.T) {
 func TestExecuteConsoleCommandRunsExecInContainer(t *testing.T) {
 	fd := newFakeDocker()
 	fd.execOut = "There are 2 of a max of 20 players online"
+	fd.env["GUGU_CONSOLE_ADAPTER"] = minecraftRCONAdapter
 	fd.env["RCON_PASSWORD"] = "secret123"
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 
@@ -641,26 +701,22 @@ func TestExecuteConsoleCommandRunsExecInContainer(t *testing.T) {
 	}
 }
 
-func TestExecuteConsoleCommandFallsBackToShellWithoutRCON(t *testing.T) {
+func TestExecuteConsoleCommandRejectsMissingAdapterWithoutShellFallback(t *testing.T) {
 	fd := newFakeDocker()
-	fd.execOut = "hello"
-	// newFakeDocker 的 env 不含 RCON_PASSWORD。
+	fd.env["RCON_PASSWORD"] = "user-variable-is-not-an-adapter"
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 
 	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "echo hello")
 	if err != nil {
 		t.Fatalf("execute console command: %v", err)
 	}
-	if !outcome.Succeeded {
-		t.Fatalf("expected success, got %s", outcome.ErrorCode)
+	if outcome.Succeeded || outcome.ErrorCode != "CONSOLE_UNSUPPORTED" || outcome.Retryable {
+		t.Fatalf("outcome = %+v, want CONSOLE_UNSUPPORTED non-retryable", outcome)
 	}
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
-	if len(fd.execArgv) != 1 {
-		t.Fatalf("exec calls = %d, want 1", len(fd.execArgv))
-	}
-	if got := strings.Join(fd.execArgv[0], " "); got != "sh -c echo hello" {
-		t.Errorf("exec argv = %q, want 'sh -c echo hello'", got)
+	if len(fd.execArgv) != 0 {
+		t.Fatalf("exec calls = %d, want 0 without an explicit console adapter", len(fd.execArgv))
 	}
 }
 
@@ -682,6 +738,8 @@ func TestExecuteConsoleCommandRuntimeUnavailable(t *testing.T) {
 
 func TestExecuteConsoleCommandExecError(t *testing.T) {
 	fd := newFakeDocker()
+	fd.env["GUGU_CONSOLE_ADAPTER"] = minecraftRCONAdapter
+	fd.env["RCON_PASSWORD"] = "configured-secret"
 	fd.execErr = errors.New("exec failed")
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
@@ -690,6 +748,24 @@ func TestExecuteConsoleCommandExecError(t *testing.T) {
 	}
 	if outcome.Succeeded || outcome.ErrorCode != "COMMAND_FAILED" || outcome.Retryable {
 		t.Errorf("outcome = %+v, want COMMAND_FAILED non-retryable", outcome)
+	}
+}
+
+func TestExecuteConsoleCommandAdapterInspectionFailsClosed(t *testing.T) {
+	fd := newFakeDocker()
+	fd.envErr = errors.New("inspect failed")
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+	outcome, err := exec.ExecuteConsoleCommand(context.Background(), "server-1", "list")
+	if err != nil {
+		t.Fatalf("execute console command: %v", err)
+	}
+	if outcome.Succeeded || outcome.ErrorCode != "COMMAND_FAILED" || !outcome.Retryable {
+		t.Errorf("outcome = %+v, want retryable COMMAND_FAILED", outcome)
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.execArgv) != 0 {
+		t.Fatalf("exec calls = %d, want 0 when adapter inspection failed", len(fd.execArgv))
 	}
 }
 

@@ -32,6 +32,7 @@ type containerRuntime interface {
 	StartContainer(ctx context.Context, containerID string) error
 	StopContainer(ctx context.Context, containerID string, timeoutSec int) error
 	RestartContainer(ctx context.Context, containerID string, timeoutSec int) error
+	KillContainer(ctx context.Context, containerID string) error
 	RemoveContainer(ctx context.Context, containerID string, force bool) error
 	InspectContainer(ctx context.Context, containerID string) (runtime.ContainerStatus, error)
 	ExecInContainer(ctx context.Context, containerID string, argv []string) (string, error)
@@ -52,6 +53,16 @@ var gameImageMap = map[string]string{
 	"io.gugumanager.forge":    "itzg/minecraft-server:latest",
 	"io.gugumanager.fabric":   "itzg/minecraft-server:latest",
 	"io.gugumanager.velocity": "itzg/velocity-proxy:latest",
+}
+
+const minecraftRCONAdapter = "minecraft-rcon/v1"
+
+var gameConsoleAdapter = map[string]string{
+	"io.gugumanager.papermc": minecraftRCONAdapter,
+	"io.gugumanager.vanilla": minecraftRCONAdapter,
+	"io.gugumanager.spigot":  minecraftRCONAdapter,
+	"io.gugumanager.forge":   minecraftRCONAdapter,
+	"io.gugumanager.fabric":  minecraftRCONAdapter,
 }
 
 // DockerExecutor 用 Docker 容器执行 Control Plane 下发的任务。
@@ -300,27 +311,32 @@ func (e *DockerExecutor) deleteBackup(ctx context.Context, del *agentv1.DeleteBa
 	return &ExecutionOutcome{Succeeded: true}, nil
 }
 
-// ExecuteConsoleCommand 在服务器容器内执行控制台命令，输出回传控制面。
+// ExecuteConsoleCommand dispatches through an explicitly configured console
+// adapter. Docker's current adapter is RCON-only: arbitrary commands are never
+// interpreted by a container shell.
 func (e *DockerExecutor) ExecuteConsoleCommand(ctx context.Context, serverID string, command string) (*ExecutionOutcome, error) {
 	rt, err := e.runtime()
 	if err != nil {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "RUNTIME_UNAVAILABLE", Retryable: true}, nil
 	}
 	containerName := fmt.Sprintf("gugu-server-%s", serverID)
-	// 游戏命令（list/say/stop 等）由游戏服务器进程解释，不能作为 shell 命令执行。
-	// 优先走容器内 RCON（密码由 provision 注入）；无 RCON 时回退容器 shell。
-	if env, envErr := rt.InspectEnv(ctx, containerName); envErr == nil {
-		if password := env["RCON_PASSWORD"]; password != "" {
-			output, execErr := rt.ExecInContainer(ctx, containerName,
-				[]string{"rcon-cli", "--host", "127.0.0.1", "--port", "25575", "--password", password, command})
-			if execErr == nil {
-				result, _ := json.Marshal(map[string]string{"output": output})
-				return &ExecutionOutcome{Succeeded: true, ResultJSON: result}, nil
-			}
-			// RCON 执行失败不立即返回：fallthrough 到 shell 兜底。
-		}
+	env, err := rt.InspectEnv(ctx, containerName)
+	if err != nil {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "COMMAND_FAILED", Retryable: true}, nil
 	}
-	output, err := rt.ExecInContainer(ctx, containerName, []string{"sh", "-c", command})
+	if env["GUGU_CONSOLE_ADAPTER"] != minecraftRCONAdapter {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "CONSOLE_UNSUPPORTED", Retryable: false}, nil
+	}
+	password := env["RCON_PASSWORD"]
+	if password == "" {
+		return &ExecutionOutcome{Succeeded: false, ErrorCode: "CONSOLE_UNSUPPORTED", Retryable: false}, nil
+	}
+	port := env["RCON_PORT"]
+	if port == "" {
+		port = "25575"
+	}
+	output, err := rt.ExecInContainer(ctx, containerName,
+		[]string{"rcon-cli", "--host", "127.0.0.1", "--port", port, "--password", password, command})
 	if err != nil {
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "COMMAND_FAILED", Retryable: false}, nil
 	}
@@ -377,12 +393,21 @@ func (e *DockerExecutor) executeProvision(ctx context.Context, task *agentv1.Tas
 		MemoryMB:     1024,
 		CPUShares:    1024,
 	}
-	// 开启 RCON，供指标采样器查询在线玩家；密码随机，仅容器内可见。
-	cfg.Env["ENABLE_RCON"] = "TRUE"
-	cfg.Env["RCON_PORT"] = "25575"
-	cfg.Env["RCON_PASSWORD"] = randomHex(16)
 	for k, v := range payload.GetVariables() {
 		cfg.Env[k] = v
+	}
+	// Internal adapter settings are written after untrusted startup variables so
+	// a Bundle/user cannot select a protocol or replace its credential.
+	if adapter := gameConsoleAdapter[payload.GetGameDefinitionId()]; adapter != "" {
+		cfg.Env["GUGU_CONSOLE_ADAPTER"] = adapter
+		cfg.Env["ENABLE_RCON"] = "TRUE"
+		cfg.Env["RCON_PORT"] = "25575"
+		cfg.Env["RCON_PASSWORD"] = randomHex(16)
+	} else {
+		delete(cfg.Env, "GUGU_CONSOLE_ADAPTER")
+		delete(cfg.Env, "ENABLE_RCON")
+		delete(cfg.Env, "RCON_PORT")
+		delete(cfg.Env, "RCON_PASSWORD")
 	}
 	for _, alloc := range payload.GetAllocations() {
 		if alloc.GetContainerPort() != 0 {
@@ -441,7 +466,7 @@ func (e *DockerExecutor) executePower(ctx context.Context, task *agentv1.Task) (
 	case agentv1.PowerAction_POWER_ACTION_RESTART:
 		actionErr = rt.RestartContainer(ctx, containerID, int(power.GetGracefulTimeoutSeconds()))
 	case agentv1.PowerAction_POWER_ACTION_KILL:
-		actionErr = rt.RemoveContainer(ctx, containerID, true)
+		actionErr = rt.KillContainer(ctx, containerID)
 	default:
 		return &ExecutionOutcome{Succeeded: false, ErrorCode: "POWER_OPERATION_FAILED", Retryable: false}, nil
 	}

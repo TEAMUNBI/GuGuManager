@@ -90,6 +90,10 @@ func TestBuildServiceProduction(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("production-bootstrap-token-000000000000000000000000"), 0o600); err != nil {
 		t.Fatalf("write bootstrap token file: %v", err)
 	}
+	encryptionKeyFile := filepath.Join(t.TempDir(), "encryption.key")
+	if err := os.WriteFile(encryptionKeyFile, []byte("test-only-production-encryption-key"), 0o600); err != nil {
+		t.Fatalf("write encryption key file: %v", err)
+	}
 	t.Setenv("GUGU_AGENT_TOKEN", "production-agent-token-000000000000000000000000")
 
 	cfg := config.Config{
@@ -99,6 +103,7 @@ func TestBuildServiceProduction(t *testing.T) {
 		PublicURL:          "https://panel.example.com",
 		DatabaseURL:        dsn,
 		BootstrapTokenFile: tokenFile,
+		EncryptionKeyFile:  encryptionKeyFile,
 		TLSTerminated:      true,
 		LogLevel:           "info",
 		LogFormat:          "json",

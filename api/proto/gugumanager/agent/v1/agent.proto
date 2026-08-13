@@ -36,6 +36,7 @@ message ConnectRequest {
     MetricsBatch metrics_batch = 9;
     CertificateSigningRequest certificate_signing_request = 10;
     FileOperationResponse file_operation_response = 11;
+    ConsoleCommandResult console_command_result = 12;
   }
 }
 
@@ -57,6 +58,18 @@ message ConsoleCommand {
   string request_id = 1;
   string server_id = 2;
   string command = 3;
+}
+
+// ConsoleCommandResult acknowledges exactly one ConsoleCommand. The control
+// plane correlates both request_id and server_id before completing the HTTP
+// request, so a late or mismatched result cannot be accepted for another
+// server.
+message ConsoleCommandResult {
+  string request_id = 1;
+  string server_id = 2;
+  bool succeeded = 3;
+  string error_code = 4;
+  bool retryable = 5;
 }
 
 message Hello {

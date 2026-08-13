@@ -34,6 +34,66 @@ func TestPostgresConsoleBufferAppendAndLimit(t *testing.T) {
 	}
 }
 
+func TestPostgresConsoleInsertFailureDoesNotMutateBufferOrBroadcast(t *testing.T) {
+	s := testPostgres(t)
+	resetTestDatabase(t, s)
+	serverID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	stream, cancel := s.SubscribeConsoleLines(serverID)
+	defer cancel()
+
+	// The missing server forces an FK insert failure after sequence assignment
+	// but before any process-local visibility is allowed.
+	err := s.RecordConsoleLines(context.Background(), serverID, []domain.ConsoleLine{{
+		Timestamp: time.Now().UTC(), Stream: "stdout", Message: "must stay private",
+	}})
+	if err == nil {
+		t.Fatal("foreign-key-invalid console line unexpectedly committed")
+	}
+	buf := s.consoleBufferFor(serverID)
+	buf.mu.Lock()
+	if len(buf.lines) != 0 || buf.next != 1 {
+		t.Fatalf("buffer after rollback = lines:%+v next:%d, want empty/1", buf.lines, buf.next)
+	}
+	buf.mu.Unlock()
+	select {
+	case line := <-stream:
+		t.Fatalf("subscriber received uncommitted line: %+v", line)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestPostgresConsoleDuplicateSequenceIsNotBufferedOrBroadcast(t *testing.T) {
+	s := testPostgres(t)
+	resetTestDatabase(t, s)
+	admin := setupAdminForTest(t, s)
+	serverID := createServerFixture(t, s, admin.ID)
+	now := time.Now().UTC()
+	if err := s.RecordConsoleLines(context.Background(), serverID, []domain.ConsoleLine{{
+		Sequence: 7, Timestamp: now, Stream: "stdout", Message: "first",
+	}}); err != nil {
+		t.Fatalf("record first line: %v", err)
+	}
+	stream, cancel := s.SubscribeConsoleLines(serverID)
+	defer cancel()
+	if err := s.RecordConsoleLines(context.Background(), serverID, []domain.ConsoleLine{{
+		Sequence: 7, Timestamp: now.Add(time.Second), Stream: "stdout", Message: "duplicate",
+	}}); err != nil {
+		t.Fatalf("record duplicate line: %v", err)
+	}
+	select {
+	case line := <-stream:
+		t.Fatalf("duplicate DB row was broadcast: %+v", line)
+	case <-time.After(50 * time.Millisecond):
+	}
+	got, err := s.Console(serverID)
+	if err != nil {
+		t.Fatalf("console: %v", err)
+	}
+	if len(got) != 1 || got[0].Message != "first" {
+		t.Fatalf("buffer after duplicate = %+v, want only first row", got)
+	}
+}
+
 func TestPostgresConsoleBufferAutoSequence(t *testing.T) {
 	s := testPostgres(t)
 	resetTestDatabase(t, s)

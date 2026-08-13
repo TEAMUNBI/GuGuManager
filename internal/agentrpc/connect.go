@@ -42,8 +42,13 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 		defer sendMu.Unlock()
 		return stream.Send(resp)
 	}
-	s.registerStream(&nodeStream{nodeID: nodeID, send: send, filePending: make(map[string]chan *agentv1.FileOperationResponse)})
-	defer s.unregisterStream(nodeID)
+	nodeConnection := &nodeStream{
+		nodeID: nodeID, send: send, done: make(chan struct{}),
+		consolePending: make(map[string]consolePending),
+		filePending:    make(map[string]chan *agentv1.FileOperationResponse),
+	}
+	s.registerStream(nodeConnection)
+	defer s.unregisterStream(nodeConnection)
 
 	if err := send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Welcome{Welcome: &agentv1.Welcome{
 		ProtocolVersion:          protocolVersion,
@@ -89,6 +94,8 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 			s.handleMetricsBatch(ctx, nodeID, p.MetricsBatch)
 		case *agentv1.ConnectRequest_FileOperationResponse:
 			s.completeFileOperation(nodeID, p.FileOperationResponse)
+		case *agentv1.ConnectRequest_ConsoleCommandResult:
+			s.completeConsoleCommand(nodeConnection, p.ConsoleCommandResult)
 		default:
 			s.log.Warn("unknown connect frame", "node", nodeID)
 		}

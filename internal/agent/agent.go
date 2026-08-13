@@ -565,6 +565,14 @@ func (a *agent) handleConsoleCommand(ctx context.Context, stream agentv1.AgentGa
 	if err != nil || outcome == nil {
 		outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "EXECUTION_ERROR", Retryable: false}
 	}
+	result := &agentv1.ConsoleCommandResult{
+		RequestId: cmd.GetRequestId(), ServerId: cmd.GetServerId(),
+		Succeeded: outcome.Succeeded, ErrorCode: outcome.ErrorCode, Retryable: outcome.Retryable,
+	}
+	if sendErr := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ConsoleCommandResult{ConsoleCommandResult: result}}); sendErr != nil {
+		a.logger.Warn("send console command result", "request", cmd.GetRequestId(), "error", sendErr)
+		return
+	}
 	var echo string
 	if outcome.Succeeded {
 		var payload struct {

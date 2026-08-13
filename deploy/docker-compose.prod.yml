@@ -4,7 +4,7 @@ name: gugumanager-prod
 # 使用前：
 #   1. 复制 deploy/.env.example 为 deploy/.env 并替换所有占位值（GUGU_PUBLIC_URL、POSTGRES_PASSWORD 等）。
 #   2. 生成 secret 文件（参考 deploy/.env.example 中的说明）放入 deploy/secrets/：
-#        session.key / encryption.key / agent-ca.crt / agent-ca.key / bootstrap-token
+#        encryption.key / agent-ca.crt / agent-ca.key / bootstrap-token
 #   3. TLS 由前置反向代理（Nginx/Caddy/Traefik）终止，HTTP 与 gRPC 端口默认只绑定本机回环。
 #   4. agent 容器内的 gugu 用户（uid 10001）需要宿主 Docker socket 的读权限：
 #      可将 10001 加入宿主机 docker 组，或改用 docker-socket-proxy 等代理方案。
@@ -23,7 +23,6 @@ services:
       GUGU_DATABASE_URL: postgres://${POSTGRES_USER:-gugumanager}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gugumanager}
       GUGU_REDIS_URL: redis://redis:6379/0
       # 生产要求全部 secret 以文件形式挂载（必须是可读的非空文件）。
-      GUGU_SESSION_KEY_FILE: /run/secrets/session-key
       GUGU_ENCRYPTION_KEY_FILE: /run/secrets/encryption-key
       GUGU_AGENT_CA_CERT_FILE: /run/secrets/agent-ca-cert
       GUGU_AGENT_CA_KEY_FILE: /run/secrets/agent-ca-key
@@ -54,7 +53,6 @@ services:
       - server-data:/var/lib/gugumanager/servers
       - ../migrations:/app/migrations:ro
     secrets:
-      - session-key
       - encryption-key
       - agent-ca-cert
       - agent-ca-key
@@ -120,8 +118,6 @@ services:
 
 # 挂载到各服务的 /run/secrets/<secret-name>，文件需手动放入 deploy/secrets/。
 secrets:
-  session-key:
-    file: ./secrets/session.key
   encryption-key:
     file: ./secrets/encryption.key
   agent-ca-cert:

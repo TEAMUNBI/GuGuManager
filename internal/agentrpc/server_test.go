@@ -581,31 +581,83 @@ func TestSendConsoleCommandDispatchesFrame(t *testing.T) {
 	fs := newFakeStore()
 	srv := NewServer(ca, fs, discardLogger())
 
-	var mu sync.Mutex
-	var got *agentv1.ConnectResponse
-	srv.registerStream(&nodeStream{
+	sent := make(chan *agentv1.ConnectResponse, 1)
+	stream := &nodeStream{
 		nodeID: "node-1",
 		send: func(resp *agentv1.ConnectResponse) error {
-			mu.Lock()
-			defer mu.Unlock()
-			got = resp
+			sent <- resp
 			return nil
 		},
-	})
-	if err := srv.SendConsoleCommand("node-1", "server-1", "list"); err != nil {
-		t.Fatalf("send console command: %v", err)
 	}
-	mu.Lock()
+	srv.registerStream(stream)
+	type dispatchResult struct {
+		result domain.ConsoleCommandResult
+		err    error
+	}
+	dispatched := make(chan dispatchResult, 1)
+	go func() {
+		result, err := srv.SendConsoleCommand(context.Background(), "node-1", "server-1", "list")
+		dispatched <- dispatchResult{result: result, err: err}
+	}()
+	got := <-sent
 	cmd := got.GetConsoleCommand()
-	mu.Unlock()
 	if cmd == nil {
 		t.Fatalf("expected console command frame, got %T", got.Payload)
 	}
 	if cmd.GetCommand() != "list" || cmd.GetServerId() != "server-1" || cmd.GetRequestId() == "" {
 		t.Errorf("console command frame fields wrong: %+v", cmd)
 	}
-	if err := srv.SendConsoleCommand("no-such-node", "server-1", "list"); err == nil {
+	srv.completeConsoleCommand(stream, &agentv1.ConsoleCommandResult{
+		RequestId: cmd.GetRequestId(), ServerId: cmd.GetServerId(), Succeeded: true,
+	})
+	completed := <-dispatched
+	if completed.err != nil || !completed.result.Succeeded {
+		t.Fatalf("send console command = %+v, %v", completed.result, completed.err)
+	}
+	if _, err := srv.SendConsoleCommand(context.Background(), "no-such-node", "server-1", "list"); err == nil {
 		t.Fatal("expected error for offline node")
+	}
+}
+
+func TestConsoleCommandRejectsMismatchedServerResult(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	srv := NewServer(ca, newFakeStore(), discardLogger())
+	sent := make(chan *agentv1.ConnectResponse, 1)
+	stream := &nodeStream{nodeID: "node-1", send: func(resp *agentv1.ConnectResponse) error { sent <- resp; return nil }}
+	srv.registerStream(stream)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := srv.SendConsoleCommand(ctx, "node-1", "server-a", "list")
+		done <- err
+	}()
+	cmd := (<-sent).GetConsoleCommand()
+	srv.completeConsoleCommand(stream, &agentv1.ConsoleCommandResult{RequestId: cmd.GetRequestId(), ServerId: "server-b", Succeeded: true})
+	if err := <-done; err == nil {
+		t.Fatal("mismatched server result completed the pending command")
+	}
+}
+
+func TestUnregisterOldStreamDoesNotRemoveReplacement(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	srv := NewServer(ca, newFakeStore(), discardLogger())
+	oldStream := &nodeStream{nodeID: "node-1", send: func(*agentv1.ConnectResponse) error { return nil }}
+	newStream := &nodeStream{nodeID: "node-1", send: func(*agentv1.ConnectResponse) error { return nil }}
+	srv.registerStream(oldStream)
+	srv.registerStream(newStream)
+	srv.unregisterStream(oldStream)
+	srv.streamMu.Lock()
+	current := srv.streams["node-1"]
+	srv.streamMu.Unlock()
+	if current != newStream {
+		t.Fatal("old connection unregister removed the replacement stream")
 	}
 }
 

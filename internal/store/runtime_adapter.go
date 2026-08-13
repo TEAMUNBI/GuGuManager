@@ -96,6 +96,11 @@ func (r *RuntimeAdapter) RestartServer(ctx context.Context, containerID string) 
 	return r.docker.RestartContainer(ctx, containerID, 30)
 }
 
+// KillServer force-stops a server without deleting its runtime.
+func (r *RuntimeAdapter) KillServer(ctx context.Context, containerID string) error {
+	return r.docker.KillContainer(ctx, containerID)
+}
+
 // DeleteServer removes a container and its resources.
 func (r *RuntimeAdapter) DeleteServer(ctx context.Context, containerID string) error {
 	return r.docker.RemoveContainer(ctx, containerID, true) // Force removal
@@ -257,6 +262,8 @@ func (m *Memory) finishPowerWithRuntime(operationID string, serverID string, act
 		err = adapter.StopServer(ctx, containerID)
 	case domain.PowerRestart:
 		err = adapter.RestartServer(ctx, containerID)
+	case domain.PowerKill:
+		err = adapter.KillServer(ctx, containerID)
 	default:
 		err = fmt.Errorf("unsupported power action: %s", action)
 	}

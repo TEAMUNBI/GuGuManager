@@ -307,6 +307,10 @@ func (m *Memory) requestReconcile(
 		m.mu.Unlock()
 		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法接收重新对账任务", true)
 	}
+	if !containsString(node.Capabilities, domain.NodeCapabilityServerReconcile) {
+		m.mu.Unlock()
+		return domain.Operation{}, capabilityUnsupported(node, domain.NodeCapabilityServerReconcile)
+	}
 	if server.Generation != expectedGeneration {
 		problem := domain.NewProblem("PRECONDITION_FAILED", "服务器 generation 已变化，请刷新后重试", false)
 		problem.Details["currentGeneration"] = server.Generation
@@ -339,6 +343,15 @@ func (m *Memory) requestReconcile(
 	m.recordAudit(currentActor.DisplayName, auditAction, "server", server.Name, "accepted", operation.ID)
 	go m.finishReconcile(operation.ID, serverID, currentActor.DisplayName, auditAction)
 	return operation, nil
+}
+
+func capabilityUnsupported(node domain.Node, required string) *domain.Problem {
+	problem := domain.NewProblem("CAPABILITY_UNSUPPORTED", "目标节点未声明执行该操作所需的能力", false)
+	problem.Details["nodeId"] = node.ID
+	problem.Details["nodeVersion"] = node.Version
+	problem.Details["requiredCapability"] = required
+	problem.Details["declaredCapabilities"] = append([]string(nil), node.Capabilities...)
+	return problem
 }
 
 func (m *Memory) finishReconcile(operationID string, serverID string, actorName string, auditAction string) {

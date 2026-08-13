@@ -29,7 +29,6 @@ type Config struct {
 	PublicURL             string
 	DatabaseURL           string
 	RedisURL              string
-	SessionKeyFile        string
 	EncryptionKeyFile     string
 	EncryptionKeyringFile string
 	AgentCACertFile       string
@@ -79,7 +78,6 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		PublicURL:             lookupTrimmed(lookup, "GUGU_PUBLIC_URL", ""),
 		DatabaseURL:           lookupSecret(lookup, "GUGU_DATABASE_URL"),
 		RedisURL:              lookupSecret(lookup, "GUGU_REDIS_URL"),
-		SessionKeyFile:        lookupTrimmed(lookup, "GUGU_SESSION_KEY_FILE", ""),
 		EncryptionKeyFile:     lookupTrimmed(lookup, "GUGU_ENCRYPTION_KEY_FILE", ""),
 		EncryptionKeyringFile: lookupTrimmed(lookup, "GUGU_ENCRYPTION_KEYRING_FILE", ""),
 		AgentCACertFile:       lookupTrimmed(lookup, "GUGU_AGENT_CA_CERT_FILE", ""),
@@ -118,6 +116,13 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		if _, ok := nonEmpty(lookup, "GUGU_DEV_BOOTSTRAP_TOKEN"); ok {
 			problems = appendProblem(problems, "GUGU_DEV_BOOTSTRAP_TOKEN", "is only allowed in development")
 		}
+	}
+	// Sessions are opaque random bearer tokens and only their SHA-256 digests
+	// are persisted. There is no signed session payload, so a session signing
+	// key would be unused and dangerously misleading. Reject the retired
+	// setting instead of silently pretending that it protects sessions.
+	if _, ok := nonEmpty(lookup, "GUGU_SESSION_KEY_FILE"); ok {
+		problems = appendProblem(problems, "GUGU_SESSION_KEY_FILE", "is obsolete; opaque sessions do not use a signing key")
 	}
 
 	if raw, ok := nonEmpty(lookup, "GUGU_TLS_TERMINATED"); ok {
@@ -215,7 +220,6 @@ func (cfg Config) validationProblems() []ValidationProblem {
 			field string
 			path  string
 		}{
-			{field: "GUGU_SESSION_KEY_FILE", path: cfg.SessionKeyFile},
 			{field: "GUGU_AGENT_CA_CERT_FILE", path: cfg.AgentCACertFile},
 			{field: "GUGU_AGENT_CA_KEY_FILE", path: cfg.AgentCAKeyFile},
 		} {

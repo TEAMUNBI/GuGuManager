@@ -71,6 +71,10 @@ func (f *fakeFileRuntime) RestartContainer(_ context.Context, _ string, _ int) e
 	return nil
 }
 
+func (f *fakeFileRuntime) KillContainer(_ context.Context, _ string) error {
+	return nil
+}
+
 func (f *fakeFileRuntime) RemoveContainer(_ context.Context, _ string, _ bool) error {
 	return nil
 }

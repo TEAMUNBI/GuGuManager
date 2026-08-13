@@ -247,7 +247,29 @@ func (m *Memory) SendConsoleCommand(serverID string, command string, actor domai
 	m.mu.Unlock()
 	// 实时广播给 WebSocket 订阅者（发布在锁外，避免占用 Store 写锁）。
 	m.consoleHub.Publish(serverID, commandLines)
-	m.recordAudit(currentActor.DisplayName, "console.command", "server", server.Name, "success", id.New())
+	m.recordAudit(currentActor.DisplayName, "console.command", "server", server.Name, "accepted", id.New())
+	return nil
+}
+
+// RecordConsoleCommandResult records the Agent-confirmed terminal result. The
+// request identifier correlates this event with the dispatched command without
+// storing command contents in the audit log.
+func (m *Memory) RecordConsoleCommandResult(serverID string, actor domain.User, result domain.ConsoleCommandResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	currentActor, err := m.authorizeServerLocked(actor.ID, serverID, "servers.console")
+	if err != nil {
+		return err
+	}
+	server, ok := m.servers[serverID]
+	if !ok {
+		return domain.NewProblem("NOT_FOUND", "服务器不存在", false)
+	}
+	auditResult := "failure"
+	if result.Succeeded {
+		auditResult = "success"
+	}
+	m.recordAuditLocked(currentActor.DisplayName, "console.command.result", "server", server.Name, auditResult, result.RequestID)
 	return nil
 }
 

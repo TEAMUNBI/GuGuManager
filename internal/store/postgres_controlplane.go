@@ -1412,10 +1412,26 @@ func (s *Postgres) SendConsoleCommand(serverID string, command string, actor dom
 	if observedPower != "running" {
 		return domain.NewProblem("OPERATION_CONFLICT", "服务器未运行，无法发送控制台命令", false)
 	}
-	if err := s.recordAudit(ctx, s.db, currentActor, "console.command", "server", serverID, "success", id.New()); err != nil {
+	if err := s.recordAudit(ctx, s.db, currentActor, "console.command", "server", serverID, "accepted", id.New()); err != nil {
 		return err
 	}
 	return nil
+}
+
+// RecordConsoleCommandResult records only the terminal result confirmed by the
+// Agent. Command text and runtime output are intentionally excluded.
+func (s *Postgres) RecordConsoleCommandResult(serverID string, actor domain.User, result domain.ConsoleCommandResult) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	currentActor, err := s.authorizeServer(ctx, actor.ID, serverID, "servers.console")
+	if err != nil {
+		return err
+	}
+	auditResult := "failure"
+	if result.Succeeded {
+		auditResult = "success"
+	}
+	return s.recordAudit(ctx, s.db, currentActor, "console.command.result", "server", serverID, auditResult, result.RequestID)
 }
 
 // recordAudit records an audit event at connection level.

@@ -143,7 +143,7 @@ func TestPostgresMembershipAndReset(t *testing.T) {
 	if err := s.ResetPassword(resetToken.Token, "new-password-12345"); err != nil {
 		t.Fatalf("reset password: %v", err)
 	}
-	if _, err := s.Session(loginToken); err == nil {
+	if _, err := s.AuthenticateSession(loginToken); err == nil {
 		t.Fatal("expected pre-reset session to be revoked")
 	}
 	if _, _, err := s.Login("admin@test.local", "new-password-12345"); err != nil {

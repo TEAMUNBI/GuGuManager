@@ -59,6 +59,16 @@ paths:
                 properties:
                   status: {type: string, const: ready}
                   adapter: {type: string, description: "Storage adapter in use, e.g. development-memory."}
+        '503':
+          description: A required dependency, canonical migration, or encryption key is not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, adapter]
+                properties:
+                  status: {type: string, const: not_ready}
+                  adapter: {type: string, description: "Configured runtime adapter."}
   /setup/status:
     get:
       tags: [Setup]
@@ -637,6 +647,9 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
   /servers/{serverId}/files:
     parameters:
       - $ref: '#/components/parameters/ServerId'

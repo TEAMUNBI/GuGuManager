@@ -34,7 +34,7 @@
 - `GUGU_ENVIRONMENT`：`development` 或 `production`。
 - `GUGU_HTTP_ADDR`、`GUGU_PUBLIC_URL`。
 - `GUGU_DATABASE_URL`、`GUGU_REDIS_URL`。
-- `GUGU_SESSION_KEY_FILE`、`GUGU_ENCRYPTION_KEY_FILE`。
+- `GUGU_ENCRYPTION_KEY_FILE`（或轮换用 `GUGU_ENCRYPTION_KEYRING_FILE`）。opaque session 不需要签名密钥；`GUGU_SESSION_KEY_FILE` 已废弃并会被拒绝。
 - `GUGU_AGENT_CA_CERT_FILE`、`GUGU_AGENT_CA_KEY_FILE`。
 - `GUGU_BOOTSTRAP_TOKEN_FILE`。
 - `GUGU_LOG_LEVEL`、`GUGU_LOG_FORMAT`。
@@ -42,7 +42,7 @@
 
 敏感环境变量不会输出到启动日志。生产模式按 [安全门禁](09-security.md#7-生产启动门禁)校验。
 
-当前加载器在 `development` 读取 Web、开发管理员、Agent Token、operation 延迟和开发数据根；Control Plane 启动器会按 `GUGU_LOG_LEVEL`（`debug`、`info`、`warn`、`error`）和 `GUGU_LOG_FORMAT`（`json`、`text`）构造日志处理器。在 `production` 会读取并聚合校验 HTTPS Public URL、PostgreSQL/可选 Redis URL、TLS 终止声明、Session/Encryption Key 与 Agent CA 文件，并拒绝所有 `GUGU_DEV_*` 身份凭据，包括 `GUGU_DEV_BOOTSTRAP_TOKEN`；`Config.Validate()` 与环境加载使用相同的禁止项。全部字段有效后正常启动生产适配器：连接 PostgreSQL 执行迁移、构造 Postgres store，并启用 Agent 的 mTLS gRPC 网关；不再返回 `ErrProductionAdapterUnavailable`。
+当前加载器在 `development` 读取 Web、开发管理员、Agent Token、operation 延迟和开发数据根；Control Plane 启动器会按 `GUGU_LOG_LEVEL`（`debug`、`info`、`warn`、`error`）和 `GUGU_LOG_FORMAT`（`json`、`text`）构造日志处理器。在 `production` 会读取并聚合校验 HTTPS Public URL、PostgreSQL/可选 Redis URL、TLS 终止声明、Encryption Key 与 Agent CA 文件，并拒绝所有 `GUGU_DEV_*` 身份凭据，包括 `GUGU_DEV_BOOTSTRAP_TOKEN`；`Config.Validate()` 与环境加载使用相同的禁止项。全部字段有效后正常启动生产适配器：连接 PostgreSQL 执行迁移、构造 Postgres store，并启用 Agent 的 mTLS gRPC 网关；不再返回 `ErrProductionAdapterUnavailable`。
 
 ## 4. 数据库迁移
 

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,141 @@ func TestProtectedAPIRequiresSession(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
+}
+
+func TestAuthenticatedGETPreservesCSRFAndExplicitRecoveryRotatesSession(t *testing.T) {
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, login := authenticatedClient(t, testServer.URL)
+	baseURL, err := url.Parse(testServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldCookie *http.Cookie
+	for _, cookie := range client.Jar.Cookies(baseURL) {
+		if cookie.Name == sessionCookie {
+			copy := *cookie
+			oldCookie = &copy
+		}
+	}
+	if oldCookie == nil || oldCookie.Value == "" {
+		t.Fatal("login did not establish an opaque session cookie")
+	}
+
+	overview := doJSON(t, client, http.MethodGet, testServer.URL+"/api/v1/overview", "", nil)
+	overview.Body.Close()
+	if overview.StatusCode != http.StatusOK {
+		t.Fatalf("ordinary authenticated GET status = %d, want 200", overview.StatusCode)
+	}
+	before := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/files/directories", `{"path":"auth-before-recovery"}`, map[string]string{"X-CSRF-Token": login.CSRFToken})
+	before.Body.Close()
+	if before.StatusCode != http.StatusCreated {
+		t.Fatalf("write after ordinary GET status = %d, want 201", before.StatusCode)
+	}
+
+	recoveredResponse := doJSON(t, client, http.MethodGet, testServer.URL+"/api/v1/auth/session", "", nil)
+	if recoveredResponse.StatusCode != http.StatusOK {
+		recoveredResponse.Body.Close()
+		t.Fatalf("explicit session recovery status = %d, want 200", recoveredResponse.StatusCode)
+	}
+	var recovered struct {
+		Data domain.SessionView `json:"data"`
+	}
+	decodeResponse(t, recoveredResponse, &recovered)
+	if recovered.Data.CSRFToken == "" || recovered.Data.CSRFToken == login.CSRFToken {
+		t.Fatal("explicit recovery did not return a rotated CSRF token")
+	}
+	var newCookie *http.Cookie
+	for _, cookie := range client.Jar.Cookies(baseURL) {
+		if cookie.Name == sessionCookie {
+			copy := *cookie
+			newCookie = &copy
+		}
+	}
+	if newCookie == nil || newCookie.Value == oldCookie.Value {
+		t.Fatal("explicit recovery did not rotate the opaque session cookie")
+	}
+
+	oldRequest, err := http.NewRequest(http.MethodGet, testServer.URL+"/api/v1/overview", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRequest.AddCookie(oldCookie)
+	oldResponse, err := testServer.Client().Do(oldRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldResponse.Body.Close()
+	if oldResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old session status = %d, want 401", oldResponse.StatusCode)
+	}
+
+	oldCSRF := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/files/directories", `{"path":"auth-old-csrf"}`, map[string]string{"X-CSRF-Token": login.CSRFToken})
+	oldCSRF.Body.Close()
+	if oldCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("old CSRF with recovered session status = %d, want 403", oldCSRF.StatusCode)
+	}
+	after := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/files/directories", `{"path":"auth-after-recovery"}`, map[string]string{"X-CSRF-Token": recovered.Data.CSRFToken})
+	after.Body.Close()
+	if after.StatusCode != http.StatusCreated {
+		t.Fatalf("write with recovered session status = %d, want 201", after.StatusCode)
+	}
+}
+
+func TestProductionSessionRecoverySetsSecureCookie(t *testing.T) {
+	service := store.NewMemory("production", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	_, oldToken, err := service.Login("admin@gugu.local", "gugu-dev-2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)), WithEnvironment("production"))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: oldToken})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != sessionCookie || !cookies[0].Secure || cookies[0].Value == oldToken {
+		t.Fatalf("recovery cookie = %+v, want one rotated Secure session cookie", cookies)
+	}
+}
+
+type readinessFunc func(context.Context) error
+
+func (f readinessFunc) Readiness(ctx context.Context) error { return f(ctx) }
+
+func TestReadinessReflectsLiveDependencyState(t *testing.T) {
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	assert := func(name string, handler http.Handler, want int, forbidden string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if response.Code != want {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, want, response.Body.String())
+			}
+			if forbidden != "" && strings.Contains(response.Body.String(), forbidden) {
+				t.Fatalf("readiness response leaked internal error %q: %s", forbidden, response.Body.String())
+			}
+		})
+	}
+	assert("development memory", New(service, logger), http.StatusOK, "")
+	assert("production checker missing", New(service, logger, WithEnvironment("production")), http.StatusServiceUnavailable, "")
+	assert("dependency failure", New(service, logger, WithEnvironment("production"), WithReadinessChecker(readinessFunc(func(context.Context) error {
+		return errors.New("database-password-must-not-leak")
+	}))), http.StatusServiceUnavailable, "database-password-must-not-leak")
+	assert("dependencies ready", New(service, logger, WithEnvironment("production"), WithReadinessChecker(readinessFunc(func(context.Context) error {
+		return nil
+	}))), http.StatusOK, "")
 }
 
 func TestDecodeJSONRequiresApplicationJSONContentType(t *testing.T) {
@@ -1580,12 +1716,17 @@ type recordingDispatcher struct {
 	nodeID   string
 	serverID string
 	command  string
+	result   domain.ConsoleCommandResult
 	err      error
 }
 
-func (d *recordingDispatcher) SendConsoleCommand(nodeID, serverID, command string) error {
+func (d *recordingDispatcher) SendConsoleCommand(_ context.Context, nodeID, serverID, command string) (domain.ConsoleCommandResult, error) {
 	d.nodeID, d.serverID, d.command = nodeID, serverID, command
-	return d.err
+	result := d.result
+	if result.RequestID == "" {
+		result = domain.ConsoleCommandResult{RequestID: "console-test-request", ServerID: serverID, Succeeded: d.err == nil}
+	}
+	return result, d.err
 }
 
 func TestConsoleCommandDispatchesToAgent(t *testing.T) {
@@ -1613,7 +1754,10 @@ func TestConsoleCommandDispatchesToAgent(t *testing.T) {
 func TestConsoleCommandNodeOfflineReportsError(t *testing.T) {
 	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
 	defer func() { _ = service.Close() }()
-	dispatcher := &recordingDispatcher{err: errors.New("node has no active connect stream")}
+	dispatcher := &recordingDispatcher{
+		result: domain.ConsoleCommandResult{RequestID: "offline-request", ServerID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ErrorCode: "NODE_OFFLINE", Retryable: true},
+		err:    domain.NewProblem("NODE_OFFLINE", "node has no active connect stream", true),
+	}
 	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCommandDispatcher(dispatcher))
 	testServer := httptest.NewServer(handler)
 	defer testServer.Close()

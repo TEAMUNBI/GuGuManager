@@ -241,14 +241,16 @@ func (m *Memory) Login(email string, password string) (domain.SessionView, strin
 	}
 	user = cloneUser(current.User)
 	session.User = user
-	m.sessions[tokenDigest(token)] = session
+	m.sessions[sessionTokenDigest(token)] = session
 	m.mu.Unlock()
 	m.recordAudit(user.DisplayName, "auth.login", "session", "Control Plane", "success", id.New())
 	return domain.SessionView{User: user, CSRFToken: csrf, Environment: m.environment}, token, nil
 }
 
-func (m *Memory) Session(token string) (domain.SessionView, error) {
-	digest := tokenDigest(token)
+// AuthenticateSession validates an opaque session for ordinary authenticated
+// requests. It deliberately does not expose or rotate the CSRF token.
+func (m *Memory) AuthenticateSession(token string) (domain.SessionView, error) {
+	digest := sessionTokenDigest(token)
 	m.mu.Lock()
 	session, ok := m.sessions[digest]
 	record, userOK := m.users[session.UserID]
@@ -259,11 +261,35 @@ func (m *Memory) Session(token string) (domain.SessionView, error) {
 	}
 	user := cloneUser(record.User)
 	m.mu.Unlock()
-	return domain.SessionView{User: user, CSRFToken: session.CSRFToken, Environment: m.environment}, nil
+	return domain.SessionView{User: user, Environment: m.environment}, nil
+}
+
+// RecoverSession atomically consumes the old opaque session and returns a new
+// session cookie plus CSRF plaintext. Only one concurrent recovery can win.
+func (m *Memory) RecoverSession(token string) (domain.SessionView, string, error) {
+	oldDigest := sessionTokenDigest(token)
+	newToken := randomToken()
+	newDigest := sessionTokenDigest(newToken)
+	csrf := randomToken()
+	m.mu.Lock()
+	session, ok := m.sessions[oldDigest]
+	record, userOK := m.users[session.UserID]
+	if !ok || !userOK || record.User.Status != "active" || time.Now().After(session.ExpiresAt) {
+		delete(m.sessions, oldDigest)
+		m.mu.Unlock()
+		return domain.SessionView{}, "", domain.NewProblem("AUTH_REQUIRED", "请先登录", false)
+	}
+	user := cloneUser(record.User)
+	session.User = user
+	session.CSRFToken = csrf
+	delete(m.sessions, oldDigest)
+	m.sessions[newDigest] = session
+	m.mu.Unlock()
+	return domain.SessionView{User: user, CSRFToken: csrf, Environment: m.environment}, newToken, nil
 }
 
 func (m *Memory) Logout(token string) {
-	digest := tokenDigest(token)
+	digest := sessionTokenDigest(token)
 	m.mu.Lock()
 	session, ok := m.sessions[digest]
 	delete(m.sessions, digest)
@@ -274,7 +300,7 @@ func (m *Memory) Logout(token string) {
 }
 
 func (m *Memory) ValidateCSRF(token string, csrf string) bool {
-	digest := tokenDigest(token)
+	digest := sessionTokenDigest(token)
 	m.mu.RLock()
 	session, ok := m.sessions[digest]
 	record, userOK := m.users[session.UserID]
@@ -461,4 +487,12 @@ func randomToken() string {
 
 func tokenDigest(token string) [32]byte {
 	return sha256.Sum256([]byte(token))
+}
+
+// sessionTokenDigest v2 domain-separates browser sessions from bootstrap,
+// reset and other opaque tokens. Rows written with the legacy raw digest no
+// longer match after deployment, providing a one-time invalidation of every
+// pre-fix browser session without rewriting token material the server lacks.
+func sessionTokenDigest(token string) [32]byte {
+	return sha256.Sum256([]byte("gugumanager:session:v2:\x00" + token))
 }
