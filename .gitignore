@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 deploy/.env
+deploy/secrets/
 *.local
 
 # Go
