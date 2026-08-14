@@ -182,6 +182,7 @@ func (m *Memory) Startup(serverID string) (domain.Startup, error) {
 		ServerID: serverID, Generation: server.Generation,
 		Command:   resolveStartupCommand(startup, values),
 		Variables: make([]domain.StartupVariable, 0, len(startup.Variables)),
+		Bindings:  append([]domain.StartupBinding(nil), startup.Bindings...),
 	}
 	for _, definition := range startup.Variables {
 		value, configured := values[definition.Key]

@@ -9,30 +9,41 @@ import (
 	"github.com/gugumanager/gugumanager/internal/domain"
 )
 
-func TestEmbeddedCatalogDoesNotClaimUnprovenTrustOrRuntimeSupport(t *testing.T) {
+func TestEmbeddedCatalogOnlyMarksPinnedPaperMCRuntimeRunnable(t *testing.T) {
 	service := NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
 	defer func() { _ = service.Close() }()
 
-	wantReasons := []string{gameReasonSignatureUnverified, gameReasonRuntimeTargetUnavailable}
 	games := service.GameDefinitions()
 	if len(games) != 3 {
 		t.Fatalf("catalog size = %d, want 3", len(games))
 	}
 	for _, game := range games {
-		if game.Signed || game.Verified || game.Runnable || game.Supported {
-			t.Errorf("%s makes an unsupported trust/runtime claim: %+v", game.ID, game)
+		if game.Signed || game.Verified || game.Supported {
+			t.Errorf("%s makes an unsupported signature/support claim: %+v", game.ID, game)
 		}
 		if game.TrustLevel != gameTrustLevelLocal || game.Source != gameSourceEmbeddedV1Alpha1 {
 			t.Errorf("%s provenance = %s/%s, want %s/%s", game.ID, game.TrustLevel, game.Source, gameTrustLevelLocal, gameSourceEmbeddedV1Alpha1)
 		}
-		if !reflect.DeepEqual(game.SupportReasons, wantReasons) {
-			t.Errorf("%s support reasons = %v, want %v", game.ID, game.SupportReasons, wantReasons)
+		if game.RuntimeTarget == nil || game.RuntimeTarget.Digest == "" {
+			t.Errorf("%s has no immutable runtime target", game.ID)
+			continue
+		}
+		if game.ID == paperMCGameID {
+			if !game.Runnable || game.RuntimeTarget.Image != paperMCRuntimeImage || !reflect.DeepEqual(game.SupportReasons, []string{gameReasonSignatureUnverified}) {
+				t.Errorf("PaperMC runtime evidence = %+v", game)
+			}
+		} else if game.Runnable || !reflect.DeepEqual(game.SupportReasons, []string{gameReasonSignatureUnverified, gameReasonRuntimeTargetUnavailable}) {
+			t.Errorf("%s unexpectedly became runnable: %+v", game.ID, game)
 		}
 	}
 
 	games[0].SupportReasons[0] = "MUTATED_BY_CALLER"
+	games[0].RuntimeTarget.Environment["TYPE"] = "MUTATED_BY_CALLER"
 	if got := service.GameDefinitions()[0].SupportReasons[0]; got != gameReasonSignatureUnverified {
 		t.Fatalf("catalog response aliases stored support reasons: %q", got)
+	}
+	if got := service.GameDefinitions()[0].RuntimeTarget.Environment["TYPE"]; got == "MUTATED_BY_CALLER" {
+		t.Fatal("catalog response aliases stored runtime target")
 	}
 }
 
@@ -40,7 +51,7 @@ func TestMemoryCreateServerRejectsUnavailableRuntimeTargetWithoutSideEffects(t *
 	service := NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
 	defer func() { _ = service.Close() }()
 	actor := testActor("admin-1", "GuGu Admin")
-	game := service.games["io.gugumanager.papermc"]
+	game := service.games["io.gugumanager.factorio"]
 
 	service.mu.RLock()
 	beforeServers := len(service.servers)
@@ -82,7 +93,32 @@ func TestPostgresCatalogAndCreateServerFailClosedWithoutWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register node: %v", err)
 	}
-	game := insertCatalogGameFixture(t, s)
+	games, err := loadFixedGameCatalog()
+	if err != nil {
+		t.Fatalf("load fixed catalog: %v", err)
+	}
+	var game domain.GameDefinition
+	for _, candidate := range games {
+		if candidate.ID == "io.gugumanager.factorio" {
+			game = candidate
+			break
+		}
+	}
+	if game.ID == "" {
+		t.Fatal("fixed catalog does not contain Factorio")
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO game_definitions (id, name, source_url, review_status)
+		VALUES ($1, $2, 'https://example.invalid/factorio.json', 'approved')
+	`, game.ID, game.Name); err != nil {
+		t.Fatalf("insert game definition: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO game_bundles (game_definition_id, definition_version, game_version, digest, schema_version, license, compatibility, published_at)
+		VALUES ($1, $2, $3, $4, 'v1', 'MIT', '{}'::jsonb, now())
+	`, game.ID, game.Version, game.GameVersion, game.BundleDigest); err != nil {
+		t.Fatalf("insert game bundle: %v", err)
+	}
 
 	listed := s.GameDefinitions()
 	if len(listed) != 1 {

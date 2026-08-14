@@ -60,7 +60,7 @@ type Memory struct {
 	startupValues       map[string]map[string]any
 	nodes               map[string]domain.Node
 	nodeOrder           []string
-	revokedNodes        map[string]bool            // 已吊销节点（列表隐藏、心跳拒绝）
+	revokedNodes        map[string]bool        // 已吊销节点（列表隐藏、心跳拒绝）
 	enrollmentTokens    map[[32]byte]time.Time // 一次性 Agent 注册令牌（仅存摘要）
 	games               map[string]domain.GameDefinition
 	gameOrder           []string
@@ -396,6 +396,7 @@ func (m *Memory) GameDefinitions() []domain.GameDefinition {
 		game.Capabilities = append([]string(nil), game.Capabilities...)
 		game.Platforms = append([]string(nil), game.Platforms...)
 		game.SupportReasons = append([]string(nil), game.SupportReasons...)
+		game.RuntimeTarget = cloneRuntimeTarget(game.RuntimeTarget)
 		result = append(result, game)
 	}
 	return result

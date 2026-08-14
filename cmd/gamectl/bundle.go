@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,8 +30,14 @@ type Bundle struct {
 	License           string            `json:"license"`
 	Compatibility     map[string]string `json:"compatibility"` // panel/agent/platforms 等
 	Capabilities      []string          `json:"capabilities"`
-	Image             string            `json:"image"`     // 运行时镜像（含 digest）
-	Command           json.RawMessage   `json:"command"`   // 启动命令模板
+	Image             string            `json:"image"`   // 运行时镜像（含 digest）
+	Command           json.RawMessage   `json:"command"` // 启动命令模板
+	Adapter           string            `json:"adapter"`
+	User              string            `json:"user"`
+	WorkingDir        string            `json:"workingDir"`
+	Environment       map[string]string `json:"environment,omitempty"`
+	DataMounts        json.RawMessage   `json:"dataMounts"`
+	Console           json.RawMessage   `json:"console,omitempty"`
 	Variables         json.RawMessage   `json:"variables"` // schema + secrets + bindings
 	Stop              json.RawMessage   `json:"stop"`
 	Health            json.RawMessage   `json:"health"`
@@ -60,11 +64,17 @@ type bundleSourceDefinition struct {
 		Capabilities  []string                   `json:"capabilities"`
 		Variables     json.RawMessage            `json:"variables"`
 		Runtime       struct {
-			Image   string          `json:"image"`
-			Command json.RawMessage `json:"command"`
-			Ports   json.RawMessage `json:"ports"`
-			Stop    json.RawMessage `json:"stop"`
-			Health  json.RawMessage `json:"health"`
+			Adapter     string            `json:"adapter"`
+			Image       string            `json:"image"`
+			User        string            `json:"user"`
+			WorkingDir  string            `json:"workingDir"`
+			Command     json.RawMessage   `json:"command"`
+			Environment map[string]string `json:"environment"`
+			DataMounts  json.RawMessage   `json:"dataMounts"`
+			Console     json.RawMessage   `json:"console"`
+			Ports       json.RawMessage   `json:"ports"`
+			Stop        json.RawMessage   `json:"stop"`
+			Health      json.RawMessage   `json:"health"`
 		} `json:"runtime"`
 		Install   json.RawMessage `json:"install"`
 		Lifecycle json.RawMessage `json:"lifecycle"`
@@ -110,8 +120,14 @@ func buildBundle(inputPath string) (*Bundle, error) {
 		License:           definition.Metadata.License,
 		Compatibility:     compatibility,
 		Capabilities:      definition.Spec.Capabilities,
+		Adapter:           definition.Spec.Runtime.Adapter,
 		Image:             definition.Spec.Runtime.Image,
+		User:              definition.Spec.Runtime.User,
+		WorkingDir:        definition.Spec.Runtime.WorkingDir,
 		Command:           definition.Spec.Runtime.Command,
+		Environment:       definition.Spec.Runtime.Environment,
+		DataMounts:        definition.Spec.Runtime.DataMounts,
+		Console:           definition.Spec.Runtime.Console,
 		Variables:         definition.Spec.Variables,
 		Stop:              definition.Spec.Runtime.Stop,
 		Health:            definition.Spec.Runtime.Health,
@@ -119,12 +135,10 @@ func buildBundle(inputPath string) (*Bundle, error) {
 		Install:           definition.Spec.Install,
 		Lifecycle:         definition.Spec.Lifecycle,
 	}
-	canonical, err := json.Marshal(bundle)
+	bundle.Digest, err = gamedefinition.CanonicalBundleDigest(content)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize bundle: %w", err)
 	}
-	sum := sha256.Sum256(canonical)
-	bundle.Digest = "sha256:" + hex.EncodeToString(sum[:])
 	return bundle, nil
 }
 

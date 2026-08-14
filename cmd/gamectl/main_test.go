@@ -264,6 +264,8 @@ func TestLintAcceptsCanonicalBundleTargetPaths(t *testing.T) {
 		},
 	}
 	variables := spec["variables"].(map[string]any)
+	runtime := spec["runtime"].(map[string]any)
+	runtime["command"].(map[string]any)["args"] = []any{"{{ memory_mb }}"}
 	variables["bindings"] = []any{
 		map[string]any{"variable": "memory_mb", "target": "argument", "template": "-Xmx{{ value }}M"},
 		map[string]any{"variable": "accept_eula", "target": "file", "path": "config/server.properties", "template": "eula={{ value }}\n"},
@@ -283,6 +285,7 @@ func TestLintRejectsArgumentBindingTemplateWithoutValuePlaceholder(t *testing.T)
 	for _, template := range templates {
 		t.Run(template, func(t *testing.T) {
 			definition := exampleDefinition(t)
+			specObject(t, definition)["runtime"].(map[string]any)["command"].(map[string]any)["args"] = []any{"{{ memory_mb }}"}
 			variables := specObject(t, definition)["variables"].(map[string]any)
 			variables["bindings"] = []any{map[string]any{
 				"variable": "memory_mb",
@@ -303,6 +306,7 @@ func TestLintRejectsArgumentBindingTemplateWithoutValuePlaceholder(t *testing.T)
 
 func TestLintAcceptsArgumentBindingTemplateWithValuePlaceholder(t *testing.T) {
 	definition := exampleDefinition(t)
+	specObject(t, definition)["runtime"].(map[string]any)["command"].(map[string]any)["args"] = []any{"{{ memory_mb }}"}
 	variables := specObject(t, definition)["variables"].(map[string]any)
 	variables["bindings"] = []any{map[string]any{
 		"variable": "memory_mb",

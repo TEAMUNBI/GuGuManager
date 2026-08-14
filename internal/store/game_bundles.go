@@ -34,7 +34,17 @@ type fixedBundleDocument struct {
 		Capabilities []string        `json:"capabilities"`
 		Variables    json.RawMessage `json:"variables"`
 		Runtime      struct {
-			Command domain.StartupCommand `json:"command"`
+			Adapter     string                        `json:"adapter"`
+			Image       string                        `json:"image"`
+			User        string                        `json:"user"`
+			WorkingDir  string                        `json:"workingDir"`
+			Command     domain.StartupCommand         `json:"command"`
+			Environment map[string]string             `json:"environment"`
+			DataMounts  []domain.RuntimeDataMount     `json:"dataMounts"`
+			Ports       []domain.RuntimePort          `json:"ports"`
+			Stop        domain.RuntimeStop            `json:"stop"`
+			Health      domain.RuntimeHealth          `json:"health"`
+			Console     *domain.RuntimeConsoleAdapter `json:"console"`
 		} `json:"runtime"`
 	} `json:"spec"`
 }
@@ -76,6 +86,8 @@ var developmentGameOrder = []string{
 }
 
 const (
+	paperMCGameID                      = "io.gugumanager.papermc"
+	paperMCRuntimeImage                = "itzg/minecraft-server@sha256:da92e9d215c159cd53a0e960d9a9cb67b5455ba1a7fca5b35d92be1e0bde857a"
 	gameTrustLevelLocal                = "L0_LOCAL"
 	gameSourceEmbeddedV1Alpha1         = "embedded-v1alpha1"
 	gameSourceDatabaseMetadata         = "database-metadata"
@@ -101,6 +113,39 @@ func markCatalogBundleUntrusted(game *domain.GameDefinition, source string) {
 	game.TrustLevel = gameTrustLevelLocal
 	game.Source = source
 	game.SupportReasons = append([]string(nil), untrustedBundleSupportReasons...)
+}
+
+func markEmbeddedRuntimeSupport(game *domain.GameDefinition, document fixedBundleDocument) error {
+	target := domain.GameRuntimeTarget{
+		Adapter: document.Spec.Runtime.Adapter, Image: document.Spec.Runtime.Image,
+		User: document.Spec.Runtime.User, WorkingDir: document.Spec.Runtime.WorkingDir,
+		Command: domain.StartupCommand{
+			Executable: document.Spec.Runtime.Command.Executable,
+			Args:       append([]string(nil), document.Spec.Runtime.Command.Args...),
+		},
+		Environment: cloneStringMap(document.Spec.Runtime.Environment),
+		DataMounts:  append([]domain.RuntimeDataMount(nil), document.Spec.Runtime.DataMounts...),
+		Ports:       append([]domain.RuntimePort(nil), document.Spec.Runtime.Ports...),
+		Stop:        document.Spec.Runtime.Stop,
+		Health:      document.Spec.Runtime.Health,
+	}
+	if document.Spec.Runtime.Console != nil {
+		console := *document.Spec.Runtime.Console
+		target.Console = &console
+	}
+	target.Digest = runtimeTargetDigest(target)
+	game.RuntimeTarget = &target
+
+	if game.ID != paperMCGameID {
+		return nil
+	}
+	if target.Adapter != "container/v1" || target.Image != paperMCRuntimeImage || target.Console == nil || target.Console.Adapter != "minecraft-rcon/v1" {
+		return fmt.Errorf("embedded PaperMC runtime target does not match the supported adapter")
+	}
+	game.Runnable = true
+	game.Supported = false
+	game.SupportReasons = []string{gameReasonSignatureUnverified}
+	return nil
 }
 
 func packageRuntimeTargetUnavailable(game domain.GameDefinition) *domain.Problem {
@@ -131,8 +176,12 @@ func loadFixedGameCatalog() ([]domain.GameDefinition, error) {
 		if _, duplicate := byID[document.Metadata.ID]; duplicate {
 			return nil, fmt.Errorf("duplicate embedded GameDefinition id %s", document.Metadata.ID)
 		}
+		digest, err := gamedefinition.CanonicalBundleDigest(bundle.Document)
+		if err != nil {
+			return nil, fmt.Errorf("digest embedded GameDefinition %s: %w", bundle.Filename, err)
+		}
 		game := domain.GameDefinition{
-			ID: document.Metadata.ID, BundleDigest: bundleDigest(bundle.Document), Name: document.Metadata.Name,
+			ID: document.Metadata.ID, BundleDigest: digest, Name: document.Metadata.Name,
 			Summary: presentation.Summary, Version: document.Metadata.Version, GameVersion: document.Spec.Release.Version,
 			Status: presentation.Status, Capabilities: append([]string(nil), document.Spec.Capabilities...),
 			Platforms: append([]string(nil), document.Spec.Compatibility.Platforms...), Servers: presentation.Servers,
@@ -140,6 +189,9 @@ func loadFixedGameCatalog() ([]domain.GameDefinition, error) {
 			BundleDocument: string(bundle.Document),
 		}
 		markCatalogBundleUntrusted(&game, gameSourceEmbeddedV1Alpha1)
+		if err := markEmbeddedRuntimeSupport(&game, document); err != nil {
+			return nil, fmt.Errorf("runtime target for embedded GameDefinition %s: %w", bundle.Filename, err)
+		}
 		byID[document.Metadata.ID] = game
 	}
 
@@ -307,7 +359,7 @@ func decodeFixedBundleBindings(content []byte) ([]domain.StartupBinding, error) 
 		default:
 			return nil, fmt.Errorf("entry %d target is unsupported", index)
 		}
-		result = append(result, domain.StartupBinding{Variable: variable, Target: target, Template: template})
+		result = append(result, domain.StartupBinding{Variable: variable, Target: target, Name: name, Path: path, Template: template})
 	}
 	return result, nil
 }
@@ -350,8 +402,42 @@ func validateFixedBundleTargetPath(value string) error {
 }
 
 func bundleDigest(content []byte) string {
-	digest := sha256.Sum256(content)
+	digest, _ := gamedefinition.CanonicalBundleDigest(content)
+	return digest
+}
+
+func runtimeTargetDigest(target domain.GameRuntimeTarget) string {
+	target.Digest = ""
+	canonical, _ := json.Marshal(target)
+	digest := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneRuntimeTarget(source *domain.GameRuntimeTarget) *domain.GameRuntimeTarget {
+	if source == nil {
+		return nil
+	}
+	result := *source
+	result.Command.Args = append([]string(nil), source.Command.Args...)
+	result.Environment = cloneStringMap(source.Environment)
+	result.DataMounts = append([]domain.RuntimeDataMount(nil), source.DataMounts...)
+	result.Ports = append([]domain.RuntimePort(nil), source.Ports...)
+	if source.Console != nil {
+		console := *source.Console
+		result.Console = &console
+	}
+	return &result
 }
 
 func startupFromFixedBundle(server domain.Server, game domain.GameDefinition, overrides map[string]any) (domain.Startup, map[string]any, error) {

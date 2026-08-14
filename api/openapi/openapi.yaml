@@ -1592,7 +1592,7 @@ components:
           items: {type: string}
     GameDefinition:
       type: object
-      required: [id, bundleDigest, name, summary, version, gameVersion, status, capabilities, platforms, servers, icon, defaultMemoryMb, defaultDiskGb, signed, verified, runnable, supported, trustLevel, source, supportReasons]
+      required: [id, bundleDigest, name, summary, version, gameVersion, status, capabilities, platforms, servers, icon, defaultMemoryMb, defaultDiskGb, signed, verified, runnable, supported, trustLevel, source, supportReasons, runtimeTarget]
       properties:
         id: {type: string}
         bundleDigest:
@@ -1641,6 +1641,75 @@ components:
           items:
             type: string
             description: Stable machine-readable reason code explaining why the Bundle is not currently supported or runnable.
+        runtimeTarget: {$ref: '#/components/schemas/GameRuntimeTarget'}
+    GameRuntimeTarget:
+      type: object
+      additionalProperties: false
+      required: [digest, adapter, image, user, workingDir, command, dataMounts, ports, stop, health]
+      properties:
+        digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        adapter: {type: string, enum: [container/v1]}
+        image: {type: string, pattern: '^[^@]+@sha256:[a-f0-9]{64}$'}
+        user: {type: string}
+        workingDir: {type: string}
+        command: {$ref: '#/components/schemas/StartupCommand'}
+        environment:
+          type: object
+          additionalProperties: {type: string}
+        dataMounts:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeDataMount'}
+        ports:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimePort'}
+        stop: {$ref: '#/components/schemas/RuntimeStop'}
+        health: {$ref: '#/components/schemas/RuntimeHealth'}
+        console:
+          oneOf:
+            - {$ref: '#/components/schemas/RuntimeConsoleAdapter'}
+            - type: 'null'
+    RuntimeDataMount:
+      type: object
+      additionalProperties: false
+      required: [name, target, backup]
+      properties:
+        name: {type: string}
+        target: {type: string}
+        backup: {type: boolean}
+    RuntimePort:
+      type: object
+      additionalProperties: false
+      required: [name, protocol, containerPort, role]
+      properties:
+        name: {type: string}
+        protocol: {type: string, enum: [tcp, udp]}
+        containerPort: {type: integer, minimum: 1, maximum: 65535}
+        role: {type: string, enum: [primary, query, rcon, additional]}
+    RuntimeStop:
+      type: object
+      additionalProperties: false
+      required: [method, value, timeoutSeconds]
+      properties:
+        method: {type: string, enum: [signal, console]}
+        value: {type: string}
+        timeoutSeconds: {type: integer, minimum: 1, maximum: 300}
+    RuntimeHealth:
+      type: object
+      additionalProperties: false
+      required: [type, intervalSeconds, timeoutSeconds, failureThreshold]
+      properties:
+        type: {type: string, enum: [tcp, udp-query, process]}
+        portRef: {type: string}
+        intervalSeconds: {type: integer, minimum: 1}
+        timeoutSeconds: {type: integer, minimum: 1}
+        failureThreshold: {type: integer, minimum: 1}
+    RuntimeConsoleAdapter:
+      type: object
+      additionalProperties: false
+      required: [adapter, port]
+      properties:
+        adapter: {type: string, enum: [minecraft-rcon/v1]}
+        port: {type: integer, minimum: 1, maximum: 65535}
     ConsoleLine:
       type: object
       required: [sequence, timestamp, stream, message]

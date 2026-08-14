@@ -2,7 +2,7 @@
   "gameDefinitionId": "io.gugumanager.papermc",
   "definitionVersion": "1.0.0",
   "gameVersion": "1.21.8",
-  "digest": "sha256:be3d87378cabd923dd9ca09667b649c15909c35c3aa700fba1e2d0fd73499b82",
+  "digest": "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa",
   "schemaVersion": "gugumanager.io/games/v1alpha1",
   "license": "Apache-2.0",
   "compatibility": {
@@ -16,15 +16,31 @@
     "backup",
     "update"
   ],
-  "image": "registry.invalid/gugumanager/papermc@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "image": "itzg/minecraft-server@sha256:da92e9d215c159cd53a0e960d9a9cb67b5455ba1a7fca5b35d92be1e0bde857a",
   "command": {
-    "executable": "java",
-    "args": [
-      "{{ memory_mb }}",
-      "-jar",
-      "paper.jar",
-      "--nogui"
-    ]
+    "executable": "/image/scripts/start",
+    "args": []
+  },
+  "adapter": "container/v1",
+  "user": "0:0",
+  "workingDir": "/data",
+  "environment": {
+    "EULA": "TRUE",
+    "MEMORY": "{{ memory_mb }}M",
+    "PAPER_BUILD": "60",
+    "TYPE": "PAPER",
+    "VERSION": "1.21.8"
+  },
+  "dataMounts": [
+    {
+      "name": "server-data",
+      "target": "/data",
+      "backup": true
+    }
+  ],
+  "console": {
+    "adapter": "minecraft-rcon/v1",
+    "port": 25575
   },
   "variables": {
     "schema": {
@@ -58,8 +74,9 @@
     "bindings": [
       {
         "variable": "memory_mb",
-        "target": "argument",
-        "template": "-Xmx{{ value }}M"
+        "target": "environment",
+        "name": "MEMORY",
+        "template": "{{ value }}M"
       }
     ]
   },

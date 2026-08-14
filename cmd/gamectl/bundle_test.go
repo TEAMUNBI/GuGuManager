@@ -64,10 +64,6 @@ func TestBundleBuildCommand(t *testing.T) {
 	if command.Executable == "" {
 		t.Fatal("bundle command executable is empty")
 	}
-	if len(command.Args) == 0 {
-		t.Fatal("bundle command args are empty")
-	}
-
 	var ports []map[string]any
 	if err := json.Unmarshal(bundle.Ports, &ports); err != nil {
 		t.Fatalf("unmarshal bundle ports: %v", err)

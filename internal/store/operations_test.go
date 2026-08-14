@@ -596,12 +596,12 @@ func TestCreateServerValidatesApprovalLimitsAndCapacity(t *testing.T) {
 		},
 		{
 			name:  "memory above API maximum",
-			input: domain.CreateServerInput{Name: "Too large", GameDefinitionID: "io.gugumanager.papermc", GameBundleDigest: "sha256:412759ce8b7832b3762d1a6f34d076ecceebd4ecd7cd7d04f16ac0cff063285b", NodeID: availableNodeID, MemoryMB: 131073, DiskGB: 5},
+			input: domain.CreateServerInput{Name: "Too large", GameDefinitionID: "io.gugumanager.papermc", GameBundleDigest: "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa", NodeID: availableNodeID, MemoryMB: 131073, DiskGB: 5},
 			code:  "VALIDATION_FAILED",
 		},
 		{
 			name:  "node capacity exceeded",
-			input: domain.CreateServerInput{Name: "No capacity", GameDefinitionID: "io.gugumanager.papermc", GameBundleDigest: "sha256:412759ce8b7832b3762d1a6f34d076ecceebd4ecd7cd7d04f16ac0cff063285b", NodeID: availableNodeID, MemoryMB: 65536, DiskGB: 5},
+			input: domain.CreateServerInput{Name: "No capacity", GameDefinitionID: "io.gugumanager.papermc", GameBundleDigest: "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa", NodeID: availableNodeID, MemoryMB: 65536, DiskGB: 5},
 			code:  "INSUFFICIENT_RESOURCE",
 		},
 	}
@@ -1187,7 +1187,7 @@ func validCreateServerInput() domain.CreateServerInput {
 	return domain.CreateServerInput{
 		Name:             "Regression world",
 		GameDefinitionID: "io.gugumanager.papermc",
-		GameBundleDigest: "sha256:412759ce8b7832b3762d1a6f34d076ecceebd4ecd7cd7d04f16ac0cff063285b",
+		GameBundleDigest: "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa",
 		NodeID:           availableNodeID,
 		MemoryMB:         1024,
 		DiskGB:           5,

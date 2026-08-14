@@ -403,8 +403,11 @@ func TestStartupUsesFixedBundleSecretMetadata(t *testing.T) {
 	if legacy := startupVariableByKey(paper.Variables, "server_token"); legacy.Key != "" {
 		t.Fatalf("Paper exposed hand-written variable not present in its bundle: %+v", legacy)
 	}
-	if len(paper.Command.Args) == 0 || paper.Command.Args[0] != "-Xmx2048M" {
-		t.Fatalf("Paper command = %+v, want memory binding resolved from the Bundle default", paper.Command)
+	if paper.Command.Executable != "/image/scripts/start" || len(paper.Command.Args) != 0 {
+		t.Fatalf("Paper command = %+v, want pinned itzg entrypoint", paper.Command)
+	}
+	if len(paper.Bindings) != 1 || paper.Bindings[0].Target != "environment" || paper.Bindings[0].Name != "MEMORY" || paper.Bindings[0].Template != "{{ value }}M" {
+		t.Fatalf("Paper bindings = %+v, want immutable MEMORY environment binding", paper.Bindings)
 	}
 
 	factorio, err := service.Startup(stoppedServerID)
@@ -446,7 +449,7 @@ func TestStartupRejectsBundleIdentityMismatchAndTamperedDeclarations(t *testing.
 		service := newTestMemory(time.Millisecond)
 		service.mu.Lock()
 		game := service.games["io.gugumanager.factorio"]
-		game.BundleDocument += "\n"
+		game.BundleDocument = strings.Replace(game.BundleDocument, "registry.invalid/gugumanager/factorio", "registry.invalid/gugumanager/factorio-tampered", 1)
 		service.games[game.ID] = game
 		service.mu.Unlock()
 
@@ -508,8 +511,9 @@ func TestDynamicAndSeedServersUseTheSameBundleStartupTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paper.Command.Args) == 0 || paper.Command.Args[0] != "-Xmx8192M" {
-		t.Fatalf("dynamic Paper command = %+v, want generic memory binding", paper.Command)
+	memory := startupVariableByKey(paper.Variables, "memory_mb")
+	if memory.Value != int64(8192) || len(paper.Bindings) != 1 || paper.Bindings[0].Name != "MEMORY" {
+		t.Fatalf("dynamic Paper startup = %+v, want generic MEMORY binding with 8192 MiB", paper)
 	}
 }
 

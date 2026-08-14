@@ -326,6 +326,7 @@ func (s *Postgres) GameDefinitions() []domain.GameDefinition {
 			game.TrustLevel = fixed.TrustLevel
 			game.Source = fixed.Source
 			game.SupportReasons = append([]string(nil), fixed.SupportReasons...)
+			game.RuntimeTarget = cloneRuntimeTarget(fixed.RuntimeTarget)
 		}
 		games = append(games, game)
 	}

@@ -29,19 +29,27 @@
       },
       "secrets": ["rcon_password"],
       "bindings": [
-        {"variable": "memory_mb", "target": "argument", "template": "-Xmx{{ value }}M"}
+        {"variable": "memory_mb", "target": "environment", "name": "MEMORY", "template": "{{ value }}M"}
       ]
     },
     "runtime": {
       "adapter": "container/v1",
-      "image": "registry.invalid/gugumanager/papermc@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-      "user": "1000:1000",
-      "workingDir": "/srv/game",
-      "command": {"executable": "java", "args": ["{{ memory_mb }}", "-jar", "paper.jar", "--nogui"]},
-      "dataMounts": [{"name": "server-data", "target": "/srv/game", "backup": true}],
+      "image": "itzg/minecraft-server@sha256:da92e9d215c159cd53a0e960d9a9cb67b5455ba1a7fca5b35d92be1e0bde857a",
+      "user": "0:0",
+      "workingDir": "/data",
+      "command": {"executable": "/image/scripts/start", "args": []},
+      "environment": {
+        "TYPE": "PAPER",
+        "VERSION": "1.21.8",
+        "PAPER_BUILD": "60",
+        "EULA": "TRUE",
+        "MEMORY": "{{ memory_mb }}M"
+      },
+      "dataMounts": [{"name": "server-data", "target": "/data", "backup": true}],
       "ports": [{"name": "game", "protocol": "tcp", "containerPort": 25565, "role": "primary"}],
       "stop": {"method": "console", "value": "stop", "timeoutSeconds": 30},
-      "health": {"type": "tcp", "portRef": "game", "intervalSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 6}
+      "health": {"type": "tcp", "portRef": "game", "intervalSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 6},
+      "console": {"adapter": "minecraft-rcon/v1", "port": 25575}
     },
     "install": {},
     "lifecycle": {"install": "builtin.artifacts", "configure": "builtin.bindings", "update": "builtin.replace-artifacts"}
