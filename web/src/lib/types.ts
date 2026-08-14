@@ -141,6 +141,16 @@ export interface Node {
   capabilities: string[];
 }
 
+export interface AgentEnrollmentToken {
+  token: string;
+  expiresAt: string;
+}
+
+export interface IssueAgentEnrollmentTokenInput {
+  nodeNameHint?: string;
+  ttlSeconds?: number;
+}
+
 export interface GameDefinition {
   id: string;
   bundleDigest: string;

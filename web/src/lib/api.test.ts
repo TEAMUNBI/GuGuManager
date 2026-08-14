@@ -28,6 +28,30 @@ describe("API response handling", () => {
     expect(new Headers(logoutInit.headers).has("Idempotency-Key")).toBe(false);
   });
 
+  it("sends enrollment and node revocation mutations with CSRF protection", async () => {
+    const issued = { token: "a".repeat(64), expiresAt: "2026-08-15T08:00:00Z" };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: issued }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.issueAgentEnrollmentToken({ nodeNameHint: "node-2", ttlSeconds: 3600 }, "csrf-token")).resolves.toEqual(issued);
+    await expect(api.revokeNode("node-1", "csrf-token")).resolves.toBeUndefined();
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/v1/agent-enrollment-tokens",
+      "/api/v1/nodes/node-1",
+    ]);
+    const issueInit = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(issueInit.method).toBe("POST");
+    expect(JSON.parse(String(issueInit.body))).toEqual({ nodeNameHint: "node-2", ttlSeconds: 3600 });
+    expect(new Headers(issueInit.headers).get("X-CSRF-Token")).toBe("csrf-token");
+    const revokeInit = fetchMock.mock.calls[1][1] as RequestInit;
+    expect(revokeInit.method).toBe("DELETE");
+    expect(revokeInit.body).toBeUndefined();
+    expect(new Headers(revokeInit.headers).get("X-CSRF-Token")).toBe("csrf-token");
+  });
+
   it("sends backup creation without a body while retaining idempotency", async () => {
     const operation = { id: "00000000-0000-4000-8000-000000000001" };
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: operation }));

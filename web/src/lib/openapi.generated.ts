@@ -594,6 +594,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/nodes/{nodeId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                nodeId: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a node immediately
+         * @description Revoked nodes are disconnected at the next heartbeat and cannot reconnect or receive work.
+         */
+        delete: operations["revokeNode"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agent-enrollment-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a short-lived single-use agent enrollment token
+         * @description The plaintext token is returned exactly once; only its digest is retained server-side.
+         */
+        post: operations["issueAgentEnrollmentToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/game-definitions": {
         parameters: {
             query?: never;
@@ -1102,6 +1144,7 @@ export interface components {
     parameters: {
         ServerId: components["schemas"]["Uuid"];
         UserId: components["schemas"]["Uuid"];
+        NodeId: components["schemas"]["Uuid"];
         BackupId: components["schemas"]["Uuid"];
         AllocationId: components["schemas"]["Uuid"];
         Cursor: string;
@@ -2370,6 +2413,69 @@ export interface operations {
             };
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
+        };
+    };
+    revokeNode: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                nodeId: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Node revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    issueAgentEnrollmentToken: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    nodeNameHint?: string;
+                    ttlSeconds?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description One-time plaintext enrollment token */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            token: string;
+                            /** Format: date-time */
+                            expiresAt: string;
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            422: components["responses"]["Error"];
         };
     };
     listGameDefinitions: {

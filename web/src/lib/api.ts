@@ -1,5 +1,5 @@
 import { MockClient } from "./mock";
-import type { Allocation, AuditEvent, Backup, ConsoleLine, CreateAllocationInput, CreateServerInput, CreateUserInput, FileContent, FileEntry, GameDefinition, Node, Operation, Overview, PasswordResetToken, Server, ServerMembership, ServerPermission, ServerPermissions, Session, SetupAdminInput, SetupStatus, Startup, StartupValue, UpdateUserInput, User } from "./types";
+import type { AgentEnrollmentToken, Allocation, AuditEvent, Backup, ConsoleLine, CreateAllocationInput, CreateServerInput, CreateUserInput, FileContent, FileEntry, GameDefinition, IssueAgentEnrollmentTokenInput, Node, Operation, Overview, PasswordResetToken, Server, ServerMembership, ServerPermission, ServerPermissions, Session, SetupAdminInput, SetupStatus, Startup, StartupValue, UpdateUserInput, User } from "./types";
 import { getActiveLocale, type Locale } from "../i18n/I18n";
 
 const DEV_PROXY_ERROR_HEADER = "X-GuGuManager-Proxy-Error";
@@ -263,7 +263,9 @@ async function mockRequest<T>(path: string, init: RequestInit): Promise<T> {
   if (/^\/servers\/[^/]+\/members\/[^/]+$/.test(pathname) && method === "DELETE") return mock.deleteServerMembership(pathname.split("/")[2], pathname.split("/")[4]) as Promise<T>;
   if (/^\/servers\/[^/]+\/permissions$/.test(pathname) && method === "GET") return mock.getServerPermissions(pathname.split("/")[2]) as Promise<T>;
   if (/^\/servers\/[^/]+$/.test(pathname)) return mock.getServer(pathname.split("/")[2]) as Promise<T>;
-  if (pathname === "/nodes") return mock.listNodes() as Promise<T>;
+  if (pathname === "/nodes" && method === "GET") return mock.listNodes() as Promise<T>;
+  if (/^\/nodes\/[^/]+$/.test(pathname) && method === "DELETE") return mock.revokeNode(pathname.split("/")[2]) as Promise<T>;
+  if (pathname === "/agent-enrollment-tokens" && method === "POST") return mock.issueAgentEnrollmentToken(JSON.parse(String(init.body))) as Promise<T>;
   if (pathname === "/game-definitions") return mock.listGames() as Promise<T>;
   if (pathname === "/audit-events") return mock.listAudit() as Promise<T>;
   if (pathname === "/operations") return mock.listOperations() as Promise<T>;
@@ -315,6 +317,8 @@ export const api = {
   operations: () => listOperations(),
   operation: (operationId: string, signal?: AbortSignal) => request<Operation>(`/operations/${operationId}`, { signal }),
   nodes: () => request<Node[]>("/nodes"),
+  issueAgentEnrollmentToken: (input: IssueAgentEnrollmentTokenInput, csrfToken: string) => request<AgentEnrollmentToken>("/agent-enrollment-tokens", csrfMutation(input, csrfToken)),
+  revokeNode: (nodeId: string, csrfToken: string) => request<void>(`/nodes/${nodeId}`, csrfDelete(csrfToken)),
   games: () => request<GameDefinition[]>("/game-definitions"),
   audit: () => request<AuditEvent[]>("/audit-events"),
   console: (serverId: string) => request<ConsoleLine[]>(`/servers/${serverId}/console`),

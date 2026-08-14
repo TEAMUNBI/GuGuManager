@@ -118,6 +118,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .eyebrow { margin: 0; color: var(--orange-soft); font-family: "Cascadia Code", monospace; font-size: 9px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .lede { margin: 0; color: var(--muted); font-size: 13px; }
 .heading-actions { display: flex; align-items: center; gap: 12px; }
+.nodes-page .heading-actions { flex-wrap: wrap; justify-content: flex-end; }
 .refresh-note, .sync-state { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-family: "Cascadia Code", monospace; font-size: 9px; text-transform: uppercase; }
 .refresh-note i, .sync-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--mint); }
 .refresh-note.is-stale { color: var(--warning); }
@@ -909,6 +910,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .page-heading { align-items: flex-start; flex-direction: column; margin-bottom: 22px; }
   .page-heading h1 { font-size: 31px; }
   .heading-actions { width: 100%; justify-content: space-between; }
+  .nodes-page .heading-actions .sync-state { flex: 0 0 100%; }
+  .nodes-page .heading-actions .button { flex: 1 1 0; }
   .metric-grid { grid-template-columns: 1fr 1fr; }
   .metric-card { min-height: 112px; padding: 14px; }
   .metric-card > strong { font-size: 22px; }

@@ -12,6 +12,7 @@ import type {
   FileContent,
   FileEntry,
   GameDefinition,
+  IssueAgentEnrollmentTokenInput,
   Node,
   Operation,
   Overview,
@@ -307,6 +308,7 @@ export class MockClient {
   private requestDigestKey = crypto.getRandomValues(new Uint8Array(32));
   private allocations = cloneAllocations(seededAllocations);
   private startup = cloneStartup(seededStartup);
+  private revokedNodes = new Set<string>();
 
   constructor(options: MockClientOptions = {}) {
     this.catalog = (options.catalog ?? games).map((game) => ({
@@ -501,7 +503,23 @@ export class MockClient {
     if (!this.canReadServer(serverId)) throw new Error("FORBIDDEN");
     return server;
   }
-  async listNodes(): Promise<Node[]> { return nodes; }
+  async listNodes(): Promise<Node[]> { return nodes.filter((node) => !this.revokedNodes.has(node.id)); }
+  async issueAgentEnrollmentToken(input: IssueAgentEnrollmentTokenInput): Promise<{ token: string; expiresAt: string }> {
+    this.requirePlatformAdmin();
+    const nodeNameHint = input.nodeNameHint?.trim() ?? "";
+    const ttlSeconds = input.ttlSeconds ?? 86_400;
+    if ([...nodeNameHint].length > 100 || !Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 604_800) {
+      throw new Error("VALIDATION_FAILED");
+    }
+    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = Array.from(tokenBytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return { token, expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString() };
+  }
+  async revokeNode(nodeId: string): Promise<void> {
+    this.requirePlatformAdmin();
+    if (!nodes.some((node) => node.id === nodeId) || this.revokedNodes.has(nodeId)) throw new Error("NOT_FOUND");
+    this.revokedNodes.add(nodeId);
+  }
   async listGames(): Promise<GameDefinition[]> { return this.catalog; }
   async listAudit(): Promise<AuditEvent[]> { return audit; }
   async listOperations(): Promise<Operation[]> {

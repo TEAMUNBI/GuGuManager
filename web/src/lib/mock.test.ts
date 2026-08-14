@@ -168,6 +168,22 @@ describe("MockClient contract identities", () => {
 });
 
 describe("MockClient API parity", () => {
+  test("issues validated enrollment tokens and revokes nodes once", async () => {
+    const client = new MockClient();
+    await client.login("admin@gugu.local", "gugu-dev-2026");
+    const [node] = await client.listNodes();
+
+    const issued = await client.issueAgentEnrollmentToken({ nodeNameHint: " node-2 ", ttlSeconds: 60 });
+    expect(issued.token).toMatch(/^[0-9a-f]{64}$/);
+    expect(new Date(issued.expiresAt).getTime()).toBeGreaterThan(Date.now());
+    await expect(client.issueAgentEnrollmentToken({ ttlSeconds: 0 })).rejects.toThrow("VALIDATION_FAILED");
+    await expect(client.issueAgentEnrollmentToken({ nodeNameHint: "x".repeat(101) })).rejects.toThrow("VALIDATION_FAILED");
+
+    await expect(client.revokeNode(node.id)).resolves.toBeUndefined();
+    expect((await client.listNodes()).some((candidate) => candidate.id === node.id)).toBe(false);
+    await expect(client.revokeNode(node.id)).rejects.toThrow("NOT_FOUND");
+  });
+
   test("checks development credentials", async () => {
     const client = new MockClient();
 
