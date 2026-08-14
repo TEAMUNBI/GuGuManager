@@ -16,7 +16,8 @@ COPY internal/ ./internal/
 COPY spec/ ./spec/
 RUN CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags="-s -w" -o /out/gugu-control-plane ./cmd/control-plane \
-    && go build -trimpath -ldflags="-s -w" -o /out/gugu-agent ./cmd/agent
+    && go build -trimpath -ldflags="-s -w" -o /out/gugu-agent ./cmd/agent \
+    && go build -trimpath -ldflags="-s -w" -o /out/gamectl ./cmd/gamectl
 
 FROM alpine:3.23
 RUN addgroup -S -g 10001 gugu \
@@ -26,9 +27,12 @@ RUN addgroup -S -g 10001 gugu \
 WORKDIR /app
 COPY --from=go-build /out/gugu-control-plane /usr/local/bin/gugu-control-plane
 COPY --from=go-build /out/gugu-agent /usr/local/bin/gugu-agent
+COPY --from=go-build /out/gamectl /usr/local/bin/gamectl
 COPY --from=web-build /src/web/dist /app/web
+COPY migrations /app/migrations
+COPY spec/game-definition/bundles/papermc-1.21.8.json /app/bundles/papermc-1.21.8.json
 LABEL org.opencontainers.image.title="GuGuManager Control Plane" \
-    org.opencontainers.image.description="Fail-closed preview image; the production adapter is not implemented yet"
+    org.opencontainers.image.description="GuGuManager control plane and agent with the verified PaperMC local runtime"
 ENV GUGU_ENVIRONMENT=production \
     GUGU_HTTP_ADDR=0.0.0.0:8080 \
     GUGU_WEB_ROOT=/app/web

@@ -1,105 +1,11 @@
 name: gugumanager-prod
 
-# 生产模式示例：Control Plane（Postgres 持久化 + mTLS Agent 网关）+ Agent + Postgres + Redis。
-# 使用前：
-#   1. 复制 deploy/.env.example 为 deploy/.env 并替换所有占位值（GUGU_PUBLIC_URL、POSTGRES_PASSWORD 等）。
-#   2. 生成 secret 文件（参考 deploy/.env.example 中的说明）放入 deploy/secrets/：
-#        encryption.key / agent-ca.crt / agent-ca.key / bootstrap-token
-#   3. TLS 由前置反向代理（Nginx/Caddy/Traefik）终止，HTTP 与 gRPC 端口默认只绑定本机回环。
-#   4. agent 容器内的 gugu 用户（uid 10001）需要宿主 Docker socket 的读权限：
-#      可将 10001 加入宿主机 docker 组，或改用 docker-socket-proxy 等代理方案。
-
 services:
-  control-plane:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    environment:
-      GUGU_ENVIRONMENT: production
-      GUGU_HTTP_ADDR: 0.0.0.0:8080
-      GUGU_WEB_ROOT: /app/web
-      # 必填：面板对外公开的 HTTPS 地址（反向代理在此终止 TLS）。
-      GUGU_PUBLIC_URL: ${GUGU_PUBLIC_URL:-https://panel.example.com}
-      GUGU_DATABASE_URL: postgres://${POSTGRES_USER:-gugumanager}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gugumanager}
-      GUGU_REDIS_URL: redis://redis:6379/0
-      # 生产要求全部 secret 以文件形式挂载（必须是可读的非空文件）。
-      GUGU_ENCRYPTION_KEY_FILE: /run/secrets/encryption-key
-      GUGU_AGENT_CA_CERT_FILE: /run/secrets/agent-ca-cert
-      GUGU_AGENT_CA_KEY_FILE: /run/secrets/agent-ca-key
-      GUGU_BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap-token
-      # 生产必须显式声明 TLS 由外部终止（否则校验失败）。
-      GUGU_TLS_TERMINATED: "true"
-      # 兼容用长期静态注册令牌；留空时仍回退 bootstrap secret。
-      # 日常一次性 enrollment token 不得注入 Control Plane。
-      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_AGENT_REGISTRATION_TOKEN:-}
-      # Agent HTTP 心跳令牌：留空时与 bootstrap token 一致。
-      GUGU_AGENT_TOKEN: ${GUGU_AGENT_TOKEN:-}
-      GUGU_AGENT_GRPC_ADDR: 0.0.0.0:8443
-      # 部署在 NAT/端口转发后时补充公网 IP（证书 SAN），逗号分隔。
-      GUGU_AGENT_GRPC_PUBLIC_IPS: ${GUGU_AGENT_GRPC_PUBLIC_IPS:-}
-      # 生产由容器内迁移器执行 migration；镜像不含源码 migrations 目录，需挂载。
-      GUGU_MIGRATIONS_DIR: /app/migrations
-      GUGU_FILE_ROOT: /var/lib/gugumanager/servers
-      GUGU_LOG_LEVEL: ${GUGU_LOG_LEVEL:-info}
-      GUGU_LOG_FORMAT: ${GUGU_LOG_FORMAT:-json}
-    ports:
-      - "127.0.0.1:${GUGU_HTTP_PORT:-8080}:8080"
-      - "127.0.0.1:${GUGU_AGENT_GRPC_PORT:-8443}:8443"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    volumes:
-      - server-data:/var/lib/gugumanager/servers
-      - ../migrations:/app/migrations:ro
-    secrets:
-      - encryption-key
-      - agent-ca-cert
-      - agent-ca-key
-      - bootstrap-token
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  agent:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    # 镜像 ENTRYPOINT 默认运行 control-plane，agent 服务显式覆盖入口。
-    entrypoint: ["/usr/local/bin/gugu-agent"]
-    environment:
-      GUGU_AGENT_PANEL_ADDR: control-plane:8443
-      # 优先使用仅注入 Agent 的一次性令牌；未设置时兼容长期静态令牌。
-      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_AGENT_ENROLLMENT_TOKEN:-${GUGU_AGENT_REGISTRATION_TOKEN:-}}
-      GUGU_AGENT_NODE_NAME: ${GUGU_AGENT_NODE_NAME:-prod-node-01}
-      GUGU_AGENT_VERSION: ${GUGU_AGENT_VERSION:-0.1.0-dev}
-      GUGU_AGENT_DATA_ROOT: /var/lib/gugumanager/servers
-      GUGU_AGENT_CERT_DIR: /var/lib/gugumanager/agent/certs
-      # 首次注册和后续连接都要求预置 CA；指纹只是 CA 校验后的可选附加钉扎。
-      GUGU_AGENT_TRUST_ROOT: /run/secrets/agent-ca-cert
-      GUGU_AGENT_CA_FINGERPRINT: ${GUGU_AGENT_CA_FINGERPRINT:-}
-    volumes:
-      # 挂载宿主 Docker socket，agent 通过 Docker Engine API 创建/管理游戏服务器容器。
-      - /var/run/docker.sock:/var/run/docker.sock
-      # 服务器数据与 agent 证书（agent.crt/agent.key/node-id）持久化；CA 根由 secret 预置。
-      - agent-data:/var/lib/gugumanager
-    secrets:
-      - agent-ca-cert
-    depends_on:
-      control-plane:
-        condition: service_healthy
-    restart: unless-stopped
-
   postgres:
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-gugumanager}
       POSTGRES_USER: ${POSTGRES_USER:-gugumanager}
-      # 必填：替换为高强度密码（secret 文件中另有 DATABASE_URL 对应密码时保持一致）。
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -107,7 +13,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
   redis:
@@ -119,10 +25,104 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
-# 挂载到各服务的 /run/secrets/<secret-name>，文件需手动放入 deploy/secrets/。
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      GUGU_ENVIRONMENT: production
+      GUGU_HTTP_ADDR: 0.0.0.0:8080
+      GUGU_WEB_ROOT: /app/web
+      GUGU_PUBLIC_URL: ${GUGU_PUBLIC_URL:-https://panel.example.com}
+      GUGU_DATABASE_URL: postgres://${POSTGRES_USER:-gugumanager}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gugumanager}?sslmode=disable
+      GUGU_REDIS_URL: redis://redis:6379/0
+      GUGU_ENCRYPTION_KEY_FILE: /run/secrets/encryption-key
+      GUGU_AGENT_CA_CERT_FILE: /run/secrets/ca.crt
+      GUGU_AGENT_CA_KEY_FILE: /run/secrets/ca.key
+      GUGU_BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap-token
+      GUGU_TLS_TERMINATED: "true"
+      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_AGENT_REGISTRATION_TOKEN:-}
+      GUGU_AGENT_TOKEN: ${GUGU_AGENT_TOKEN:-}
+      GUGU_AGENT_GRPC_ADDR: 0.0.0.0:8443
+      GUGU_AGENT_GRPC_PUBLIC_IPS: ${GUGU_AGENT_GRPC_PUBLIC_IPS:-}
+      GUGU_MIGRATIONS_DIR: /app/migrations
+      GUGU_FILE_ROOT: /var/lib/gugumanager/servers
+      GUGU_LOG_LEVEL: ${GUGU_LOG_LEVEL:-info}
+      GUGU_LOG_FORMAT: ${GUGU_LOG_FORMAT:-json}
+    ports:
+      - "127.0.0.1:${GUGU_HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${GUGU_AGENT_GRPC_PORT:-8443}:8443"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    volumes:
+      - control-plane-data:/var/lib/gugumanager
+    secrets:
+      - source: encryption-key
+        target: encryption-key
+      - source: agent-ca-cert
+        target: ca.crt
+      - source: agent-ca-key
+        target: ca.key
+      - source: bootstrap-token
+        target: bootstrap-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bundle-publisher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/usr/local/bin/gamectl"]
+    command: ["bundle", "publish", "/app/bundles/papermc-1.21.8.json"]
+    environment:
+      GUGU_DATABASE_URL: postgres://${POSTGRES_USER:-gugumanager}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gugumanager}?sslmode=disable
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    restart: "no"
+
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export GUGU_AGENT_REGISTRATION_TOKEN="$$(cat /run/secrets/bootstrap-token)"
+        exec /usr/local/bin/gugu-agent
+    environment:
+      GUGU_AGENT_PANEL_ADDR: control-plane:8443
+      GUGU_AGENT_NODE_NAME: ${GUGU_AGENT_NODE_NAME:-prod-node-01}
+      GUGU_AGENT_VERSION: ${GUGU_AGENT_VERSION:-0.1.0-dev}
+      GUGU_AGENT_DATA_ROOT: /var/lib/gugumanager/servers
+      GUGU_AGENT_CERT_DIR: /var/lib/gugumanager/agent/certs
+      GUGU_AGENT_TRUST_ROOT: /run/secrets/ca.crt
+      GUGU_AGENT_CA_FINGERPRINT: ${GUGU_AGENT_CA_FINGERPRINT:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-data:/var/lib/gugumanager
+    secrets:
+      - source: agent-ca-cert
+        target: ca.crt
+      - source: bootstrap-token
+        target: bootstrap-token
+    depends_on:
+      bundle-publisher:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 secrets:
   encryption-key:
     file: ./secrets/encryption.key
@@ -134,7 +134,7 @@ secrets:
     file: ./secrets/bootstrap-token
 
 volumes:
-  server-data:
+  control-plane-data:
   agent-data:
   postgres-data:
   redis-data:

@@ -1,93 +1,139 @@
-name: gugumanager-dev
+name: gugumanager-local
 
+# Local production-path stack. Generate deploy/secrets first with:
+#   pwsh ./scripts/generate-local-secrets.ps1
 services:
-  control-plane:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    environment:
-      GUGU_ENVIRONMENT: development
-      GUGU_HTTP_ADDR: 0.0.0.0:8080
-      GUGU_WEB_ROOT: /app/web
-      GUGU_DEV_ADMIN_EMAIL: ${GUGU_DEV_ADMIN_EMAIL:-admin@gugu.local}
-      GUGU_DEV_ADMIN_PASSWORD: ${GUGU_DEV_ADMIN_PASSWORD:-gugu-dev-2026}
-      GUGU_DEV_AGENT_TOKEN: ${GUGU_DEV_AGENT_TOKEN:-gugu-agent-dev-token}
-      GUGU_DEV_DATA_ROOT: /var/lib/gugumanager/servers
-      # Agent mTLS gRPC 网关仅在 GUGU_ENVIRONMENT=production 时启动；
-      # 此处预留监听地址与端口，切换为 production 后 agent 服务即可注册。
-      GUGU_AGENT_GRPC_ADDR: 0.0.0.0:8443
-    ports:
-      - "127.0.0.1:${GUGU_HTTP_PORT:-8080}:8080"
-      - "127.0.0.1:${GUGU_AGENT_GRPC_PORT:-8443}:8443"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    volumes:
-      - server-data:/var/lib/gugumanager/servers
-    restart: unless-stopped
-
-  agent:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    # 镜像 ENTRYPOINT 默认运行 control-plane，agent 服务显式覆盖入口。
-    entrypoint: ["/usr/local/bin/gugu-agent"]
-    environment:
-      GUGU_AGENT_PANEL_ADDR: control-plane:8443
-      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_DEV_AGENT_TOKEN:-gugu-agent-dev-token}
-      GUGU_AGENT_NODE_NAME: ${GUGU_AGENT_NODE_NAME:-dev-node-01}
-      GUGU_AGENT_VERSION: 0.1.0-dev
-      GUGU_AGENT_DATA_ROOT: /var/lib/gugumanager/servers
-      GUGU_AGENT_CERT_DIR: /var/lib/gugumanager/agent/certs
-    volumes:
-      # 挂载宿主 Docker socket，agent 通过 Docker Engine API 创建/管理游戏服务器容器。
-      - /var/run/docker.sock:/var/run/docker.sock
-      # 服务器数据与 agent 证书（agent.crt/agent.key/node-id/ca.crt）持久化。
-      - agent-data:/var/lib/gugumanager
-    depends_on:
-      control-plane:
-        condition: service_healthy
-    restart: unless-stopped
-
   postgres:
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-gugumanager}
       POSTGRES_USER: ${POSTGRES_USER:-gugumanager}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gugumanager-dev-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gugumanager-local-only}
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ../migrations/000001_core.up.sql:/docker-entrypoint-initdb.d/000001_core.sql:ro
-      - ../migrations/000002_identity.up.sql:/docker-entrypoint-initdb.d/000002_identity.sql:ro
-      - ../migrations/000003_membership_permissions.up.sql:/docker-entrypoint-initdb.d/000003_membership_permissions.sql:ro
-      - ../migrations/000004_password_reset.up.sql:/docker-entrypoint-initdb.d/000004_password_reset.sql:ro
-      - ../migrations/000005_controlplane_stage1.up.sql:/docker-entrypoint-initdb.d/000005_controlplane_stage1.sql:ro
-      - ../migrations/000006_telemetry_persistence.up.sql:/docker-entrypoint-initdb.d/000006_telemetry_persistence.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
+      interval: 3s
       timeout: 3s
-      retries: 10
+      retries: 30
 
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-56379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 3s
       timeout: 3s
-      retries: 10
+      retries: 30
+
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      GUGU_ENVIRONMENT: production
+      GUGU_HTTP_ADDR: 0.0.0.0:8080
+      GUGU_WEB_ROOT: /app/web
+      GUGU_PUBLIC_URL: ${GUGU_PUBLIC_URL:-https://localhost:8080}
+      GUGU_DATABASE_URL: postgres://${POSTGRES_USER:-gugumanager}:${POSTGRES_PASSWORD:-gugumanager-local-only}@postgres:5432/${POSTGRES_DB:-gugumanager}?sslmode=disable
+      GUGU_REDIS_URL: redis://redis:6379/0
+      GUGU_ENCRYPTION_KEY_FILE: /run/secrets/encryption-key
+      GUGU_AGENT_CA_CERT_FILE: /run/secrets/ca.crt
+      GUGU_AGENT_CA_KEY_FILE: /run/secrets/ca.key
+      GUGU_BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap-token
+      GUGU_TLS_TERMINATED: "true"
+      GUGU_AGENT_GRPC_ADDR: 0.0.0.0:8443
+      GUGU_MIGRATIONS_DIR: /app/migrations
+      GUGU_FILE_ROOT: /var/lib/gugumanager/servers
+      GUGU_LOG_LEVEL: ${GUGU_LOG_LEVEL:-info}
+      GUGU_LOG_FORMAT: ${GUGU_LOG_FORMAT:-json}
+    ports:
+      - "127.0.0.1:${GUGU_HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${GUGU_AGENT_GRPC_PORT:-8443}:8443"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    volumes:
+      - control-plane-data:/var/lib/gugumanager
+    secrets:
+      - source: encryption-key
+        target: encryption-key
+      - source: agent-ca-cert
+        target: ca.crt
+      - source: agent-ca-key
+        target: ca.key
+      - source: bootstrap-token
+        target: bootstrap-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  bundle-publisher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/usr/local/bin/gamectl"]
+    command: ["bundle", "publish", "/app/bundles/papermc-1.21.8.json"]
+    environment:
+      GUGU_DATABASE_URL: postgres://${POSTGRES_USER:-gugumanager}:${POSTGRES_PASSWORD:-gugumanager-local-only}@postgres:5432/${POSTGRES_DB:-gugumanager}?sslmode=disable
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    restart: "no"
+
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export GUGU_AGENT_REGISTRATION_TOKEN="$$(cat /run/secrets/bootstrap-token)"
+        exec /usr/local/bin/gugu-agent
+    environment:
+      GUGU_AGENT_PANEL_ADDR: control-plane:8443
+      GUGU_AGENT_NODE_NAME: ${GUGU_AGENT_NODE_NAME:-local-node-01}
+      GUGU_AGENT_VERSION: ${GUGU_AGENT_VERSION:-0.1.0-dev}
+      GUGU_AGENT_DATA_ROOT: /var/lib/gugumanager/servers
+      GUGU_AGENT_CERT_DIR: /var/lib/gugumanager/agent/certs
+      GUGU_AGENT_TRUST_ROOT: /run/secrets/ca.crt
+      GUGU_AGENT_CA_FINGERPRINT: ${GUGU_AGENT_CA_FINGERPRINT:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-data:/var/lib/gugumanager
+    secrets:
+      - source: agent-ca-cert
+        target: ca.crt
+      - source: bootstrap-token
+        target: bootstrap-token
+    depends_on:
+      bundle-publisher:
+        condition: service_completed_successfully
+
+secrets:
+  encryption-key:
+    file: ./secrets/encryption.key
+  agent-ca-cert:
+    file: ./secrets/agent-ca.crt
+  agent-ca-key:
+    file: ./secrets/agent-ca.key
+  bootstrap-token:
+    file: ./secrets/bootstrap-token
 
 volumes:
-  server-data:
+  control-plane-data:
   agent-data:
   postgres-data:
   redis-data:

@@ -1,11 +1,16 @@
 package agentca
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -98,6 +103,53 @@ func TestIssueAgentCertificateFromCSR(t *testing.T) {
 	}
 	if cert2.Subject.CommonName != "node-1" {
 		t.Fatalf("second issued certificate CN = %q, want node-1", cert2.Subject.CommonName)
+	}
+}
+
+func TestNewCAAcceptsECDSARoot(t *testing.T) {
+	dir := t.TempDir()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ecdsa ca key: %v", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("generate serial: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "GuGuManager Root CA"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	root, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create ecdsa root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, certFile), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root}), 0o644); err != nil {
+		t.Fatalf("write ecdsa cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal ecdsa key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, keyFile), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatalf("write ecdsa key: %v", err)
+	}
+
+	ca, err := NewCA(dir)
+	if err != nil {
+		t.Fatalf("load ecdsa ca: %v", err)
+	}
+	certPEM, err := ca.IssueAgentCertificate("ecdsa-node", time.Hour)
+	if err != nil {
+		t.Fatalf("issue from ecdsa ca: %v", err)
+	}
+	if err := ca.VerifyPeerCertificate(certPEM, "ecdsa-node"); err != nil {
+		t.Fatalf("verify ecdsa leaf: %v", err)
 	}
 }
 

@@ -11,7 +11,6 @@ WHERE container_port IS NULL OR role IS NULL;
 
 ALTER TABLE allocations
     ALTER COLUMN container_port SET NOT NULL,
-    ALTER COLUMN container_port SET DEFAULT 0,
     ALTER COLUMN role SET NOT NULL,
     ALTER COLUMN role SET DEFAULT 'additional',
     ADD CONSTRAINT allocations_container_port_check CHECK (container_port BETWEEN 1 AND 65535),

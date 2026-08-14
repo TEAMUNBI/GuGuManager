@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -302,7 +303,7 @@ func (a *agent) ensureCredentials(ctx context.Context, opts runOptions) (string,
 		return "", tls.Certificate{}, fmt.Errorf("write agent key: %w", err)
 	}
 	if len(resp.GetCaCertificate()) > 0 {
-		if err := os.WriteFile(a.cfg.TrustRootPath, resp.GetCaCertificate(), 0o644); err != nil {
+		if err := a.persistTrustRoot(resp.GetCaCertificate()); err != nil {
 			return "", tls.Certificate{}, fmt.Errorf("write trust root: %w", err)
 		}
 	}
@@ -953,7 +954,7 @@ func (a *agent) applyCertificateResponse(resp *agentv1.CertificateResponse) erro
 		return fmt.Errorf("write rotated key: %w", err)
 	}
 	if len(resp.GetCaCertificate()) > 0 {
-		if err := os.WriteFile(a.cfg.TrustRootPath, resp.GetCaCertificate(), 0o644); err != nil {
+		if err := a.persistTrustRoot(resp.GetCaCertificate()); err != nil {
 			return fmt.Errorf("write rotated trust root: %w", err)
 		}
 	}
@@ -966,6 +967,38 @@ func (a *agent) applyCertificateResponse(resp *agentv1.CertificateResponse) erro
 	a.rotationID = ""
 	a.logger.Info("certificate rotated")
 	return nil
+}
+
+// persistTrustRoot keeps a pre-provisioned trust root authoritative. Enrollment
+// responses repeat the same root, so a read-only secret mount is valid; a
+// different root is rejected and must be rotated through deployment config.
+func (a *agent) persistTrustRoot(contents []byte) error {
+	if strings.TrimSpace(a.cfg.TrustRootPath) == "" {
+		return errors.New("trust root path is empty")
+	}
+	if existing, err := os.ReadFile(a.cfg.TrustRootPath); err == nil {
+		if sameCertificatePEM(existing, contents) {
+			return nil
+		}
+		return errors.New("pre-provisioned trust root differs from server root")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.cfg.TrustRootPath), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(a.cfg.TrustRootPath, contents, 0o644)
+}
+
+func sameCertificatePEM(left, right []byte) bool {
+	leftBlock, _ := pem.Decode(left)
+	rightBlock, _ := pem.Decode(right)
+	if leftBlock == nil || rightBlock == nil || leftBlock.Type != "CERTIFICATE" || rightBlock.Type != "CERTIFICATE" {
+		return bytes.Equal(left, right)
+	}
+	leftCert, leftErr := x509.ParseCertificate(leftBlock.Bytes)
+	rightCert, rightErr := x509.ParseCertificate(rightBlock.Bytes)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftCert.Raw, rightCert.Raw)
 }
 
 // currentSerial 读取当前证书的序列号（用于轮换请求；缺失时返回空串）。

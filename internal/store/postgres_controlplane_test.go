@@ -565,8 +565,8 @@ func TestPostgresReconcileMutationsRejectMissingVersionedCapabilityWithoutSideEf
 			}
 			var secondaryID string
 			if err := s.db.QueryRow(`
-				INSERT INTO allocations (node_id, bind_ip, port, protocol, server_id, is_primary)
-				VALUES ($1, '127.0.0.9', 30999, 'tcp', $2, false)
+				INSERT INTO allocations (node_id, bind_ip, port, protocol, port_ref, container_port, role, server_id, is_primary)
+				VALUES ($1, '127.0.0.9', 30999, 'tcp', 'query', 25565, 'query', $2, false)
 				RETURNING id::text
 			`, nodeID, serverID).Scan(&secondaryID); err != nil {
 				t.Fatalf("insert secondary allocation: %v", err)

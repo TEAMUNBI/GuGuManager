@@ -21,6 +21,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/gugumanager/gugumanager/internal/agentca"
 	"github.com/gugumanager/gugumanager/internal/agentrpc"
@@ -43,6 +44,14 @@ func main() {
 	if err != nil {
 		logger.Error("initialize service", "environment", cfg.Environment, "error", err)
 		os.Exit(1)
+	}
+	readiness, err := buildDependencyReadiness(context.Background(), cfg, service)
+	if err != nil {
+		logger.Error("initialize dependency readiness", "error", err)
+		os.Exit(1)
+	}
+	if readiness != nil {
+		defer readiness.Close()
 	}
 	defer func() {
 		if closer, ok := service.(interface{ Close() error }); ok {
@@ -96,7 +105,7 @@ func main() {
 		go publishOutboxEvents(outboxCtx, pg, logger)
 	}
 
-	apiOptions := controlPlaneHTTPOptions(cfg.Environment, agentServer)
+	apiOptions := controlPlaneHTTPOptions(cfg.Environment, agentServer, readiness)
 	api := httpapi.New(service, logger, apiOptions...)
 	handler := spa(api, cfg.WebRoot, logger)
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
@@ -121,7 +130,7 @@ func main() {
 	}
 }
 
-func controlPlaneHTTPOptions(environment string, agentServer *agentrpc.Server) []httpapi.Option {
+func controlPlaneHTTPOptions(environment string, agentServer *agentrpc.Server, readiness httpapi.ReadinessChecker) []httpapi.Option {
 	options := []httpapi.Option{httpapi.WithEnvironment(environment)}
 	// A typed nil *agentrpc.Server becomes a non-nil interface value. Do not
 	// install it in development mode: the first console command would otherwise
@@ -129,7 +138,67 @@ func controlPlaneHTTPOptions(environment string, agentServer *agentrpc.Server) [
 	if agentServer != nil {
 		options = append(options, httpapi.WithCommandDispatcher(agentServer))
 	}
+	if readiness != nil {
+		options = append(options, httpapi.WithReadinessChecker(readiness))
+	}
 	return options
+}
+
+type readinessProbe struct {
+	name  string
+	check func(context.Context) error
+}
+
+type dependencyReadiness struct {
+	probes []readinessProbe
+	redis  *redis.Client
+}
+
+func (d *dependencyReadiness) Readiness(ctx context.Context) error {
+	for _, probe := range d.probes {
+		if err := probe.check(ctx); err != nil {
+			return fmt.Errorf("%s: %w", probe.name, err)
+		}
+	}
+	return nil
+}
+
+func (d *dependencyReadiness) Close() error {
+	if d == nil || d.redis == nil {
+		return nil
+	}
+	return d.redis.Close()
+}
+
+func buildDependencyReadiness(ctx context.Context, cfg config.Config, service httpapi.ControlPlane) (*dependencyReadiness, error) {
+	readiness := &dependencyReadiness{}
+	if checker, ok := service.(httpapi.ReadinessChecker); ok {
+		readiness.probes = append(readiness.probes, readinessProbe{name: "control-plane store", check: checker.Readiness})
+	}
+	if strings.TrimSpace(cfg.RedisURL) != "" {
+		options, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse redis URL: %w", err)
+		}
+		client := redis.NewClient(options)
+		readiness.redis = client
+		readiness.probes = append(readiness.probes, readinessProbe{name: "redis", check: func(checkCtx context.Context) error {
+			pingCtx, cancel := context.WithTimeout(checkCtx, 3*time.Second)
+			defer cancel()
+			return client.Ping(pingCtx).Err()
+		}})
+		if err := readiness.Readiness(ctx); err != nil {
+			_ = readiness.Close()
+			return nil, fmt.Errorf("initial dependency check: %w", err)
+		}
+	}
+	if cfg.Environment == config.Production && len(readiness.probes) == 0 {
+		return nil, errors.New("production readiness has no dependency probes")
+	}
+	if len(readiness.probes) == 0 {
+		return nil, nil
+	}
+	return readiness, nil
 }
 
 // buildService 根据配置构建 httpapi.ControlPlane 实例。

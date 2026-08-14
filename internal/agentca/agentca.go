@@ -1,6 +1,9 @@
 package agentca
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -27,7 +30,7 @@ const (
 //   - ca.key      PEM 根私钥（权限受限）
 type CA struct {
 	cert *x509.Certificate
-	key  *rsa.PrivateKey
+	key  crypto.Signer
 	dir  string
 }
 
@@ -249,28 +252,36 @@ func parseCA(certPEM, keyPEM []byte) (*CA, error) {
 	if keyBlock == nil {
 		return nil, errors.New("no private key block in ca key")
 	}
-	var key *rsa.PrivateKey
+	var key crypto.Signer
 	switch keyBlock.Type {
 	case "RSA PRIVATE KEY":
 		key, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	case "EC PRIVATE KEY":
+		key, err = x509.ParseECPrivateKey(keyBlock.Bytes)
 	case "PRIVATE KEY":
 		parsed, pkcs8Err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
 		if pkcs8Err != nil {
 			return nil, fmt.Errorf("parse ca key: %w", pkcs8Err)
 		}
-		rsaKey, ok := parsed.(*rsa.PrivateKey)
+		signer, ok := parsed.(crypto.Signer)
 		if !ok {
-			return nil, errors.New("ca key is not an RSA key")
+			return nil, errors.New("ca key does not implement crypto.Signer")
 		}
-		key = rsaKey
+		switch signer.(type) {
+		case *rsa.PrivateKey, *ecdsa.PrivateKey:
+			key = signer
+		default:
+			return nil, fmt.Errorf("unsupported ca key type %T", signer)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported ca key PEM block %q", keyBlock.Type)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("parse ca key: %w", err)
 	}
-	pub, ok := cert.PublicKey.(*rsa.PublicKey)
-	if !ok || pub.N.Cmp(key.PublicKey.N) != 0 {
+	certificatePublicKey, certErr := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	keyPublicKey, keyErr := x509.MarshalPKIXPublicKey(key.Public())
+	if certErr != nil || keyErr != nil || !bytes.Equal(certificatePublicKey, keyPublicKey) {
 		return nil, errors.New("ca key does not match ca certificate")
 	}
 	return &CA{cert: cert, key: key}, nil

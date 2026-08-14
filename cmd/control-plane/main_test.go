@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/url"
@@ -160,14 +161,26 @@ func TestBuildServiceDevelopment(t *testing.T) {
 }
 
 func TestControlPlaneHTTPOptionsDoNotInstallTypedNilDispatcher(t *testing.T) {
-	options := controlPlaneHTTPOptions(config.Development, nil)
+	options := controlPlaneHTTPOptions(config.Development, nil, nil)
 	if len(options) != 1 {
 		t.Fatalf("development HTTP options = %d, want only environment option", len(options))
 	}
 
 	agentServer := &agentrpc.Server{}
-	options = controlPlaneHTTPOptions(config.Production, agentServer)
+	options = controlPlaneHTTPOptions(config.Production, agentServer, nil)
 	if len(options) != 2 {
 		t.Fatalf("production HTTP options = %d, want environment and dispatcher options", len(options))
+	}
+}
+
+func TestDependencyReadinessReportsNamedFailure(t *testing.T) {
+	want := errors.New("cache unavailable")
+	readiness := &dependencyReadiness{probes: []readinessProbe{
+		{name: "database", check: func(context.Context) error { return nil }},
+		{name: "redis", check: func(context.Context) error { return want }},
+	}}
+	err := readiness.Readiness(context.Background())
+	if !errors.Is(err, want) || !strings.Contains(err.Error(), "redis") {
+		t.Fatalf("Readiness() error = %v, want named redis failure", err)
 	}
 }
