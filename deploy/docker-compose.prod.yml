@@ -29,7 +29,8 @@ services:
       GUGU_BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap-token
       # 生产必须显式声明 TLS 由外部终止（否则校验失败）。
       GUGU_TLS_TERMINATED: "true"
-      # Agent 注册令牌：留空时回退使用 bootstrap token。
+      # 兼容用长期静态注册令牌；留空时仍回退 bootstrap secret。
+      # 日常一次性 enrollment token 不得注入 Control Plane。
       GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_AGENT_REGISTRATION_TOKEN:-}
       # Agent HTTP 心跳令牌：留空时与 bootstrap token 一致。
       GUGU_AGENT_TOKEN: ${GUGU_AGENT_TOKEN:-}
@@ -72,17 +73,22 @@ services:
     entrypoint: ["/usr/local/bin/gugu-agent"]
     environment:
       GUGU_AGENT_PANEL_ADDR: control-plane:8443
-      # 必须与 control-plane 的 GUGU_AGENT_REGISTRATION_TOKEN（或 bootstrap token）一致。
-      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_AGENT_REGISTRATION_TOKEN:-}
+      # 优先使用仅注入 Agent 的一次性令牌；未设置时兼容长期静态令牌。
+      GUGU_AGENT_REGISTRATION_TOKEN: ${GUGU_AGENT_ENROLLMENT_TOKEN:-${GUGU_AGENT_REGISTRATION_TOKEN:-}}
       GUGU_AGENT_NODE_NAME: ${GUGU_AGENT_NODE_NAME:-prod-node-01}
       GUGU_AGENT_VERSION: ${GUGU_AGENT_VERSION:-0.1.0-dev}
       GUGU_AGENT_DATA_ROOT: /var/lib/gugumanager/servers
       GUGU_AGENT_CERT_DIR: /var/lib/gugumanager/agent/certs
+      # 首次注册和后续连接都要求预置 CA；指纹只是 CA 校验后的可选附加钉扎。
+      GUGU_AGENT_TRUST_ROOT: /run/secrets/agent-ca-cert
+      GUGU_AGENT_CA_FINGERPRINT: ${GUGU_AGENT_CA_FINGERPRINT:-}
     volumes:
       # 挂载宿主 Docker socket，agent 通过 Docker Engine API 创建/管理游戏服务器容器。
       - /var/run/docker.sock:/var/run/docker.sock
-      # 服务器数据与 agent 证书（agent.crt/agent.key/node-id/ca.crt）持久化。
+      # 服务器数据与 agent 证书（agent.crt/agent.key/node-id）持久化；CA 根由 secret 预置。
       - agent-data:/var/lib/gugumanager
+    secrets:
+      - agent-ca-cert
     depends_on:
       control-plane:
         condition: service_healthy

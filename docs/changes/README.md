@@ -17,3 +17,4 @@
 - [GM-20260808-013](GM-20260808-013.md)：复核并修复 Identity 并发、撤权 TOCTOU、请求体契约、membership migration 与 OpenAPI 漂移。
 - [GM-20260808-014](GM-20260808-014.md)：统一开发 Operation 的 attempt、lease、checkpoint 与结构化错误契约，并同步 Web 展示和生产边界。
 - [GM-20260808-015](GM-20260808-015.md)：为 Operation 固定目标节点快照，并以 node 与 generation 双重栅栏阻止跨节点假成功。
+- [GM-20260814-001](GM-20260814-001.md)：完成一次性 Agent 注册、节点撤销和 Agent 任务安全恢复闭环。
