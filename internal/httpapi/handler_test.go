@@ -35,6 +35,56 @@ func TestProtectedAPIRequiresSession(t *testing.T) {
 	}
 }
 
+func TestAgentEnrollmentTokenAndNodeRevocationHTTP(t *testing.T) {
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer service.Close()
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, session := authenticatedClient(t, testServer.URL)
+	headers := map[string]string{"X-CSRF-Token": session.CSRFToken}
+
+	issued := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/agent-enrollment-tokens", `{"nodeNameHint":"node-a","ttlSeconds":60}`, headers)
+	if issued.StatusCode != http.StatusCreated {
+		issued.Body.Close()
+		t.Fatalf("issue token status = %d, want 201", issued.StatusCode)
+	}
+	var payload struct {
+		Data struct {
+			Token     string    `json:"token"`
+			ExpiresAt time.Time `json:"expiresAt"`
+		} `json:"data"`
+	}
+	decodeResponse(t, issued, &payload)
+	if len(payload.Data.Token) != 64 || payload.Data.ExpiresAt.Before(time.Now().UTC()) {
+		t.Fatalf("issued enrollment token = %+v", payload.Data)
+	}
+
+	invalidTTL := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/agent-enrollment-tokens", `{"ttlSeconds":0}`, headers)
+	invalidTTL.Body.Close()
+	if invalidTTL.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid TTL status = %d, want 422", invalidTTL.StatusCode)
+	}
+
+	missingCSRF := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/agent-enrollment-tokens", `{}`, nil)
+	missingCSRF.Body.Close()
+	if missingCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CSRF status = %d, want 403", missingCSRF.StatusCode)
+	}
+
+	const nodeID = "11111111-1111-4111-8111-111111111111"
+	revoked := doJSON(t, client, http.MethodDelete, testServer.URL+"/api/v1/nodes/"+nodeID, "", headers)
+	revoked.Body.Close()
+	if revoked.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke node status = %d, want 204", revoked.StatusCode)
+	}
+	secondRevoke := doJSON(t, client, http.MethodDelete, testServer.URL+"/api/v1/nodes/"+nodeID, "", headers)
+	secondRevoke.Body.Close()
+	if secondRevoke.StatusCode != http.StatusNotFound {
+		t.Fatalf("second revoke status = %d, want 404", secondRevoke.StatusCode)
+	}
+}
+
 func TestAuthenticatedGETPreservesCSRFAndExplicitRecoveryRotatesSession(t *testing.T) {
 	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
 	defer func() { _ = service.Close() }()

@@ -84,6 +84,8 @@ type ControlPlane interface {
 	DeleteBackup(serverID string, backupID string, idempotencyKey string, actor domain.User) (domain.Operation, error)
 	DownloadBackup(serverID string, backupID string, actor domain.User) (domain.BackupContent, error)
 	Heartbeat(nodeName string, agentVersion string) error
+	IssueAgentEnrollmentToken(nodeNameHint string, ttl time.Duration, actor domain.User) (string, time.Time, error)
+	RevokeNode(nodeID string, actor domain.User) error
 }
 
 // CommandDispatcher 向节点 Connect 流下发控制台命令帧。
@@ -197,6 +199,8 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("DELETE /api/v1/servers/{serverID}/backups/{backupID}", h.auth(h.deleteBackup))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/backups/{backupID}/download", h.auth(h.downloadBackup))
 	mux.HandleFunc("GET /api/v1/nodes", h.auth(h.nodes))
+	mux.HandleFunc("DELETE /api/v1/nodes/{nodeID}", h.auth(h.revokeNode))
+	mux.HandleFunc("POST /api/v1/agent-enrollment-tokens", h.auth(h.issueAgentEnrollmentToken))
 	mux.HandleFunc("GET /api/v1/game-definitions", h.auth(h.games))
 	mux.HandleFunc("GET /api/v1/operations", h.auth(h.operations))
 	mux.HandleFunc("GET /api/v1/operations/{operationID}", h.auth(h.operation))

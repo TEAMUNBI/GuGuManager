@@ -934,6 +934,57 @@ paths:
                     items: {$ref: '#/components/schemas/Node'}
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
+  /nodes/{nodeId}:
+    parameters:
+      - $ref: '#/components/parameters/NodeId'
+    delete:
+      tags: [Nodes]
+      operationId: revokeNode
+      summary: Revoke a node immediately
+      description: Revoked nodes are disconnected at the next heartbeat and cannot reconnect or receive work.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Node revoked}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /agent-enrollment-tokens:
+    post:
+      tags: [Nodes]
+      operationId: issueAgentEnrollmentToken
+      summary: Issue a short-lived single-use agent enrollment token
+      description: The plaintext token is returned exactly once; only its digest is retained server-side.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                nodeNameHint: {type: string, maxLength: 100}
+                ttlSeconds: {type: integer, minimum: 1, maximum: 604800}
+      responses:
+        '201':
+          description: One-time plaintext enrollment token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [token, expiresAt]
+                    properties:
+                      token: {type: string, minLength: 32}
+                      expiresAt: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /game-definitions:
     get:
       tags: [Catalog]
@@ -1024,6 +1075,11 @@ components:
       schema: {$ref: '#/components/schemas/Uuid'}
     UserId:
       name: userId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Uuid'}
+    NodeId:
+      name: nodeId
       in: path
       required: true
       schema: {$ref: '#/components/schemas/Uuid'}
