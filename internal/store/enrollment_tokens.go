@@ -202,6 +202,9 @@ func (m *Memory) RevokeNode(nodeID string, actor domain.User) error {
 	if m.revokedNodes == nil {
 		m.revokedNodes = make(map[string]bool)
 	}
+	if m.revokedNodes[nodeID] {
+		return domain.NewProblem("NOT_FOUND", "节点不存在或已吊销", false)
+	}
 	m.revokedNodes[nodeID] = true
 	return nil
 }
