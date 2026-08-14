@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -252,7 +253,8 @@ type fakeControlPlane struct {
 
 	// onConnect 在 fake 发送 Welcome 之后、进入 Recv 循环之前调用，
 	// 测试可在此下发任务。
-	onConnect func(stream agentv1.AgentGatewayService_ConnectServer) error
+	onConnect         func(stream agentv1.AgentGatewayService_ConnectServer) error
+	closeAfterWelcome bool
 }
 
 func (f *fakeControlPlane) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
@@ -294,14 +296,20 @@ func (f *fakeControlPlane) Connect(stream agentv1.AgentGatewayService_ConnectSer
 	}}}); err != nil {
 		return err
 	}
+	if f.closeAfterWelcome {
+		return nil
+	}
 
 	f.mu.Lock()
 	cb := f.onConnect
 	f.mu.Unlock()
 	if cb != nil {
-		if err := cb(stream); err != nil {
-			return err
-		}
+		// 异步执行：允许回调等待 Agent 回发的结果再下发后续帧。
+		go func() {
+			if err := cb(stream); err != nil {
+				return
+			}
+		}()
 	}
 
 	for {
@@ -467,7 +475,8 @@ func testConfig() Config {
 // ---------------------------------------------------------------------------
 
 // TestAgentEnrollsAndConnects 验证完整生命周期：
-// Enroll（含 CSR）→ 保存证书/信任根 → 建立 Connect → Hello → Welcome → 心跳。
+// 预置 CA → Enroll（含 CSR）→ 保存证书 → 建立 Connect → Hello → Welcome → 心跳。
+// 000010 起注册必须基于预置信任根校验服务器证书，禁止 InsecureSkipVerify。
 func TestAgentEnrollsAndConnects(t *testing.T) {
 	ca := newTestCA(t)
 	cp := &fakeControlPlane{ca: ca}
@@ -478,6 +487,13 @@ func TestAgentEnrollsAndConnects(t *testing.T) {
 	cfg.DataRoot = dir
 	cfg.CertDir = filepath.Join(dir, "certs")
 	cfg.TrustRootPath = filepath.Join(cfg.CertDir, "ca.crt")
+	// 部署时由运维预置面板 CA 根证书；Agent 注册与连接都强制基于它校验。
+	if err := os.MkdirAll(cfg.CertDir, 0o700); err != nil {
+		t.Fatalf("create cert dir: %v", err)
+	}
+	if err := os.WriteFile(cfg.TrustRootPath, ca.rootPEM(), 0o644); err != nil {
+		t.Fatalf("pre-provision trust root: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -513,7 +529,8 @@ func TestAgentEnrollsAndConnects(t *testing.T) {
 		})
 	}
 
-	// Connect 流：Hello → Welcome → 心跳
+	// Connect 流：Hello → Welcome → 心跳。Hello 的 nodeID 必须是 Enroll
+	// 返回的节点 ID（证书 CN 与之一致，服务端同时校验吊销状态）。
 	waitFor(t, "heartbeat", 10*time.Second, func() bool { return cp.heartbeatCount() >= 1 })
 	cp.mu.Lock()
 	helloCount := len(cp.hellos)
@@ -530,6 +547,84 @@ func TestAgentEnrollsAndConnects(t *testing.T) {
 	}
 
 	// 取消后 Run 应正常退出
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit after cancel")
+	}
+}
+
+// TestAgentEnrollRequiresPreProvisionedTrustRoot 验证安全注册：没有预置
+// 信任根时绝不降级为 InsecureSkipVerify，也不发出任何 Enroll 请求。
+func TestAgentEnrollRequiresPreProvisionedTrustRoot(t *testing.T) {
+	ca := newTestCA(t)
+	cp := &fakeControlPlane{ca: ca}
+	dialer, serverName := startFakeServer(t, cp)
+
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.DataRoot = dir
+	cfg.CertDir = filepath.Join(dir, "certs")
+	cfg.TrustRootPath = filepath.Join(cfg.CertDir, "ca.crt")
+	// 故意不预置 CA。
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: &fakeExecutor{}})
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	if cp.enrollCount() != 0 {
+		t.Fatalf("enroll called %d times without a trust root", cp.enrollCount())
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit after cancel")
+	}
+}
+
+// TestAgentFingerprintPinRejectsMismatch 验证指纹钉扎：CA 校验通过但指纹
+// 不匹配时握手失败，Enroll 请求不会到达服务端。
+func TestAgentFingerprintPinRejectsMismatch(t *testing.T) {
+	ca := newTestCA(t)
+	cp := &fakeControlPlane{ca: ca}
+	dialer, serverName := startFakeServer(t, cp)
+
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.DataRoot = dir
+	cfg.CertDir = filepath.Join(dir, "certs")
+	cfg.TrustRootPath = filepath.Join(cfg.CertDir, "ca.crt")
+	if err := os.MkdirAll(cfg.CertDir, 0o700); err != nil {
+		t.Fatalf("create cert dir: %v", err)
+	}
+	if err := os.WriteFile(cfg.TrustRootPath, ca.rootPEM(), 0o644); err != nil {
+		t.Fatalf("pre-provision trust root: %v", err)
+	}
+	cfg.CAFingerprint = strings.Repeat("ab", 32) // 与真实链不符的指纹
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: &fakeExecutor{}})
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	if cp.enrollCount() != 0 {
+		t.Fatalf("enroll called %d times despite fingerprint mismatch", cp.enrollCount())
+	}
 	cancel()
 	select {
 	case err := <-errCh:
@@ -565,6 +660,12 @@ func TestAgentExecutesPowerTask(t *testing.T) {
 	cfg.DataRoot = dir
 	cfg.CertDir = filepath.Join(dir, "certs")
 	cfg.TrustRootPath = filepath.Join(cfg.CertDir, "ca.crt")
+	if err := os.MkdirAll(cfg.CertDir, 0o700); err != nil {
+		t.Fatalf("create cert dir: %v", err)
+	}
+	if err := os.WriteFile(cfg.TrustRootPath, ca.rootPEM(), 0o644); err != nil {
+		t.Fatalf("pre-provision trust root: %v", err)
+	}
 
 	exec := &fakeExecutor{}
 
@@ -631,6 +732,7 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("GUGU_AGENT_DATA_ROOT", filepath.Join(t.TempDir(), "data"))
 	t.Setenv("GUGU_AGENT_CERT_DIR", filepath.Join(t.TempDir(), "certs"))
 	t.Setenv("GUGU_AGENT_TRUST_ROOT", filepath.Join(t.TempDir(), "trust.pem"))
+	t.Setenv("GUGU_AGENT_CA_FINGERPRINT", "aa:bb:cc")
 	// 旧变量不应覆盖新的
 	t.Setenv("GUGU_PANEL_URL", "http://127.0.0.1:9999")
 	t.Setenv("GUGU_NODE_NAME", "old-node")
@@ -650,6 +752,9 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg.AgentVersion != "9.9.9" {
 		t.Errorf("agent version = %q", cfg.AgentVersion)
+	}
+	if cfg.CAFingerprint != "aa:bb:cc" {
+		t.Errorf("ca fingerprint = %q, want aa:bb:cc", cfg.CAFingerprint)
 	}
 }
 
@@ -679,4 +784,313 @@ func TestLoadConfigLegacyFallback(t *testing.T) {
 	if cfg.CertDir == "" || cfg.TrustRootPath == "" {
 		t.Errorf("expected derived cert dir and trust root, got %q / %q", cfg.CertDir, cfg.TrustRootPath)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Operation Journal 集成：重投重放、digest 拒绝、每服务器串行
+// ---------------------------------------------------------------------------
+
+func fencedPowerTask(opID, serverID string, action agentv1.PowerAction) *agentv1.Task {
+	return &agentv1.Task{
+		OperationId: opID, ServerId: serverID, Generation: 2, Type: "power",
+		Attempt: 1, LeaseToken: "lease-" + opID, ConnectionEpoch: 7,
+		Payload: &agentv1.Task_Power{Power: &agentv1.PowerTaskPayload{Action: action}},
+	}
+}
+
+func testAgentConfig(t *testing.T, ca *testCA) Config {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.DataRoot = dir
+	cfg.CertDir = filepath.Join(dir, "certs")
+	cfg.TrustRootPath = filepath.Join(cfg.CertDir, "ca.crt")
+	if err := os.MkdirAll(cfg.CertDir, 0o700); err != nil {
+		t.Fatalf("create cert dir: %v", err)
+	}
+	if err := os.WriteFile(cfg.TrustRootPath, ca.rootPEM(), 0o644); err != nil {
+		t.Fatalf("pre-provision trust root: %v", err)
+	}
+	return cfg
+}
+
+func startAgentRun(t *testing.T, cfg Config, exec TaskExecutor, cp *fakeControlPlane) (cancel context.CancelFunc, errCh <-chan error) {
+	t.Helper()
+	dialer, serverName := startFakeServer(t, cp)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	err := make(chan error, 1)
+	go func() {
+		err <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: exec})
+	}()
+	return cancel, err
+}
+
+type recordingConnectSender struct {
+	mu       sync.Mutex
+	requests []*agentv1.ConnectRequest
+}
+
+func (s *recordingConnectSender) Send(request *agentv1.ConnectRequest) error {
+	s.mu.Lock()
+	s.requests = append(s.requests, request)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *recordingConnectSender) taskResults() []*agentv1.TaskResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var results []*agentv1.TaskResult
+	for _, request := range s.requests {
+		if result := request.GetTaskResult(); result != nil {
+			results = append(results, result)
+		}
+	}
+	return results
+}
+
+func TestInflightExecutionBroadcastsResultToAllWaiters(t *testing.T) {
+	execution := &inflightExecution{done: make(chan struct{})}
+	results := make(chan inflightResult, 3)
+	for range 3 {
+		go func() {
+			<-execution.done
+			results <- execution.getResult()
+		}()
+	}
+	execution.complete(inflightResult{succeeded: true, errorCode: "", resultJSON: []byte(`{"ok":true}`)})
+	for range 3 {
+		select {
+		case result := <-results:
+			if !result.succeeded || string(result.resultJSON) != `{"ok":true}` {
+				t.Fatalf("broadcast result = %+v", result)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("in-flight waiter did not receive the broadcast result")
+		}
+	}
+}
+
+func TestAgentMarksOrphanedRunningJournalEntryFailed(t *testing.T) {
+	journal, err := OpenOperationJournal(filepath.Join(t.TempDir(), "journal.db"))
+	if err != nil {
+		t.Fatalf("open journal: %v", err)
+	}
+	defer journal.Close()
+	task := fencedPowerTask("op-orphaned-1", "server-1", agentv1.PowerAction_POWER_ACTION_START)
+	digest := taskPayloadDigest(task)
+	if err := journal.RecordRunning(task.GetOperationId(), digest, task.GetAttempt()); err != nil {
+		t.Fatalf("record running: %v", err)
+	}
+	sender := &recordingConnectSender{}
+	a := &agent{journal: journal, logger: discardLogger(), inflight: make(map[string]*inflightExecution)}
+	a.awaitInflight(context.Background(), sender, task, digest)
+
+	results := sender.taskResults()
+	if len(results) != 1 || results[0].GetSucceeded() || results[0].GetRetryable() || results[0].GetErrorCode() != "AGENT_RESTARTED_DURING_OPERATION" {
+		t.Fatalf("orphaned operation result = %+v", results)
+	}
+	entry, ok, err := journal.Lookup(task.GetOperationId())
+	if err != nil || !ok {
+		t.Fatalf("lookup recovered entry: ok=%t err=%v", ok, err)
+	}
+	if entry.Status != "failed" || entry.Checkpoint != "failed" || entry.ErrorCode != "AGENT_RESTARTED_DURING_OPERATION" || entry.Retryable {
+		t.Fatalf("recovered journal entry = %+v", entry)
+	}
+}
+
+func TestAgentReconnectsAfterConnectStreamEnds(t *testing.T) {
+	ca := newTestCA(t)
+	cp := &fakeControlPlane{ca: ca, closeAfterWelcome: true}
+	dialer, serverName := startFakeServer(t, cp)
+	cfg := testAgentConfig(t, ca)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, cfg, discardLogger(), runOptions{dialer: dialer, serverName: serverName, executor: &fakeExecutor{}})
+	}()
+	waitFor(t, "second connect session", 9*time.Second, func() bool {
+		cp.mu.Lock()
+		defer cp.mu.Unlock()
+		return len(cp.hellos) >= 2
+	})
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not stop after reconnect test cancellation")
+	}
+}
+
+// TestAgentJournalReplaysTerminalResultWithoutReexecuting 验证同 operation
+// 重投：终态结果从操作日志重放，执行器只被调用一次。
+func TestAgentJournalReplaysTerminalResultWithoutReexecuting(t *testing.T) {
+	ca := newTestCA(t)
+	cp := &fakeControlPlane{ca: ca}
+	task := fencedPowerTask("op-replay-1", "server-1", agentv1.PowerAction_POWER_ACTION_START)
+	cp.onConnect = func(stream agentv1.AgentGatewayService_ConnectServer) error {
+		if err := stream.Send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Task{Task: task}}); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for cp.taskResultCount() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		// 同一 operation 重投：应重放日志里的终态，而不是再次执行。
+		return stream.Send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Task{Task: task}})
+	}
+	exec := &fakeExecutor{}
+	cancel, errCh := startAgentRun(t, testAgentConfig(t, ca), exec, cp)
+	defer cancel()
+
+	waitFor(t, "replayed result", 15*time.Second, func() bool { return cp.taskResultCount() >= 2 })
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1 (replayed, not re-executed)", exec.callCount())
+	}
+	cp.mu.Lock()
+	second := cp.results[1]
+	cp.mu.Unlock()
+	if !second.GetSucceeded() {
+		t.Errorf("replayed result not succeeded: %+v", second)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+// TestAgentJournalRejectsDigestMismatch 验证同 operation 不同 payload：
+// 拒绝执行（Ack 拒绝），不触碰执行器，也不覆盖已有终态。
+func TestAgentJournalRejectsDigestMismatch(t *testing.T) {
+	ca := newTestCA(t)
+	cp := &fakeControlPlane{ca: ca}
+	original := fencedPowerTask("op-mismatch-1", "server-1", agentv1.PowerAction_POWER_ACTION_START)
+	changed := fencedPowerTask("op-mismatch-1", "server-1", agentv1.PowerAction_POWER_ACTION_STOP)
+	cp.onConnect = func(stream agentv1.AgentGatewayService_ConnectServer) error {
+		if err := stream.Send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Task{Task: original}}); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for cp.taskResultCount() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		return stream.Send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Task{Task: changed}})
+	}
+	exec := &fakeExecutor{}
+	cancel, errCh := startAgentRun(t, testAgentConfig(t, ca), exec, cp)
+	defer cancel()
+
+	waitFor(t, "reject ack", 15*time.Second, func() bool { return cp.taskAckCount() >= 2 })
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1 (digest mismatch must not execute)", exec.callCount())
+	}
+	cp.mu.Lock()
+	reject := cp.taskAcks[1]
+	cp.mu.Unlock()
+	if reject.GetAccepted() || reject.GetErrorCode() != "OPERATION_DIGEST_MISMATCH" {
+		t.Errorf("expected OPERATION_DIGEST_MISMATCH rejection, got %+v", reject)
+	}
+	if cp.taskResultCount() != 1 {
+		t.Errorf("results = %d, want exactly the original terminal result", cp.taskResultCount())
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+// gatedExecutor 记录开始顺序并可阻塞执行，用于验证每服务器串行。
+type gatedExecutor struct {
+	mu      sync.Mutex
+	started []string
+	release chan struct{}
+}
+
+func (e *gatedExecutor) ExecuteTask(ctx context.Context, task *agentv1.Task) (*ExecutionOutcome, error) {
+	e.mu.Lock()
+	e.started = append(e.started, task.GetOperationId())
+	e.mu.Unlock()
+	select {
+	case <-e.release:
+		return &ExecutionOutcome{Succeeded: true}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (e *gatedExecutor) ExecuteConsoleCommand(ctx context.Context, serverID, command string) (*ExecutionOutcome, error) {
+	return &ExecutionOutcome{Succeeded: true}, nil
+}
+
+func (e *gatedExecutor) Runtime() (containerRuntime, error) {
+	return nil, errors.New("gated executor has no runtime")
+}
+
+func (e *gatedExecutor) ListRunningServers(ctx context.Context) ([]string, error) {
+	return nil, nil
+}
+
+func (e *gatedExecutor) startedOperations() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.started...)
+}
+
+// TestAgentSerializesTasksPerServer 验证每服务器互斥：同一服务器的两个任务
+// 串行执行（第二个不早于第一个结束）；不同服务器的任务可并行。
+func TestAgentSerializesTasksPerServer(t *testing.T) {
+	ca := newTestCA(t)
+	cp := &fakeControlPlane{ca: ca}
+	first := fencedPowerTask("op-serial-1", "server-1", agentv1.PowerAction_POWER_ACTION_START)
+	second := fencedPowerTask("op-serial-2", "server-1", agentv1.PowerAction_POWER_ACTION_STOP)
+	parallel := fencedPowerTask("op-parallel-1", "server-2", agentv1.PowerAction_POWER_ACTION_START)
+	cp.onConnect = func(stream agentv1.AgentGatewayService_ConnectServer) error {
+		for _, task := range []*agentv1.Task{first, second, parallel} {
+			if err := stream.Send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_Task{Task: task}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	exec := &gatedExecutor{release: make(chan struct{})}
+	cancel, errCh := startAgentRun(t, testAgentConfig(t, ca), exec, cp)
+	defer cancel()
+
+	// server-1 只能有一个任务与 server-2 的任务并行开始；另一个
+	// server-1 任务必须等前一个结束（每服务器互斥，不依赖 worker 调度顺序）。
+	waitFor(t, "parallel start", 10*time.Second, func() bool {
+		started := exec.startedOperations()
+		serialStarted := 0
+		if containsOp(started, "op-serial-1") {
+			serialStarted++
+		}
+		if containsOp(started, "op-serial-2") {
+			serialStarted++
+		}
+		return serialStarted == 1 && containsOp(started, "op-parallel-1")
+	})
+	if started := exec.startedOperations(); containsOp(started, "op-serial-1") && containsOp(started, "op-serial-2") {
+		t.Fatalf("both tasks of the same server started concurrently: %v", started)
+	}
+	close(exec.release)
+	waitFor(t, "serial tail", 10*time.Second, func() bool {
+		started := exec.startedOperations()
+		return containsOp(started, "op-serial-1") && containsOp(started, "op-serial-2")
+	})
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+}
+
+func containsOp(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }

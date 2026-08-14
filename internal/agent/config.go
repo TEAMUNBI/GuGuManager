@@ -12,12 +12,13 @@ import (
 // Config 是 Agent 的运行时配置，来自环境变量 GUGU_AGENT_*（含旧变量兼容回退）。
 type Config struct {
 	PanelAddr         string // gRPC 地址，如 "127.0.0.1:8443"
-	RegistrationToken string // 首次注册令牌
+	RegistrationToken string // 首次注册令牌（一次性令牌；预置 CA 必需）
 	NodeName          string // 节点名称（Enroll 与 CSR CN）
 	AgentVersion      string // Agent 版本号
-	DataRoot          string // 服务器数据根（本机服务器文件存储位置）
+	DataRoot          string // 服务器数据根（本机服务器文件存储位置，含操作日志）
 	CertDir           string // 证书持久化目录
-	TrustRootPath     string // CA 根证书文件路径（首次 Enroll 后保存）
+	TrustRootPath     string // CA 根证书文件路径（部署时预置；注册与连接均强制校验）
+	CAFingerprint     string // 可选：服务器证书链（叶子或 CA 根）的 SHA-256 指纹钉扎
 }
 
 // LoadConfig 从环境变量读取配置。优先读取 GUGU_AGENT_* 前缀变量，
@@ -36,6 +37,7 @@ func LoadConfig() (Config, error) {
 		DataRoot:          dataRoot,
 		CertDir:           certDir,
 		TrustRootPath:     firstEnv("GUGU_AGENT_TRUST_ROOT", filepath.Join(certDir, "ca.crt")),
+		CAFingerprint:     firstEnv("GUGU_AGENT_CA_FINGERPRINT", ""),
 	}, nil
 }
 

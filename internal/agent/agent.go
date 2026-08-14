@@ -5,25 +5,31 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -92,6 +98,92 @@ type agent struct {
 	// 日志序号：为每台服务器维护单调递增的序列，供 LogBatch 回显排序。
 	seqMu     sync.Mutex
 	sequences map[string]int64
+
+	// 持久操作日志：payload digest 与终态结果跨进程重启保留，重投不重复
+	// 执行副作用。每个 serveSession 打开一次。
+	journal *OperationJournal
+
+	// 有界 worker pool：Welcome.MaxInFlightTasks 决定并行度，任务经缓冲
+	// 通道分发，recv 循环只负责收帧。
+	taskWorkers int
+	tasks       chan *agentv1.Task
+
+	// 每服务器互斥：同一台服务器的任务串行执行，互不踩踏数据目录。
+	serverLocksMu sync.Mutex
+	serverLocks   map[string]*sync.Mutex
+
+	// 执行中的操作：同 operation 并发重投时等待同一份结果，不启动第二个
+	// 执行（journal 的 running 记录配合内存登记闭环竞态）。
+	inflightMu sync.Mutex
+	inflight   map[string]*inflightExecution
+}
+
+// inflightExecution 是一次执行中任务的结果通道。
+type inflightExecution struct {
+	done   chan struct{}
+	result inflightResult
+	mu     sync.RWMutex
+	doneMu sync.Once
+}
+
+// inflightResult 是执行完成后交给重投等待者的可重放结果。
+type inflightResult struct {
+	succeeded  bool
+	errorCode  string
+	retryable  bool
+	resultJSON []byte
+	observed   []byte
+}
+
+// keyedLock 返回每服务器互斥锁。
+func (a *agent) keyedLock(serverID string) *sync.Mutex {
+	a.serverLocksMu.Lock()
+	defer a.serverLocksMu.Unlock()
+	if a.serverLocks == nil {
+		a.serverLocks = make(map[string]*sync.Mutex)
+	}
+	lock, ok := a.serverLocks[serverID]
+	if !ok {
+		lock = &sync.Mutex{}
+		a.serverLocks[serverID] = lock
+	}
+	return lock
+}
+
+// registerInflight 登记执行中的操作；已存在时返回既有执行（并发重投）。
+func (a *agent) registerInflight(operationID string) (*inflightExecution, bool) {
+	a.inflightMu.Lock()
+	defer a.inflightMu.Unlock()
+	if a.inflight == nil {
+		a.inflight = make(map[string]*inflightExecution)
+	}
+	if existing, ok := a.inflight[operationID]; ok {
+		return existing, false
+	}
+	execution := &inflightExecution{done: make(chan struct{})}
+	a.inflight[operationID] = execution
+	return execution, true
+}
+
+func (a *agent) unregisterInflight(operationID string) {
+	a.inflightMu.Lock()
+	delete(a.inflight, operationID)
+	a.inflightMu.Unlock()
+}
+
+func (e *inflightExecution) complete(result inflightResult) {
+	e.doneMu.Do(func() {
+		e.mu.Lock()
+		e.result = result
+		e.mu.Unlock()
+		close(e.done)
+	})
+}
+
+func (e *inflightExecution) getResult() inflightResult {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.result
 }
 
 // Run 运行 Agent 主循环（断开后自动重连、证书复用），直到 ctx 取消。
@@ -157,6 +249,14 @@ func serveSession(ctx context.Context, cfg Config, logger *slog.Logger, opts run
 		}
 		a.executor = exec
 	}
+	// 持久操作日志：重投恢复与终态重放都依赖它跨会话存在。
+	journal, err := OpenOperationJournal(filepath.Join(cfg.DataRoot, "agent-journal.db"))
+	if err != nil {
+		return err
+	}
+	defer journal.Close()
+	a.journal = journal
+
 	nodeID, cert, err := a.ensureCredentials(ctx, opts)
 	if err != nil {
 		return err
@@ -240,17 +340,21 @@ func buildCSR(key *rsa.PrivateKey, cn string) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), nil
 }
 
-// enroll 调用 Control Plane 的 Enroll RPC。首次注册尚无信任根，
-// 因此跳过服务器证书校验；凭据落地后 Connect 切换为完整 mTLS 校验。
+// enroll 调用 Control Plane 的 Enroll RPC。注册必须基于预置的信任根
+// （TrustRootPath）或指纹完成服务器证书校验；禁止 InsecureSkipVerify，
+// 信任根缺失时拒绝注册而不是降级为明文信任。
 func (a *agent) enroll(ctx context.Context, csrPEM []byte, opts runOptions) (*agentv1.EnrollResponse, error) {
+	pool := a.rootPool()
+	if pool == nil {
+		return nil, fmt.Errorf("trust root not available at %s; refusing insecure enrollment", a.cfg.TrustRootPath)
+	}
 	tlsCfg := &tls.Config{
 		ServerName: opts.serverName,
 		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
 	}
-	if pool := a.rootPool(); pool != nil {
-		tlsCfg.RootCAs = pool
-	} else {
-		tlsCfg.InsecureSkipVerify = true
+	if a.cfg.CAFingerprint != "" {
+		tlsCfg.VerifyPeerCertificate = verifyServerFingerprint(a.cfg.CAFingerprint)
 	}
 	conn, err := a.dial(ctx, tlsCfg, opts)
 	if err != nil {
@@ -265,6 +369,21 @@ func (a *agent) enroll(ctx context.Context, csrPEM []byte, opts runOptions) (*ag
 		AgentVersion:              a.cfg.AgentVersion,
 		Capabilities:              defaultCapabilities(),
 	})
+}
+
+// verifyServerFingerprint 在校验链之后附加指纹钉扎：服务器证书链中任一
+// 证书（叶子或 CA 根）的 SHA-256 与配置值一致才放行。
+func verifyServerFingerprint(expected string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	want := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(expected), ":", ""))
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		for _, raw := range rawCerts {
+			sum := sha256.Sum256(raw)
+			if hex.EncodeToString(sum[:]) == want {
+				return nil
+			}
+		}
+		return fmt.Errorf("server certificate chain fingerprint does not match the pinned value")
+	}
 }
 
 func defaultCapabilities() []*agentv1.Capability {
@@ -314,6 +433,9 @@ func (a *agent) dial(ctx context.Context, tlsCfg *tls.Config, opts runOptions) (
 
 // serveOnce 执行一次 Connect 双向流会话：Hello → Welcome → 心跳 → 处理下行帧。
 func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
+	ctx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
+
 	tlsCfg := &tls.Config{
 		ServerName:   opts.serverName,
 		MinVersion:   tls.VersionTLS12,
@@ -322,6 +444,9 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	}
 	if tlsCfg.RootCAs == nil {
 		return fmt.Errorf("trust root not available at %s", a.cfg.TrustRootPath)
+	}
+	if a.cfg.CAFingerprint != "" {
+		tlsCfg.VerifyPeerCertificate = verifyServerFingerprint(a.cfg.CAFingerprint)
 	}
 	conn, err := a.dial(ctx, tlsCfg, opts)
 	if err != nil {
@@ -354,6 +479,43 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	}
 	a.logger.Info("agent connected", "node_id", a.nodeID, "protocol", welcome.GetProtocolVersion())
 
+	// 有界 worker pool：并发度与服务端 MaxInFlightTasks 对齐（上限 8），
+	// 任务经缓冲通道分发，recv 循环保持只收帧、不执行。
+	workerCount := int(welcome.GetMaxInFlightTasks())
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if workerCount > 8 {
+		workerCount = 8
+	}
+	a.taskWorkers = workerCount
+	a.tasks = make(chan *agentv1.Task, workerCount*2)
+	var workers sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-a.tasks:
+					if !ok {
+						return
+					}
+					a.executeTask(ctx, outbound, client, task)
+				}
+			}
+		}()
+	}
+	defer func() {
+		// 会话结束：先取消会话上下文，再关闭任务通道，最后等待 worker。
+		// recv 循环是唯一的发送者，因此退出后关闭通道不会与发送竞态。
+		sessionCancel()
+		close(a.tasks)
+		workers.Wait()
+	}()
+
 	// 日志流式上报与指标采样：连接建立后即启动，会话结束随 ctx 取消。
 	go a.startMetricSampler(ctx, outbound)
 	a.startLogTailers(ctx, outbound)
@@ -376,8 +538,11 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 		}
 		switch p := req.GetPayload().(type) {
 		case *agentv1.ConnectResponse_Task:
-			if err := a.handleTask(ctx, outbound, client, p.Task); err != nil {
-				return err
+			// 任务绝不丢弃：通道满时短暂阻塞 recv（心跳由独立 goroutine 发送）。
+			select {
+			case a.tasks <- p.Task:
+			case <-ctx.Done():
+				return nil
 			}
 		case *agentv1.ConnectResponse_ConsoleCommand:
 			a.handleConsoleCommand(ctx, outbound, p.ConsoleCommand)
@@ -397,23 +562,113 @@ func (a *agent) serveOnce(ctx context.Context, opts runOptions) error {
 	}
 }
 
-// handleTask 处理下行任务：先回 TaskAck（回显租约栅栏），执行期每 10 秒
-// 发 RunningTaskHeartbeat 续租，执行完回 TaskResult（含 Observed）。
-func (a *agent) handleTask(ctx context.Context, outbound connectRequestSender, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
-	// 回显栅栏：新协议必须原样带回 lease_token 与 connection_epoch，
-	// 旧服务端不下发这两个字段（空值），旧行为保持不变。
+// taskPayloadMessage 提取 typed arm 的内层 proto.Message（legacy
+// payload_json 返回 nil，由调用方按原始字节处理）。
+func taskPayloadMessage(task *agentv1.Task) proto.Message {
+	switch p := task.Payload.(type) {
+	case *agentv1.Task_Provision:
+		return p.Provision
+	case *agentv1.Task_Power:
+		return p.Power
+	case *agentv1.Task_Backup:
+		return p.Backup
+	case *agentv1.Task_Extension:
+		return p.Extension
+	default:
+		return nil
+	}
+}
+
+// taskPayloadDigest 计算任务输入的稳定摘要（不含租约栅栏字段），作为
+// Operation Journal 的去重键。同一 operation 重投时只有 digest 一致才允许
+// 恢复或重放，digest 变化说明指令内容被改变，必须拒绝执行。protojson 对
+// map 键排序，输出确定；legacy payload_json 原样参与摘要。
+func taskPayloadDigest(task *agentv1.Task) string {
+	var canonical strings.Builder
+	canonical.WriteString(task.GetType())
+	canonical.WriteByte('\n')
+	canonical.WriteString(strconv.FormatUint(task.GetGeneration(), 10))
+	canonical.WriteByte('\n')
+	if task.Payload != nil {
+		if message := taskPayloadMessage(task); message != nil {
+			encoded, marshalErr := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(message)
+			if marshalErr == nil {
+				canonical.Write(encoded)
+			}
+		} else if raw := task.GetPayloadJson(); len(raw) > 0 {
+			canonical.Write(raw)
+		}
+	}
+	sum := sha256.Sum256([]byte(canonical.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// executeTask 执行一个任务：回显栅栏 Ack → 操作日志去重（同 digest 重投
+// 恢复/重放，不同 digest 拒绝）→ 每服务器互斥 → 执行期每 10 秒续租 →
+// 先持久化终态再回发结果（结果帧不可丢）。
+func (a *agent) executeTask(ctx context.Context, outbound connectRequestSender, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) {
+	digest := taskPayloadDigest(task)
 	leaseToken := task.GetLeaseToken()
 	connectionEpoch := task.GetConnectionEpoch()
-	ack := &agentv1.TaskAck{
-		OperationId:     task.GetOperationId(),
-		Accepted:        true,
-		Attempt:         task.GetAttempt(),
-		LeaseToken:      leaseToken,
-		ConnectionEpoch: connectionEpoch,
+
+	sendAck := func(accepted bool, code string) {
+		frame := &agentv1.TaskAck{
+			OperationId:     task.GetOperationId(),
+			Accepted:        accepted,
+			ErrorCode:       code,
+			Attempt:         task.GetAttempt(),
+			LeaseToken:      leaseToken,
+			ConnectionEpoch: connectionEpoch,
+		}
+		if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskAck{TaskAck: frame}}); err != nil {
+			a.logger.Warn("send task ack failed", "operation", task.GetOperationId(), "error", err)
+		}
 	}
-	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskAck{TaskAck: ack}}); err != nil {
-		return fmt.Errorf("send task ack: %w", err)
+
+	// 操作日志去重：先查历史，再登记执行。
+	if entry, ok, err := a.journal.Lookup(task.GetOperationId()); err != nil {
+		a.logger.Warn("operation journal lookup failed", "operation", task.GetOperationId(), "error", err)
+	} else if ok {
+		if entry.Digest != digest {
+			// 同 operation 不同 digest：指令被改变，拒绝执行。
+			a.logger.Warn("operation redelivered with a different payload digest", "operation", task.GetOperationId())
+			sendAck(false, "OPERATION_DIGEST_MISMATCH")
+			return
+		}
+		if entry.Status == "succeeded" || entry.Status == "failed" {
+			// 终态重放：不重复执行副作用，直接重放已持久化的结果。
+			sendAck(true, "")
+			a.replayJournalResult(outbound, task, entry)
+			return
+		}
+		// running：等待执行中的结果（重投恢复）。
+		sendAck(true, "")
+		a.awaitInflight(ctx, outbound, task, digest)
+		return
 	}
+
+	execution, isNew := a.registerInflight(task.GetOperationId())
+	if !isNew {
+		// 并发重投：等待同一次执行的结果。
+		sendAck(true, "")
+		a.awaitInflight(ctx, outbound, task, digest)
+		return
+	}
+	defer a.unregisterInflight(task.GetOperationId())
+
+	if err := a.journal.RecordRunning(task.GetOperationId(), digest, task.GetAttempt()); err != nil {
+		if errors.Is(err, ErrJournalDigestMismatch) {
+			sendAck(false, "OPERATION_DIGEST_MISMATCH")
+			return
+		}
+		a.logger.Warn("journal record running failed", "operation", task.GetOperationId(), "error", err)
+	}
+	sendAck(true, "")
+
+	// 每服务器互斥：同服务器任务串行，避免并发写同一数据目录。
+	unlock := a.keyedLock(task.GetServerId())
+	unlock.Lock()
+	defer unlock.Unlock()
 
 	// 有栅栏的任务在执行期每 10 秒续租，防止长任务（备份/恢复）在 30 秒
 	// 租约窗口内被对账重新入队造成重复执行。
@@ -445,7 +700,32 @@ func (a *agent) handleTask(ctx context.Context, outbound connectRequestSender, g
 		}()
 	}
 
-	result := func(outcome *ExecutionOutcome, errCode string) error {
+	var outcome *ExecutionOutcome
+	if err := resolveTaskSecretHandles(ctx, gateway, task); err != nil {
+		outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "SECRET_HANDLE_FAILED", Retryable: true}
+	} else {
+		outcome, err = a.executor.ExecuteTask(ctx, task)
+		if err != nil || outcome == nil {
+			outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "EXECUTION_ERROR", Retryable: true}
+		}
+	}
+
+	// 先持久化终态（含观测结果），再回发：任务结果不可丢，重投可重放。
+	var observedRaw []byte
+	if outcome.Observed != nil {
+		observedRaw, _ = protojson.MarshalOptions{UseProtoNames: true}.Marshal(outcome.Observed)
+	}
+	if err := a.journal.Complete(task.GetOperationId(), digest, task.GetAttempt(), outcome.Succeeded, outcome.ErrorCode, outcome.Retryable, "", outcome.ResultJSON, observedRaw); err != nil {
+		a.logger.Warn("journal complete failed", "operation", task.GetOperationId(), "error", err)
+	}
+	execution.complete(inflightResult{
+		succeeded:  outcome.Succeeded,
+		errorCode:  outcome.ErrorCode,
+		retryable:  outcome.Retryable,
+		resultJSON: outcome.ResultJSON,
+		observed:   observedRaw,
+	})
+	sendResult := func() {
 		frame := &agentv1.TaskResult{
 			OperationId:     task.GetOperationId(),
 			Succeeded:       outcome.Succeeded,
@@ -456,32 +736,104 @@ func (a *agent) handleTask(ctx context.Context, outbound connectRequestSender, g
 			LeaseToken:      leaseToken,
 			ConnectionEpoch: connectionEpoch,
 		}
-		if errCode != "" {
-			frame.ErrorCode = errCode
+		if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: frame}}); err != nil {
+			a.logger.Warn("send task result failed", "operation", task.GetOperationId(), "error", err)
 		}
-		return outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: frame}})
 	}
-
-	if err := resolveTaskSecretHandles(ctx, gateway, task); err != nil {
-		outcome := &ExecutionOutcome{Succeeded: false, ErrorCode: "SECRET_HANDLE_FAILED", Retryable: true}
-		if sendErr := result(outcome, ""); sendErr != nil {
-			return fmt.Errorf("send secret handle failure: %w", sendErr)
-		}
-		return nil
-	}
-	outcome, err := a.executor.ExecuteTask(ctx, task)
-	if err != nil || outcome == nil {
-		outcome = &ExecutionOutcome{Succeeded: false, ErrorCode: "EXECUTION_ERROR", Retryable: true}
-	}
-	if err := result(outcome, ""); err != nil {
-		return fmt.Errorf("send task result: %w", err)
-	}
+	sendResult()
 	if outcome.Observed != nil {
 		if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: outcome.Observed}}); err != nil {
-			return fmt.Errorf("send server observed: %w", err)
+			a.logger.Warn("send server observed failed", "operation", task.GetOperationId(), "error", err)
 		}
 	}
-	return nil
+}
+
+// replayJournalResult 重放操作日志里的终态结果，不触碰执行器。
+func (a *agent) replayJournalResult(outbound connectRequestSender, task *agentv1.Task, entry journalEntry) {
+	succeeded := entry.Status == "succeeded"
+	errorCode := entry.ErrorCode
+	if succeeded {
+		errorCode = ""
+	} else if errorCode == "" {
+		errorCode = "OPERATION_FAILED"
+	}
+	frame := &agentv1.TaskResult{
+		OperationId:     task.GetOperationId(),
+		Succeeded:       succeeded,
+		ErrorCode:       errorCode,
+		Retryable:       entry.Retryable,
+		ResultJson:      entry.ResultJSON,
+		Attempt:         task.GetAttempt(),
+		LeaseToken:      task.GetLeaseToken(),
+		ConnectionEpoch: task.GetConnectionEpoch(),
+	}
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: frame}}); err != nil {
+		a.logger.Warn("replay task result failed", "operation", task.GetOperationId(), "error", err)
+		return
+	}
+	if len(entry.Observed) > 0 {
+		var observed agentv1.ServerObserved
+		if err := protojson.Unmarshal(entry.Observed, &observed); err == nil {
+			_ = outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: &observed}})
+		}
+	}
+	a.logger.Info("operation result replayed from journal", "operation", task.GetOperationId(), "status", entry.Status)
+}
+
+// awaitInflight 等待执行中的同 operation 结果，并把终态回发给服务端。
+func (a *agent) awaitInflight(ctx context.Context, outbound connectRequestSender, task *agentv1.Task, digest string) {
+	a.inflightMu.Lock()
+	execution := a.inflight[task.GetOperationId()]
+	a.inflightMu.Unlock()
+	if execution == nil {
+		// 登记已消失（执行刚结束）：重查日志，有终态则重放；仍为 running
+		// 说明 Agent 在副作用未知时重启，安全地终止而不是重复执行。
+		if entry, ok, err := a.journal.Lookup(task.GetOperationId()); err == nil && ok && entry.Digest == digest {
+			if entry.Status == "succeeded" || entry.Status == "failed" {
+				a.replayJournalResult(outbound, task, entry)
+				return
+			}
+			const recoveryCode = "AGENT_RESTARTED_DURING_OPERATION"
+			resultJSON, _ := json.Marshal(map[string]any{"code": recoveryCode})
+			if completeErr := a.journal.Complete(task.GetOperationId(), digest, task.GetAttempt(), false, recoveryCode, false, "failed", resultJSON, nil); completeErr != nil {
+				a.logger.Warn("journal recovery completion failed", "operation", task.GetOperationId(), "error", completeErr)
+			}
+			a.sendTaskResult(outbound, task, false, recoveryCode, false, resultJSON)
+		}
+		return
+	}
+	select {
+	case <-execution.done:
+		result := execution.getResult()
+		a.sendTaskResult(outbound, task, result.succeeded, result.errorCode, result.retryable, result.resultJSON)
+		if len(result.observed) > 0 {
+			var observed agentv1.ServerObserved
+			if err := protojson.Unmarshal(result.observed, &observed); err == nil {
+				_ = outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_ServerObserved{ServerObserved: &observed}})
+			}
+		}
+	case <-ctx.Done():
+		return
+	}
+}
+
+func (a *agent) sendTaskResult(outbound connectRequestSender, task *agentv1.Task, succeeded bool, errorCode string, retryable bool, resultJSON []byte) {
+	if !succeeded && errorCode == "" {
+		errorCode = "OPERATION_FAILED"
+	}
+	frame := &agentv1.TaskResult{
+		OperationId:     task.GetOperationId(),
+		Succeeded:       succeeded,
+		ErrorCode:       errorCode,
+		Retryable:       retryable,
+		ResultJson:      resultJSON,
+		Attempt:         task.GetAttempt(),
+		LeaseToken:      task.GetLeaseToken(),
+		ConnectionEpoch: task.GetConnectionEpoch(),
+	}
+	if err := outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_TaskResult{TaskResult: frame}}); err != nil {
+		a.logger.Warn("send task result failed", "operation", task.GetOperationId(), "error", err)
+	}
 }
 
 func resolveTaskSecretHandles(ctx context.Context, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
@@ -710,6 +1062,8 @@ func (a *agent) startLogTailers(ctx context.Context, outbound connectRequestSend
 }
 
 // startLogTailer 在独立 goroutine 中跟随容器日志，按行分组成批上报。
+// 上报被限流：每 250ms 最多一批 64 行；缓冲已满时丢弃行并计入 dropped_lines，
+// 绝不阻塞 Docker 日志读取或挤占任务结果所需的 outbound 带宽。
 func (a *agent) startLogTailer(ctx context.Context, outbound connectRequestSender, serverID string) {
 	go func() {
 		rt, err := a.executor.Runtime()
@@ -722,29 +1076,59 @@ func (a *agent) startLogTailer(ctx context.Context, outbound connectRequestSende
 			return
 		}
 		defer reader.Close()
-		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+		lines := make(chan string, 256)
+		var dropped atomic.Uint64
+		go func() {
+			defer close(lines)
+			scanner := bufio.NewScanner(reader)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				// docker 日志可能包含非法 UTF-8（ANSI 控制序列、乱码字节），
+				// gRPC proto string 字段要求合法 UTF-8，发送前统一替换。
+				select {
+				case lines <- strings.ToValidUTF8(scanner.Text(), "\uFFFD"):
+				case <-ctx.Done():
+					return
+				default:
+					// 限流保护：缓冲满即丢行，不阻塞日志读取。
+					dropped.Add(1)
+				}
+			}
+		}()
+
 		var batch []string
 		seq := a.nextSequence(serverID)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
 		flush := func() {
-			if len(batch) == 0 {
+			if len(batch) == 0 && dropped.Load() == 0 {
 				return
 			}
 			_ = outbound.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_LogBatch{LogBatch: &agentv1.LogBatch{
-				ServerId: serverID, FirstSequence: uint64(seq), Lines: batch,
+				ServerId: serverID, FirstSequence: uint64(seq), Lines: batch, DroppedLines: dropped.Swap(0),
 			}}})
 			seq += int64(len(batch))
 			batch = batch[:0]
 		}
-		for scanner.Scan() {
-			// docker 日志可能包含非法 UTF-8（ANSI 控制序列、乱码字节），
-			// gRPC proto string 字段要求合法 UTF-8，发送前统一替换。
-			batch = append(batch, strings.ToValidUTF8(scanner.Text(), "\uFFFD"))
-			if len(batch) >= 64 {
+		for {
+			select {
+			case <-ctx.Done():
 				flush()
+				return
+			case <-ticker.C:
+				flush()
+			case line, ok := <-lines:
+				if !ok {
+					flush()
+					return
+				}
+				batch = append(batch, line)
+				if len(batch) >= 64 {
+					flush()
+				}
 			}
 		}
-		flush()
 	}()
 }
 
