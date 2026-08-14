@@ -1537,6 +1537,8 @@ type ProvisionTaskPayload struct {
 	Allocations         []*PortAllocation      `protobuf:"bytes,3,rep,name=allocations,proto3" json:"allocations,omitempty"`
 	Variables           map[string]string      `protobuf:"bytes,4,rep,name=variables,proto3" json:"variables,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	StartAfterProvision bool                   `protobuf:"varint,5,opt,name=start_after_provision,json=startAfterProvision,proto3" json:"start_after_provision,omitempty"`
+	RuntimeTargetJson   string                 `protobuf:"bytes,6,opt,name=runtime_target_json,json=runtimeTargetJson,proto3" json:"runtime_target_json,omitempty"`
+	BundleDigest        string                 `protobuf:"bytes,7,opt,name=bundle_digest,json=bundleDigest,proto3" json:"bundle_digest,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -1604,6 +1606,20 @@ func (x *ProvisionTaskPayload) GetStartAfterProvision() bool {
 		return x.StartAfterProvision
 	}
 	return false
+}
+
+func (x *ProvisionTaskPayload) GetRuntimeTargetJson() string {
+	if x != nil {
+		return x.RuntimeTargetJson
+	}
+	return ""
+}
+
+func (x *ProvisionTaskPayload) GetBundleDigest() string {
+	if x != nil {
+		return x.BundleDigest
+	}
+	return ""
 }
 
 type ResourceLimits struct {
@@ -4493,13 +4509,15 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\apayload\"Z\n" +
 	"\x15CapabilityRequirement\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
-	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xa6\x03\n" +
+	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xfb\x03\n" +
 	"\x14ProvisionTaskPayload\x12,\n" +
 	"\x12game_definition_id\x18\x01 \x01(\tR\x10gameDefinitionId\x12M\n" +
 	"\x0fresource_limits\x18\x02 \x01(\v2$.gugumanager.agent.v1.ResourceLimitsR\x0eresourceLimits\x12F\n" +
 	"\vallocations\x18\x03 \x03(\v2$.gugumanager.agent.v1.PortAllocationR\vallocations\x12W\n" +
 	"\tvariables\x18\x04 \x03(\v29.gugumanager.agent.v1.ProvisionTaskPayload.VariablesEntryR\tvariables\x122\n" +
-	"\x15start_after_provision\x18\x05 \x01(\bR\x13startAfterProvision\x1a<\n" +
+	"\x15start_after_provision\x18\x05 \x01(\bR\x13startAfterProvision\x12.\n" +
+	"\x13runtime_target_json\x18\x06 \x01(\tR\x11runtimeTargetJson\x12#\n" +
+	"\rbundle_digest\x18\a \x01(\tR\fbundleDigest\x1a<\n" +
 	"\x0eVariablesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x01\n" +

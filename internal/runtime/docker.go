@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -73,13 +74,25 @@ func (r *DockerRuntime) Close() error {
 
 // ContainerConfig holds the parameters for creating a container.
 type ContainerConfig struct {
-	Name         string            // Container name
-	Image        string            // Docker image (e.g., "itzg/minecraft-server:latest")
-	Env          map[string]string // Environment variables
-	PortBindings map[int]int       // Container port -> host port mapping
-	VolumePath   string            // Host path to mount as /data
-	MemoryMB     int64             // Memory limit in MB
-	CPUShares    int64             // CPU shares (relative weight)
+	Name          string            // Container name
+	Image         string            // Immutable Docker image reference
+	Entrypoint    []string          // Trusted runtime entrypoint
+	Cmd           []string          // Trusted runtime arguments
+	WorkingDir    string            // Trusted container working directory
+	User          string            // Trusted container user
+	Env           map[string]string // Environment variables
+	PortBindings  map[int]int       // Container port -> host port mapping
+	PortProtocols map[int]string    // Container port -> tcp/udp
+	PortBindIPs   map[int]string    // Container port -> host bind address
+	BindIP        string            // Host bind address; empty means wildcard
+	VolumePath    string            // Legacy host path mount
+	VolumeName    string            // Docker named volume mount
+	VolumeTarget  string            // Named/bind volume target, default /data
+	MemoryMB      int64             // Memory limit in MB
+	CPUShares     int64             // CPU shares (relative weight)
+	PIDsLimit     int64             // Optional process limit
+	HealthCheck   *container.HealthConfig
+	StartOnCreate *bool // nil preserves the historical auto-start behavior
 }
 
 // CreateContainer creates and starts a new container.
@@ -106,14 +119,30 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 	exposedPorts := network.PortSet{}
 	portBindings := network.PortMap{}
 	for containerPort, hostPort := range cfg.PortBindings {
-		port, ok := network.PortFrom(uint16(containerPort), network.TCP)
+		protocol := network.TCP
+		if strings.EqualFold(cfg.PortProtocols[containerPort], "udp") {
+			protocol = network.UDP
+		}
+		port, ok := network.PortFrom(uint16(containerPort), protocol)
 		if !ok {
 			return "", fmt.Errorf("invalid container port %d", containerPort)
+		}
+		bindIP := netip.IPv4Unspecified()
+		configuredBindIP := cfg.PortBindIPs[containerPort]
+		if configuredBindIP == "" {
+			configuredBindIP = cfg.BindIP
+		}
+		if configuredBindIP != "" {
+			parsed, parseErr := netip.ParseAddr(configuredBindIP)
+			if parseErr != nil {
+				return "", fmt.Errorf("invalid bind IP %q: %w", configuredBindIP, parseErr)
+			}
+			bindIP = parsed
 		}
 		exposedPorts[port] = struct{}{}
 		portBindings[port] = []network.PortBinding{
 			{
-				HostIP:   netip.IPv4Unspecified(),
+				HostIP:   bindIP,
 				HostPort: fmt.Sprintf("%d", hostPort),
 			},
 		}
@@ -124,6 +153,11 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 		Image:        cfg.Image,
 		Env:          env,
 		ExposedPorts: exposedPorts,
+		Entrypoint:   append([]string(nil), cfg.Entrypoint...),
+		Cmd:          append([]string(nil), cfg.Cmd...),
+		WorkingDir:   cfg.WorkingDir,
+		User:         cfg.User,
+		Healthcheck:  cfg.HealthCheck,
 	}
 
 	// Host configuration (resources and bindings)
@@ -132,6 +166,12 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 		Resources: container.Resources{
 			Memory:    cfg.MemoryMB * 1024 * 1024, // Convert MB to bytes
 			CPUShares: cfg.CPUShares,
+			PidsLimit: func() *int64 {
+				if cfg.PIDsLimit > 0 {
+					return &cfg.PIDsLimit
+				}
+				return nil
+			}(),
 		},
 		RestartPolicy: container.RestartPolicy{
 			Name: "unless-stopped",
@@ -139,12 +179,21 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 	}
 
 	// Mount data volume if specified
-	if cfg.VolumePath != "" {
+	volumeTarget := cfg.VolumeTarget
+	if volumeTarget == "" {
+		volumeTarget = "/data"
+	}
+	if cfg.VolumeName != "" {
+		if _, err := r.client.VolumeCreate(ctx, client.VolumeCreateOptions{Name: cfg.VolumeName}); err != nil {
+			return "", fmt.Errorf("create named volume %s: %w", cfg.VolumeName, err)
+		}
+		hostCfg.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: cfg.VolumeName, Target: volumeTarget}}
+	} else if cfg.VolumePath != "" {
 		hostCfg.Mounts = []mount.Mount{
 			{
 				Type:   mount.TypeBind,
 				Source: cfg.VolumePath,
-				Target: "/data",
+				Target: volumeTarget,
 			},
 		}
 	}
@@ -159,11 +208,17 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 		return "", fmt.Errorf("create container: %w", err)
 	}
 
-	// Start container
-	if _, err := r.client.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
-		// Cleanup on failure
-		_, _ = r.client.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true})
-		return "", fmt.Errorf("start container: %w", err)
+	// Start container unless the caller explicitly wants a provisioned/stopped container.
+	shouldStart := true
+	if cfg.StartOnCreate != nil {
+		shouldStart = *cfg.StartOnCreate
+	}
+	if shouldStart {
+		if _, err := r.client.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
+			// Cleanup on failure
+			_, _ = r.client.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true})
+			return "", fmt.Errorf("start container: %w", err)
+		}
 	}
 
 	return resp.ID, nil
@@ -432,6 +487,80 @@ func (r *DockerRuntime) CopyArchiveFromContainer(ctx context.Context, containerI
 	defer file.Close()
 	if _, err := io.Copy(file, reader); err != nil {
 		return fmt.Errorf("write archive: %w", err)
+	}
+	return nil
+}
+
+// RestoreNamedVolume restores a validated gzip tar archive into the named
+// volume mounted at /data by using a short-lived helper container. This keeps
+// Docker Desktop volume contents inside the Linux VM instead of relying on a
+// Windows host bind path.
+func (r *DockerRuntime) RestoreNamedVolume(ctx context.Context, containerID, archivePath string) error {
+	inspectResult, err := r.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect restore target: %w", err)
+	}
+	inspect := inspectResult.Container
+	if inspect.Config == nil || inspect.Config.Image == "" {
+		return fmt.Errorf("restore target has no image")
+	}
+	volumeName := ""
+	volumeTarget := "/data"
+	for _, mounted := range inspect.Mounts {
+		if mounted.Type == mount.TypeVolume && mounted.Destination == "/data" {
+			volumeName = mounted.Name
+			break
+		}
+	}
+	if volumeName == "" {
+		return fmt.Errorf("restore target has no named /data volume")
+	}
+
+	helper, err := r.client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
+			Image:      inspect.Config.Image,
+			Entrypoint: []string{"sh", "-c"},
+			Cmd:        []string{"sleep 300"},
+		},
+		HostConfig: &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: volumeName, Target: volumeTarget}}},
+		Name:       fmt.Sprintf("gugu-restore-%d", time.Now().UTC().UnixNano()),
+	})
+	if err != nil {
+		return fmt.Errorf("create restore helper: %w", err)
+	}
+	defer func() {
+		_, _ = r.client.ContainerRemove(context.Background(), helper.ID, client.ContainerRemoveOptions{Force: true})
+	}()
+	if _, err := r.client.ContainerStart(ctx, helper.ID, client.ContainerStartOptions{}); err != nil {
+		return fmt.Errorf("start restore helper: %w", err)
+	}
+
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open restore archive: %w", err)
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
+	if err != nil {
+		return fmt.Errorf("stat restore archive: %w", err)
+	}
+	var wrapper bytes.Buffer
+	tarWriter := tar.NewWriter(&wrapper)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "restore.tar.gz", Mode: 0o600, Size: info.Size(), ModTime: time.Unix(0, 0)}); err != nil {
+		return fmt.Errorf("write restore wrapper header: %w", err)
+	}
+	if _, err := io.Copy(tarWriter, archive); err != nil {
+		return fmt.Errorf("write restore wrapper: %w", err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		return fmt.Errorf("close restore wrapper: %w", err)
+	}
+	if _, err := r.client.CopyToContainer(ctx, helper.ID, client.CopyToContainerOptions{DestinationPath: "/tmp", Content: bytes.NewReader(wrapper.Bytes())}); err != nil {
+		return fmt.Errorf("copy restore archive: %w", err)
+	}
+	_, err = r.ExecInContainer(ctx, helper.ID, []string{"sh", "-c", "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -xzf /tmp/restore.tar.gz -C /data"})
+	if err != nil {
+		return fmt.Errorf("activate restored volume: %w", err)
 	}
 	return nil
 }

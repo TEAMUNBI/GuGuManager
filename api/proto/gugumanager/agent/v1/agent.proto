@@ -150,6 +150,8 @@ message ProvisionTaskPayload {
   repeated PortAllocation allocations = 3;
   map<string, string> variables = 4;
   bool start_after_provision = 5;
+  string runtime_target_json = 6;
+  string bundle_digest = 7;
 }
 
 message ResourceLimits {

@@ -489,8 +489,14 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	// provision payload must be materialized here. Previously it was left
 	// empty and every provision failed on the agent with PROVISION_FAILED.
 	// Since 000009 the immutable input is separated from the checkpoint column.
+	runtimeTargetJSON, marshalErr := json.Marshal(catalogGame.RuntimeTarget)
+	if marshalErr != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法编码运行时目标", true)
+	}
 	payloadJSON, marshalErr := json.Marshal(provisionTaskPayload{
 		GameDefinitionID:    input.GameDefinitionID,
+		BundleDigest:        input.GameBundleDigest,
+		RuntimeTarget:       string(runtimeTargetJSON),
 		ResourceLimits:      provisionResourceLimits{MemoryBytes: uint64(memoryBytes), DiskBytes: uint64(diskBytes)},
 		Allocations:         []provisionTaskAllocation{{AllocationID: allocationID, BindIP: bindIP, HostPort: uint32(port), ContainerPort: uint32(containerPort), Protocol: provisionProtocolName(protocol), PortRef: portRef, Role: role}},
 		Variables:           stringifiedNonSecretStartupValues(startupDefinitions, startupValues),
@@ -687,6 +693,8 @@ func (s *Postgres) nextAvailablePort(ctx context.Context, nodeID string, protoco
 // server_tasks.checkpoint，ClaimTask 将其作为 PayloadJSON 下发给 Agent。
 type provisionTaskPayload struct {
 	GameDefinitionID    string                    `json:"gameDefinitionId"`
+	BundleDigest        string                    `json:"bundleDigest"`
+	RuntimeTarget       string                    `json:"runtimeTargetJson,omitempty"`
 	ResourceLimits      provisionResourceLimits   `json:"resourceLimits,omitempty"`
 	Allocations         []provisionTaskAllocation `json:"allocations,omitempty"`
 	Variables           map[string]string         `json:"variables,omitempty"`

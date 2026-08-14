@@ -472,6 +472,7 @@ func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
 	if task.TaskType == "provision" && len(task.TaskInputJSON) > 0 {
 		payload := &agentv1.ProvisionTaskPayload{}
 		if err := protojson.Unmarshal(task.TaskInputJSON, payload); err == nil {
+			proto.BundleDigest = payload.GetBundleDigest()
 			proto.Payload = &agentv1.Task_Provision{Provision: payload}
 			return proto
 		}

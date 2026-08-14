@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	agentv1 "github.com/gugumanager/gugumanager/api/proto/gugumanager/agent/v1"
+	"github.com/gugumanager/gugumanager/internal/domain"
 	"github.com/gugumanager/gugumanager/internal/runtime"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -254,8 +255,22 @@ func (f *fakeDocker) removedCount() int {
 // ---------------------------------------------------------------------------
 
 func provisionPayload() *agentv1.ProvisionTaskPayload {
+	target := domain.GameRuntimeTarget{
+		Adapter: "container/v1", Image: paperMCRuntimeImage, User: "0:0", WorkingDir: "/data",
+		Command:     domain.StartupCommand{Executable: "/image/scripts/start", Args: []string{}},
+		Environment: map[string]string{"TYPE": "PAPER", "VERSION": "1.21.8", "PAPER_BUILD": "60", "EULA": "TRUE", "MEMORY": "{{ memory_mb }}M"},
+		DataMounts:  []domain.RuntimeDataMount{{Name: "server-data", Target: "/data", Backup: true}},
+		Ports:       []domain.RuntimePort{{Name: "game", Protocol: "tcp", ContainerPort: 25565, Role: "primary"}},
+		Stop:        domain.RuntimeStop{Method: "console", Value: "stop", TimeoutSeconds: 30},
+		Health:      domain.RuntimeHealth{Type: "tcp", PortRef: "game", IntervalSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 6},
+		Console:     &domain.RuntimeConsoleAdapter{Adapter: minecraftRCONAdapter, Port: 25575},
+	}
+	target.Digest, _ = runtimeTargetDigest(target)
+	targetJSON, _ := json.Marshal(target)
 	return &agentv1.ProvisionTaskPayload{
-		GameDefinitionId: "io.gugumanager.papermc",
+		GameDefinitionId:  "io.gugumanager.papermc",
+		BundleDigest:      "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa",
+		RuntimeTargetJson: string(targetJSON),
 		ResourceLimits: &agentv1.ResourceLimits{
 			MemoryBytes:   2048 * 1024 * 1024,
 			DiskBytes:     10 * 1024 * 1024 * 1024,
@@ -266,8 +281,7 @@ func provisionPayload() *agentv1.ProvisionTaskPayload {
 			{AllocationId: "alloc-1", HostPort: 30000, ContainerPort: 25565, Protocol: agentv1.NetworkProtocol_NETWORK_PROTOCOL_TCP},
 		},
 		Variables: map[string]string{
-			"MEMORY": "2048M",
-			"MOTD":   "gugu server",
+			"memory_mb": "2048",
 		},
 		StartAfterProvision: true,
 	}
@@ -301,21 +315,20 @@ func TestDockerExecutorProvisionTyped(t *testing.T) {
 	if cfg.Name != "gugu-server-server-1" {
 		t.Errorf("container name = %q, want gugu-server-server-1", cfg.Name)
 	}
-	if cfg.Image != "itzg/minecraft-server:latest" {
-		t.Errorf("image = %q, want itzg/minecraft-server:latest", cfg.Image)
+	if cfg.Image != paperMCRuntimeImage {
+		t.Errorf("image = %q, want pinned PaperMC image", cfg.Image)
 	}
 	if cfg.Env["EULA"] != "TRUE" {
 		t.Errorf("env EULA = %q, want TRUE", cfg.Env["EULA"])
 	}
-	if cfg.Env["MEMORY"] != "2048M" || cfg.Env["MOTD"] != "gugu server" {
-		t.Errorf("env variables not copied: %+v", cfg.Env)
+	if cfg.Env["MEMORY"] != "2048M" || cfg.Env["TYPE"] != "PAPER" {
+		t.Errorf("runtime environment not rendered: %+v", cfg.Env)
 	}
 	if cfg.PortBindings[25565] != 30000 {
 		t.Errorf("port bindings = %+v, want 25565->30000", cfg.PortBindings)
 	}
-	wantVolume := filepath.Join(exec.dataRoot, "server-1")
-	if cfg.VolumePath != wantVolume {
-		t.Errorf("volume path = %q, want %q", cfg.VolumePath, wantVolume)
+	if cfg.VolumeName != "gugu-server-server-1-data" || cfg.VolumeTarget != "/data" {
+		t.Errorf("named volume = %q:%q", cfg.VolumeName, cfg.VolumeTarget)
 	}
 	if cfg.MemoryMB != 2048 {
 		t.Errorf("memory mb = %d, want 2048", cfg.MemoryMB)
@@ -327,6 +340,33 @@ func TestDockerExecutorProvisionTyped(t *testing.T) {
 		t.Error("expected result json recording container id")
 	} else if want := `"containerId":"cont-abc"`; !strings.Contains(got, want) {
 		t.Errorf("result json = %s, want to contain %s", got, want)
+	}
+}
+
+func TestDockerExecutorProvisionRejectsTamperedRuntimeTarget(t *testing.T) {
+	fd := newFakeDocker()
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+	payload := provisionPayload()
+	var target map[string]any
+	if err := json.Unmarshal([]byte(payload.RuntimeTargetJson), &target); err != nil {
+		t.Fatal(err)
+	}
+	target["image"] = "attacker.invalid/server@sha256:" + strings.Repeat("a", 64)
+	tampered, err := json.Marshal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload.RuntimeTargetJson = string(tampered)
+
+	outcome, err := exec.ExecuteTask(context.Background(), &agentv1.Task{
+		OperationId: "op-tampered-runtime", ServerId: "server-1", Type: "provision",
+		Payload: &agentv1.Task_Provision{Provision: payload},
+	})
+	if err != nil || outcome.Succeeded || outcome.ErrorCode != "RUNTIME_TARGET_UNTRUSTED" || outcome.Retryable {
+		t.Fatalf("tampered target outcome = %+v, err=%v", outcome, err)
+	}
+	if cfg := fd.lastCreated(); cfg.Name != "" {
+		t.Fatalf("tampered target created container: %+v", cfg)
 	}
 }
 
@@ -385,7 +425,7 @@ func TestDockerExecutorProvisionProtectsInternalConsoleAdapter(t *testing.T) {
 	}
 }
 
-func TestDockerExecutorProvisionDoesNotInventAdapterForUnsupportedGame(t *testing.T) {
+func TestDockerExecutorProvisionRejectsUnsupportedGame(t *testing.T) {
 	fd := newFakeDocker()
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 	payload := provisionPayload()
@@ -397,15 +437,11 @@ func TestDockerExecutorProvisionDoesNotInventAdapterForUnsupportedGame(t *testin
 		Payload: &agentv1.Task_Provision{Provision: payload},
 	}
 	outcome, err := exec.ExecuteTask(context.Background(), task)
-	if err != nil || !outcome.Succeeded {
-		t.Fatalf("provision = %+v, %v", outcome, err)
+	if err != nil || outcome.Succeeded || outcome.ErrorCode != "RUNTIME_TARGET_UNTRUSTED" || outcome.Retryable {
+		t.Fatalf("unsupported runtime target = %+v, %v", outcome, err)
 	}
-	cfg := fd.lastCreated()
-	if _, ok := cfg.Env["GUGU_CONSOLE_ADAPTER"]; ok {
-		t.Fatalf("unsupported game received console adapter: %+v", cfg.Env)
-	}
-	if _, ok := cfg.Env["RCON_PASSWORD"]; ok {
-		t.Fatalf("unsupported game retained user-supplied RCON password")
+	if cfg := fd.lastCreated(); cfg.Name != "" {
+		t.Fatalf("unsupported game created a container: %+v", cfg)
 	}
 }
 
