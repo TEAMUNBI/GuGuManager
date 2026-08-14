@@ -165,6 +165,8 @@ message PortAllocation {
   uint32 host_port = 3;
   uint32 container_port = 4;
   NetworkProtocol protocol = 5;
+  string port_ref = 6;
+  string role = 7;
 }
 
 enum NetworkProtocol {

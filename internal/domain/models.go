@@ -267,22 +267,28 @@ type FileContent struct {
 }
 
 type Allocation struct {
-	ID        string    `json:"id"`
-	ServerID  string    `json:"serverId"`
-	NodeID    string    `json:"nodeId"`
-	BindIP    string    `json:"bindIp"`
-	Port      int       `json:"port"`
-	Protocol  string    `json:"protocol"`
-	Primary   bool      `json:"primary"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID            string    `json:"id"`
+	ServerID      string    `json:"serverId"`
+	NodeID        string    `json:"nodeId"`
+	BindIP        string    `json:"bindIp"`
+	Port          int       `json:"port"`
+	Protocol      string    `json:"protocol"`
+	PortRef       string    `json:"portRef,omitempty"`
+	ContainerPort int       `json:"containerPort"`
+	Role          string    `json:"role"`
+	Primary       bool      `json:"primary"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type CreateAllocationInput struct {
-	BindIP   string `json:"bindIp"`
-	Port     int    `json:"port"`
-	Protocol string `json:"protocol"`
-	Primary  bool   `json:"primary"`
+	BindIP        string `json:"bindIp"`
+	Port          int    `json:"port"`
+	Protocol      string `json:"protocol"`
+	PortRef       string `json:"portRef,omitempty"`
+	ContainerPort int    `json:"containerPort,omitempty"`
+	Role          string `json:"role,omitempty"`
+	Primary       bool   `json:"primary"`
 }
 
 type StartupCommand struct {

@@ -60,9 +60,9 @@ func (m *Memory) seed() error {
 	})
 
 	seededAllocations := []domain.Allocation{
-		{ID: "a1111111-1111-4111-8111-111111111111", ServerID: m.serverOrder[0], NodeID: "11111111-1111-4111-8111-111111111111", BindIP: "10.0.10.21", Port: 25565, Protocol: "tcp", Primary: true, CreatedAt: now.Add(-day(30)), UpdatedAt: now.Add(-11 * time.Second)},
-		{ID: "a2222222-2222-4222-8222-222222222222", ServerID: m.serverOrder[1], NodeID: "22222222-2222-4222-8222-222222222222", BindIP: "10.0.20.14", Port: 34197, Protocol: "udp", Primary: true, CreatedAt: now.Add(-day(14)), UpdatedAt: now.Add(-2 * time.Minute)},
-		{ID: "a3333333-3333-4333-8333-333333333333", ServerID: m.serverOrder[2], NodeID: "33333333-3333-4333-8333-333333333333", BindIP: "10.0.30.18", Port: 42420, Protocol: "tcp", Primary: true, CreatedAt: now.Add(-day(7)), UpdatedAt: now.Add(-3 * time.Minute)},
+		{ID: "a1111111-1111-4111-8111-111111111111", ServerID: m.serverOrder[0], NodeID: "11111111-1111-4111-8111-111111111111", BindIP: "10.0.10.21", Port: 25565, Protocol: "tcp", PortRef: "game", ContainerPort: 25565, Role: "primary", Primary: true, CreatedAt: now.Add(-day(30)), UpdatedAt: now.Add(-11 * time.Second)},
+		{ID: "a2222222-2222-4222-8222-222222222222", ServerID: m.serverOrder[1], NodeID: "22222222-2222-4222-8222-222222222222", BindIP: "10.0.20.14", Port: 34197, Protocol: "udp", PortRef: "game", ContainerPort: 34197, Role: "primary", Primary: true, CreatedAt: now.Add(-day(14)), UpdatedAt: now.Add(-2 * time.Minute)},
+		{ID: "a3333333-3333-4333-8333-333333333333", ServerID: m.serverOrder[2], NodeID: "33333333-3333-4333-8333-333333333333", BindIP: "10.0.30.18", Port: 42420, Protocol: "tcp", PortRef: "game", ContainerPort: 42420, Role: "primary", Primary: true, CreatedAt: now.Add(-day(7)), UpdatedAt: now.Add(-3 * time.Minute)},
 	}
 	for _, allocation := range seededAllocations {
 		m.allocations[allocation.ID] = allocation

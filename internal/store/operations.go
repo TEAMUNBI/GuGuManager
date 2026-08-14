@@ -71,7 +71,7 @@ func (m *Memory) CreateServer(input domain.CreateServerInput, idempotencyKey str
 		return domain.Operation{}, domain.NewProblem("INSUFFICIENT_RESOURCE", "节点剩余资源不足", false)
 	}
 
-	protocol, firstPort := defaultAllocationSettings(game.ID)
+	portRef, protocol, firstPort, containerPort, role := allocationSettingsForGame(game)
 	port, portAvailable := m.nextAllocationPortLocked(node.ID, node.Address, protocol, firstPort)
 	if !portAvailable {
 		m.mu.Unlock()
@@ -82,7 +82,8 @@ func (m *Memory) CreateServer(input domain.CreateServerInput, idempotencyKey str
 	operation := domain.NewQueuedOperation(id.New(), serverID, node.ID, domain.PowerAction("provision"), 1, idempotencyKey, now)
 	allocation := domain.Allocation{
 		ID: id.New(), ServerID: serverID, NodeID: node.ID, BindIP: node.Address,
-		Port: port, Protocol: protocol, Primary: true, CreatedAt: now, UpdatedAt: now,
+		Port: port, Protocol: protocol, PortRef: portRef, ContainerPort: containerPort, Role: role,
+		Primary: true, CreatedAt: now, UpdatedAt: now,
 	}
 	server := domain.Server{
 		ID: serverID, Name: strings.TrimSpace(input.Name), Description: "新建开发服务器", GameID: game.ID, GameBundleDigest: game.BundleDigest, GameDefinitionVersion: game.Version, GameName: game.Name, GameVersion: game.GameVersion,
@@ -554,6 +555,22 @@ func (m *Memory) nextAllocationPortLocked(nodeID string, bindIP string, protocol
 		}
 	}
 	return 0, false
+}
+
+func allocationSettingsForGame(game domain.GameDefinition) (portRef string, protocol string, firstPort int, containerPort int, role string) {
+	if game.RuntimeTarget != nil {
+		for _, port := range game.RuntimeTarget.Ports {
+			if port.Role == "primary" {
+				protocol = strings.ToLower(port.Protocol)
+				if protocol != "tcp" && protocol != "udp" {
+					break
+				}
+				return port.Name, protocol, port.ContainerPort, port.ContainerPort, "primary"
+			}
+		}
+	}
+	protocol, firstPort = defaultAllocationSettings(game.ID)
+	return "", protocol, firstPort, firstPort, "primary"
 }
 
 func defaultAllocationSettings(gameID string) (string, int) {

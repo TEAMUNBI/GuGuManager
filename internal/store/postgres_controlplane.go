@@ -843,7 +843,7 @@ func (s *Postgres) Allocations(serverID string) ([]domain.Allocation, error) {
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id::text, server_id::text, node_id::text, host(bind_ip), port, protocol, is_primary, created_at
+		SELECT id::text, server_id::text, node_id::text, host(bind_ip), port, protocol, port_ref, container_port, role, is_primary, created_at
 		FROM allocations
 		WHERE server_id = $1 AND released_at IS NULL
 		ORDER BY created_at ASC
@@ -857,7 +857,7 @@ func (s *Postgres) Allocations(serverID string) ([]domain.Allocation, error) {
 	for rows.Next() {
 		var allocation domain.Allocation
 		if err := rows.Scan(&allocation.ID, &allocation.ServerID, &allocation.NodeID, &allocation.BindIP,
-			&allocation.Port, &allocation.Protocol, &allocation.Primary, &allocation.CreatedAt); err != nil {
+			&allocation.Port, &allocation.Protocol, &allocation.PortRef, &allocation.ContainerPort, &allocation.Role, &allocation.Primary, &allocation.CreatedAt); err != nil {
 			continue
 		}
 		allocation.UpdatedAt = allocation.CreatedAt
@@ -961,9 +961,9 @@ func (s *Postgres) CreateAllocation(
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, server_id, is_primary, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, allocationID, row.NodeID, normalized.BindIP, normalized.Port, normalized.Protocol, serverID, makePrimary, now); err != nil {
+		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, port_ref, container_port, role, server_id, is_primary, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, allocationID, row.NodeID, normalized.BindIP, normalized.Port, normalized.Protocol, normalized.PortRef, normalized.ContainerPort, normalized.Role, serverID, makePrimary, now); err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法创建网络分配", true)
 	}
 

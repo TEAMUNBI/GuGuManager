@@ -25,6 +25,9 @@ func TestAllocationLifecycleMaintainsGenerationUniquenessAndPrimary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(seeded) == 0 || seeded[0].PortRef != "game" || seeded[0].ContainerPort != seeded[0].Port || seeded[0].Role != "primary" {
+		t.Fatalf("seeded allocation = %+v, want declared runtime port metadata", seeded)
+	}
 	if len(seeded) != 1 || !seeded[0].Primary {
 		t.Fatalf("seeded allocations = %+v, want one primary", seeded)
 	}

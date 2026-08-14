@@ -75,6 +75,7 @@ func (m *Memory) CreateAllocation(
 			allocation := domain.Allocation{
 				ID: id.New(), ServerID: serverID, NodeID: server.NodeID,
 				BindIP: normalized.BindIP, Port: normalized.Port, Protocol: normalized.Protocol,
+				PortRef: normalized.PortRef, ContainerPort: normalized.ContainerPort, Role: normalized.Role,
 				Primary: makePrimary, CreatedAt: now, UpdatedAt: now,
 			}
 			m.allocations[allocation.ID] = allocation
@@ -414,6 +415,26 @@ func normalizeAllocationInput(input domain.CreateAllocationInput) (domain.Create
 	input.Protocol = strings.ToLower(strings.TrimSpace(input.Protocol))
 	if input.Protocol != "tcp" && input.Protocol != "udp" {
 		return domain.CreateAllocationInput{}, validationProblem("protocol 必须是 tcp 或 udp")
+	}
+	if input.ContainerPort == 0 {
+		input.ContainerPort = input.Port
+	}
+	if input.ContainerPort < 1 || input.ContainerPort > 65535 {
+		return domain.CreateAllocationInput{}, validationProblem("containerPort 必须在 1 到 65535 之间")
+	}
+	input.PortRef = strings.TrimSpace(input.PortRef)
+	input.Role = strings.ToLower(strings.TrimSpace(input.Role))
+	if input.Role == "" {
+		if input.Primary {
+			input.Role = "primary"
+		} else {
+			input.Role = "additional"
+		}
+	}
+	switch input.Role {
+	case "primary", "query", "rcon", "additional":
+	default:
+		return domain.CreateAllocationInput{}, validationProblem("role 必须是 primary、query、rcon 或 additional")
 	}
 	return input, nil
 }

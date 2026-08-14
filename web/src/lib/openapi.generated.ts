@@ -882,6 +882,10 @@ export interface components {
             port: number;
             /** @enum {string} */
             protocol: "tcp" | "udp";
+            portRef?: string;
+            containerPort: number;
+            /** @enum {string} */
+            role: "primary" | "query" | "rcon" | "additional";
             /** @description Exactly one allocation per server is primary. */
             primary: boolean;
             /** Format: date-time */
@@ -894,6 +898,10 @@ export interface components {
             port: number;
             /** @enum {string} */
             protocol: "tcp" | "udp";
+            portRef?: string;
+            containerPort?: number;
+            /** @enum {string} */
+            role?: "primary" | "query" | "rcon" | "additional";
             primary: boolean;
         };
         PromoteAllocationRequest: {
@@ -1028,6 +1036,56 @@ export interface components {
             /** @description Provenance of the catalog metadata, not proof of publisher identity. */
             source: string;
             supportReasons: string[];
+            runtimeTarget: components["schemas"]["GameRuntimeTarget"];
+        };
+        GameRuntimeTarget: {
+            digest: string;
+            /** @enum {string} */
+            adapter: "container/v1";
+            image: string;
+            user: string;
+            workingDir: string;
+            command: components["schemas"]["StartupCommand"];
+            environment?: {
+                [key: string]: string;
+            };
+            dataMounts: components["schemas"]["RuntimeDataMount"][];
+            ports: components["schemas"]["RuntimePort"][];
+            stop: components["schemas"]["RuntimeStop"];
+            health: components["schemas"]["RuntimeHealth"];
+            console?: components["schemas"]["RuntimeConsoleAdapter"] | null;
+        };
+        RuntimeDataMount: {
+            name: string;
+            target: string;
+            backup: boolean;
+        };
+        RuntimePort: {
+            name: string;
+            /** @enum {string} */
+            protocol: "tcp" | "udp";
+            containerPort: number;
+            /** @enum {string} */
+            role: "primary" | "query" | "rcon" | "additional";
+        };
+        RuntimeStop: {
+            /** @enum {string} */
+            method: "signal" | "console";
+            value: string;
+            timeoutSeconds: number;
+        };
+        RuntimeHealth: {
+            /** @enum {string} */
+            type: "tcp" | "udp-query" | "process";
+            portRef?: string;
+            intervalSeconds: number;
+            timeoutSeconds: number;
+            failureThreshold: number;
+        };
+        RuntimeConsoleAdapter: {
+            /** @enum {string} */
+            adapter: "minecraft-rcon/v1";
+            port: number;
         };
         ConsoleLine: {
             sequence: number;

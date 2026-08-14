@@ -1398,7 +1398,7 @@ components:
         diskGb: {type: integer, minimum: 1, maximum: 2048}
     Allocation:
       type: object
-      required: [id, serverId, nodeId, bindIp, port, protocol, primary, createdAt, updatedAt]
+      required: [id, serverId, nodeId, bindIp, port, protocol, containerPort, role, primary, createdAt, updatedAt]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         serverId: {$ref: '#/components/schemas/Uuid'}
@@ -1408,6 +1408,9 @@ components:
           description: Canonical IPv4 or IPv6 bind address. Unspecified wildcard addresses (0.0.0.0 and ::) are rejected.
         port: {type: integer, minimum: 1, maximum: 65535}
         protocol: {type: string, enum: [tcp, udp]}
+        portRef: {type: string, minLength: 1}
+        containerPort: {type: integer, minimum: 1, maximum: 65535}
+        role: {type: string, enum: [primary, query, rcon, additional]}
         primary:
           type: boolean
           description: Exactly one allocation per server is primary.
@@ -1421,6 +1424,9 @@ components:
         bindIp: {type: string, minLength: 2, maxLength: 45}
         port: {type: integer, minimum: 1, maximum: 65535}
         protocol: {type: string, enum: [tcp, udp]}
+        portRef: {type: string, minLength: 1}
+        containerPort: {type: integer, minimum: 1, maximum: 65535}
+        role: {type: string, enum: [primary, query, rcon, additional]}
         primary: {type: boolean}
     PromoteAllocationRequest:
       type: object

@@ -1681,6 +1681,8 @@ type PortAllocation struct {
 	HostPort      uint32                 `protobuf:"varint,3,opt,name=host_port,json=hostPort,proto3" json:"host_port,omitempty"`
 	ContainerPort uint32                 `protobuf:"varint,4,opt,name=container_port,json=containerPort,proto3" json:"container_port,omitempty"`
 	Protocol      NetworkProtocol        `protobuf:"varint,5,opt,name=protocol,proto3,enum=gugumanager.agent.v1.NetworkProtocol" json:"protocol,omitempty"`
+	PortRef       string                 `protobuf:"bytes,6,opt,name=port_ref,json=portRef,proto3" json:"port_ref,omitempty"`
+	Role          string                 `protobuf:"bytes,7,opt,name=role,proto3" json:"role,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1748,6 +1750,20 @@ func (x *PortAllocation) GetProtocol() NetworkProtocol {
 		return x.Protocol
 	}
 	return NetworkProtocol_NETWORK_PROTOCOL_UNSPECIFIED
+}
+
+func (x *PortAllocation) GetPortRef() string {
+	if x != nil {
+		return x.PortRef
+	}
+	return ""
+}
+
+func (x *PortAllocation) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
 }
 
 type PowerTaskPayload struct {
@@ -4492,13 +4508,15 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"disk_bytes\x18\x02 \x01(\x04R\tdiskBytes\x12%\n" +
 	"\x0ecpu_millicores\x18\x03 \x01(\rR\rcpuMillicores\x12\x12\n" +
-	"\x04pids\x18\x04 \x01(\rR\x04pids\"\xd5\x01\n" +
+	"\x04pids\x18\x04 \x01(\rR\x04pids\"\x84\x02\n" +
 	"\x0ePortAllocation\x12#\n" +
 	"\rallocation_id\x18\x01 \x01(\tR\fallocationId\x12\x17\n" +
 	"\abind_ip\x18\x02 \x01(\tR\x06bindIp\x12\x1b\n" +
 	"\thost_port\x18\x03 \x01(\rR\bhostPort\x12%\n" +
 	"\x0econtainer_port\x18\x04 \x01(\rR\rcontainerPort\x12A\n" +
-	"\bprotocol\x18\x05 \x01(\x0e2%.gugumanager.agent.v1.NetworkProtocolR\bprotocol\"\xaf\x01\n" +
+	"\bprotocol\x18\x05 \x01(\x0e2%.gugumanager.agent.v1.NetworkProtocolR\bprotocol\x12\x19\n" +
+	"\bport_ref\x18\x06 \x01(\tR\aportRef\x12\x12\n" +
+	"\x04role\x18\a \x01(\tR\x04role\"\xaf\x01\n" +
 	"\x10PowerTaskPayload\x129\n" +
 	"\x06action\x18\x01 \x01(\x0e2!.gugumanager.agent.v1.PowerActionR\x06action\x128\n" +
 	"\x18graceful_timeout_seconds\x18\x02 \x01(\rR\x16gracefulTimeoutSeconds\x12&\n" +

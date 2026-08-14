@@ -623,10 +623,13 @@ func (h *Handler) createAllocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		BindIP   string `json:"bindIp"`
-		Port     int    `json:"port"`
-		Protocol string `json:"protocol"`
-		Primary  *bool  `json:"primary"`
+		BindIP        string `json:"bindIp"`
+		Port          int    `json:"port"`
+		Protocol      string `json:"protocol"`
+		PortRef       string `json:"portRef"`
+		ContainerPort int    `json:"containerPort"`
+		Role          string `json:"role"`
+		Primary       *bool  `json:"primary"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		h.writeJSONDecodeError(w, r, err, "网络分配请求格式无效")
@@ -638,7 +641,7 @@ func (h *Handler) createAllocation(w http.ResponseWriter, r *http.Request) {
 	}
 	operation, err := h.service.CreateAllocation(
 		r.PathValue("serverID"),
-		domain.CreateAllocationInput{BindIP: request.BindIP, Port: request.Port, Protocol: request.Protocol, Primary: *request.Primary},
+		domain.CreateAllocationInput{BindIP: request.BindIP, Port: request.Port, Protocol: request.Protocol, PortRef: request.PortRef, ContainerPort: request.ContainerPort, Role: request.Role, Primary: *request.Primary},
 		generation,
 		r.Header.Get("Idempotency-Key"),
 		principalFrom(r).Session.User,

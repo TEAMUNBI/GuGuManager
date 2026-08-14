@@ -398,7 +398,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	}
 
 	// Reserve a free primary port on the node.
-	protocol, firstPort := defaultAllocationSettings(input.GameDefinitionID)
+	portRef, protocol, firstPort, containerPort, role := allocationSettingsForGame(catalogGame)
 	port, ok := s.nextAvailablePort(ctx, input.NodeID, protocol, firstPort)
 	if !ok {
 		return domain.Operation{}, domain.NewProblem("PORT_CONFLICT", "节点没有可用的游戏端口", false)
@@ -432,10 +432,10 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 
 	var allocationID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, server_id, is_primary, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+		INSERT INTO allocations (id, node_id, bind_ip, port, protocol, port_ref, container_port, role, server_id, is_primary, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10)
 		RETURNING id::text
-	`, id.New(), input.NodeID, bindIP, port, protocol, serverID, now).Scan(&allocationID)
+	`, id.New(), input.NodeID, bindIP, port, protocol, portRef, containerPort, role, serverID, now).Scan(&allocationID)
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法分配游戏端口", true)
 	}
@@ -492,7 +492,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	payloadJSON, marshalErr := json.Marshal(provisionTaskPayload{
 		GameDefinitionID:    input.GameDefinitionID,
 		ResourceLimits:      provisionResourceLimits{MemoryBytes: uint64(memoryBytes), DiskBytes: uint64(diskBytes)},
-		Allocations:         []provisionTaskAllocation{{AllocationID: allocationID, BindIP: bindIP, HostPort: uint32(port), ContainerPort: uint32(port), Protocol: provisionProtocolName(protocol)}},
+		Allocations:         []provisionTaskAllocation{{AllocationID: allocationID, BindIP: bindIP, HostPort: uint32(port), ContainerPort: uint32(containerPort), Protocol: provisionProtocolName(protocol), PortRef: portRef, Role: role}},
 		Variables:           stringifiedNonSecretStartupValues(startupDefinitions, startupValues),
 		SecretKeys:          secretStartupKeys(startupDefinitions),
 		StartAfterProvision: false,
@@ -707,6 +707,8 @@ type provisionTaskAllocation struct {
 	HostPort      uint32 `json:"hostPort"`
 	ContainerPort uint32 `json:"containerPort"`
 	Protocol      string `json:"protocol"`
+	PortRef       string `json:"portRef,omitempty"`
+	Role          string `json:"role,omitempty"`
 }
 
 // stringifiedStartupValues 把启动变量值转为 proto map<string,string> 所需的
