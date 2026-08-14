@@ -49,6 +49,26 @@ type fakeStore struct {
 	metrics      []domain.ServerMetrics
 }
 
+type fakeEnrollmentStore struct {
+	*fakeStore
+	muTokens sync.Mutex
+	tokens   map[string]bool
+}
+
+func (f *fakeEnrollmentStore) IssueEnrollmentToken(ctx context.Context, actorID, nodeNameHint string, ttl time.Duration) (string, time.Time, error) {
+	return "", time.Time{}, errors.New("not implemented in test store")
+}
+
+func (f *fakeEnrollmentStore) ConsumeEnrollmentToken(ctx context.Context, rawToken string) error {
+	f.muTokens.Lock()
+	defer f.muTokens.Unlock()
+	if !f.tokens[rawToken] {
+		return domain.NewProblem("ENROLLMENT_TOKEN_INVALID", "invalid token", false)
+	}
+	delete(f.tokens, rawToken)
+	return nil
+}
+
 type fakeLease struct {
 	nodeID  string
 	epoch   int64
@@ -334,6 +354,11 @@ func caRootPool(t *testing.T, ca *agentca.CA) *x509.CertPool {
 // client 使用 CN=nodeID 的 CA 签发证书建立连接。
 func newTestServer(t *testing.T, ca *agentca.CA, store TaskStore, token string, nodeID string) (*Server, *grpc.ClientConn) {
 	t.Helper()
+	if fs, ok := store.(*fakeStore); ok {
+		fs.mu.Lock()
+		fs.nodes[nodeID] = domain.Node{ID: nodeID, Name: nodeID, Condition: "available", Region: "test", CPUCores: 1, MemoryBytes: 1, DiskBytes: 1}
+		fs.mu.Unlock()
+	}
 	srv := NewServer(ca, store, discardLogger(), WithRegistrationToken(token))
 
 	serverCert, serverKey, err := ca.IssueServerCertificate(24 * time.Hour)
@@ -880,9 +905,10 @@ func TestEnrollCanonicalizesCapabilityNameAndVersion(t *testing.T) {
 		t.Fatalf("new ca: %v", err)
 	}
 	fs := newFakeStore()
-	srv := NewServer(ca, fs, discardLogger())
+	srv := NewServer(ca, fs, discardLogger(), WithRegistrationToken("reg-token"))
 	response, err := srv.Enroll(context.Background(), &agentv1.EnrollRequest{
-		NodeName: "capability-node", AgentVersion: "test",
+		RegistrationToken: "reg-token",
+		NodeName:          "capability-node", AgentVersion: "test",
 		Capabilities: []*agentv1.Capability{
 			{Name: "runtime.container", Version: "1"},
 			{Name: "platform.linux.amd64", Version: "2"},
@@ -904,6 +930,44 @@ func TestEnrollCanonicalizesCapabilityNameAndVersion(t *testing.T) {
 		if node.Capabilities[index] != want[index] {
 			t.Fatalf("capabilities = %v, want %v", node.Capabilities, want)
 		}
+	}
+}
+
+func TestEnrollConsumesDynamicEnrollmentTokenOnce(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := &fakeEnrollmentStore{fakeStore: newFakeStore(), tokens: map[string]bool{"one-time-token": true}}
+	srv := NewServer(ca, fs, discardLogger())
+	request := &agentv1.EnrollRequest{RegistrationToken: "one-time-token", NodeName: "dynamic-token-node", AgentVersion: "test"}
+	if _, err := srv.Enroll(context.Background(), request); err != nil {
+		t.Fatalf("dynamic token enroll: %v", err)
+	}
+	if _, err := srv.Enroll(context.Background(), request); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("replayed dynamic token error = %v, want PermissionDenied", err)
+	}
+}
+
+func TestConnectRejectsNodeRemovedAfterCertificateIssuance(t *testing.T) {
+	ca, err := agentca.NewCA(t.TempDir())
+	if err != nil {
+		t.Fatalf("new ca: %v", err)
+	}
+	fs := newFakeStore()
+	_, conn := newTestServer(t, ca, fs, "reg-token", "revoked-node")
+	fs.mu.Lock()
+	delete(fs.nodes, "revoked-node")
+	fs.mu.Unlock()
+	stream, err := agentv1.NewAgentGatewayServiceClient(conn).Connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := stream.Send(&agentv1.ConnectRequest{Payload: &agentv1.ConnectRequest_Hello{Hello: &agentv1.Hello{NodeId: "revoked-node"}}}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("revoked connect error = %v, want PermissionDenied", err)
 	}
 }
 

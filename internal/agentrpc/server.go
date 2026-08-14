@@ -468,11 +468,17 @@ func (s *Server) completeFileOperation(nodeID string, resp *agentv1.FileOperatio
 }
 
 // Enroll 校验注册令牌、注册节点，并为其签发 24h 的 client auth 证书。
+// 令牌校验顺序：静态注册令牌（开发/兼容）或数据库颁发的一次性注册令牌
+// （仅存摘要、单次消费、短期有效）。两者都不匹配时拒绝注册，绝不静默放行。
 func (s *Server) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
+	staticMatch := false
 	if s.registrationToken != "" {
 		provided := []byte(req.GetRegistrationToken())
 		expected := []byte(s.registrationToken)
-		if subtle.ConstantTimeCompare(provided, expected) != 1 {
+		staticMatch = subtle.ConstantTimeCompare(provided, expected) == 1
+	}
+	if !staticMatch {
+		if err := s.consumeEnrollmentToken(ctx, req.GetRegistrationToken()); err != nil {
 			return nil, status.Error(codes.PermissionDenied, "invalid registration token")
 		}
 	}
@@ -536,6 +542,39 @@ func (s *Server) Enroll(ctx context.Context, req *agentv1.EnrollRequest) (*agent
 		CaCertificate:    rootPEM,
 		ExpiresAt:        timestamppb.New(time.Now().UTC().Add(enrollCertTTL)),
 	}, nil
+}
+
+// consumeEnrollmentToken 用 store 里的一次性注册令牌校验并原子消费。
+func (s *Server) consumeEnrollmentToken(ctx context.Context, raw string) error {
+	issuer, ok := s.store.(store.EnrollmentTokenStore)
+	if !ok {
+		return errors.New("enrollment tokens are unavailable")
+	}
+	return issuer.ConsumeEnrollmentToken(ctx, raw)
+}
+
+// nodeRevoked reports whether the node has been revoked or deleted. Revocation
+// takes effect on the next heartbeat at most; the stream is then closed and
+// reconnects are rejected at Hello.
+func (s *Server) nodeRevoked(ctx context.Context, nodeID string) bool {
+	if _, err := s.store.NodeByID(ctx, nodeID); err != nil {
+		s.log.Warn("node revoked during connection; closing stream", "node", nodeID)
+		return true
+	}
+	return false
+}
+
+// peerCertificate returns the client leaf certificate of the current gRPC peer.
+func (s *Server) peerCertificate(ctx context.Context) *x509.Certificate {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return nil
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return nil
+	}
+	return tlsInfo.State.PeerCertificates[0]
 }
 
 // ResolveSecret exchanges a short-lived, one-time handle for the matching

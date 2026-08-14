@@ -33,6 +33,11 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 	if err := s.verifyPeerNode(stream.Context(), nodeID); err != nil {
 		return err
 	}
+	// 已吊销或已删除的节点禁止建立新连接。
+	if _, err := s.store.NodeByID(stream.Context(), nodeID); err != nil {
+		s.log.Warn("node revoked or unknown; rejecting connect", "node", nodeID)
+		return status.Error(codes.PermissionDenied, "node is revoked or unknown")
+	}
 
 	ctx := stream.Context()
 	nodeConnection := &nodeStream{
@@ -54,6 +59,17 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 		return err
 	}
 	s.log.Info("agent connected", "node", nodeID, "version", hello.Hello.GetAgentVersion())
+
+	// 证书剩余有效期 ≤ 20% 时立即请求轮换（Agent 生成新 CSR，回发后
+	// CertificateResponse 落地新证书，下一次连接生效）。
+	if cert := s.peerCertificate(ctx); cert != nil {
+		if remaining := time.Until(cert.NotAfter); remaining > 0 && remaining <= enrollCertTTL/5 {
+			if err := send(&agentv1.ConnectResponse{Payload: &agentv1.ConnectResponse_RotateCertificate{RotateCertificate: &agentv1.RotateCertificate{RotateBefore: timestamppb.New(cert.NotAfter)}}}); err != nil {
+				return err
+			}
+			s.log.Info("agent certificate nearing expiry; requesting rotation", "node", nodeID, "remaining", remaining.Round(time.Second))
+		}
+	}
 
 	// 每个 Connect 会话领取一个新 epoch；本会话 claim 的任务绑定该 epoch，
 	// Agent 必须在 Ack/Progress/Heartbeat/Result 中原样回显。
@@ -105,6 +121,10 @@ func (s *Server) Connect(stream agentv1.AgentGatewayService_ConnectServer) error
 			s.log.Debug("duplicate hello", "node", nodeID)
 		case *agentv1.ConnectRequest_Heartbeat:
 			s.handleHeartbeat(ctx, nodeID, p.Heartbeat)
+			if s.nodeRevoked(ctx, nodeID) {
+				// 吊销立即断开：心跳是最快的周期检查点。
+				return status.Error(codes.PermissionDenied, "node revoked")
+			}
 		case *agentv1.ConnectRequest_TaskResult:
 			s.handleTaskResult(ctx, nodeID, p.TaskResult)
 		case *agentv1.ConnectRequest_ServerObserved:
