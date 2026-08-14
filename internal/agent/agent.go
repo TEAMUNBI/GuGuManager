@@ -375,11 +375,21 @@ func (a *agent) enroll(ctx context.Context, csrPEM []byte, opts runOptions) (*ag
 // 证书（叶子或 CA 根）的 SHA-256 与配置值一致才放行。
 func verifyServerFingerprint(expected string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	want := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(expected), ":", ""))
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	matches := func(raw []byte) bool {
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:]) == want
+	}
+	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		for _, raw := range rawCerts {
-			sum := sha256.Sum256(raw)
-			if hex.EncodeToString(sum[:]) == want {
+			if matches(raw) {
 				return nil
+			}
+		}
+		for _, chain := range verifiedChains {
+			for _, cert := range chain {
+				if matches(cert.Raw) {
+					return nil
+				}
 			}
 		}
 		return fmt.Errorf("server certificate chain fingerprint does not match the pinned value")

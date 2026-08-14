@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -633,6 +635,16 @@ func TestAgentFingerprintPinRejectsMismatch(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not exit after cancel")
+	}
+}
+
+func TestAgentFingerprintPinAcceptsVerifiedRoot(t *testing.T) {
+	ca := newTestCA(t)
+	sum := sha256.Sum256(ca.cert.Raw)
+	verify := verifyServerFingerprint(hex.EncodeToString(sum[:]))
+
+	if err := verify(nil, [][]*x509.Certificate{{ca.cert}}); err != nil {
+		t.Fatalf("verify root fingerprint: %v", err)
 	}
 }
 
