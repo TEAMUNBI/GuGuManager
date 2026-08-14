@@ -284,6 +284,9 @@ func (m *Memory) Heartbeat(nodeName string, agentVersion string) error {
 		if node.Name != nodeName {
 			continue
 		}
+		if m.revokedNodes[nodeID] {
+			return domain.NewProblem("NOT_FOUND", "节点不存在", false)
+		}
 		node.Condition = "available"
 		node.Version = agentVersion
 		node.LastHeartbeatAt = time.Now().UTC()

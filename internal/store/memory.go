@@ -60,6 +60,8 @@ type Memory struct {
 	startupValues       map[string]map[string]any
 	nodes               map[string]domain.Node
 	nodeOrder           []string
+	revokedNodes        map[string]bool            // 已吊销节点（列表隐藏、心跳拒绝）
+	enrollmentTokens    map[[32]byte]time.Time // 一次性 Agent 注册令牌（仅存摘要）
 	games               map[string]domain.GameDefinition
 	gameOrder           []string
 	operations          map[string]domain.Operation
@@ -377,6 +379,9 @@ func (m *Memory) Nodes() []domain.Node {
 	m.reconcileNodeLivenessLocked(time.Now().UTC())
 	result := make([]domain.Node, 0, len(m.nodeOrder))
 	for _, nodeID := range m.nodeOrder {
+		if m.revokedNodes[nodeID] {
+			continue
+		}
 		result = append(result, m.nodes[nodeID])
 	}
 	return result
