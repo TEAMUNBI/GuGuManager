@@ -137,6 +137,7 @@ message Task {
     BackupTaskPayload backup = 13;
     ExtensionTaskPayload extension = 14;
     ReconcileTaskPayload reconcile = 17;
+    MigrationTaskPayload migration = 18;
   }
 }
 
@@ -251,6 +252,20 @@ message DeleteBackupPayload {
 message ExtensionTaskPayload {
   string type_url = 1;
   bytes value = 2;
+}
+
+// Migration tasks are deliberately narrow. Data transfer uses the signed,
+// encrypted Object Backup flow; this payload only retires the fenced source
+// runtime after the target has restored and passed health checks.
+message MigrationTaskPayload {
+  oneof action {
+    CleanupMigrationSource cleanup_source = 1;
+  }
+}
+
+message CleanupMigrationSource {
+  string migration_id = 1;
+  bool remove_data_volume = 2;
 }
 
 message TaskAck {

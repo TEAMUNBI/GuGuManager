@@ -354,6 +354,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/servers/{serverId}/upgrade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reconcile a server to an approved immutable Bundle revision */
+        post: operations["upgradeServerBundle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/servers/{serverId}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reconcile a server to its last applied Bundle revision */
+        post: operations["rollbackServerBundle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/servers/{serverId}/allocations": {
         parameters: {
             query?: never;
@@ -570,6 +608,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/servers/{serverId}/backup-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        /** Read automatic retention settings for a server */
+        get: operations["getServerBackupPolicy"];
+        /** Replace automatic retention settings for a server */
+        put: operations["putServerBackupPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/servers/{serverId}/backups/{backupId}/restore": {
         parameters: {
             query?: never;
@@ -672,6 +730,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/nodes/{nodeId}/drain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                nodeId: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stop placing new workloads on a node */
+        post: operations["drainNode"];
+        /** Allow new workload placement on a node */
+        delete: operations["undrainNode"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agent-enrollment-tokens": {
         parameters: {
             query?: never;
@@ -703,6 +781,298 @@ export interface paths {
         get: operations["listGameDefinitions"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/bundle-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List configured signed catalog indexes */
+        get: operations["listBundleSources"];
+        put?: never;
+        /** Add an HTTPS signed catalog index */
+        post: operations["createBundleSource"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/bundle-trust-roots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Ed25519 publisher trust roots */
+        get: operations["listBundleTrustRoots"];
+        put?: never;
+        /** Add an Ed25519 publisher trust root */
+        post: operations["createBundleTrustRoot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/bundle-trust-roots/{keyId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke a trust root and block its revisions from new placement */
+        delete: operations["revokeBundleTrustRoot"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/bundle-revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List imported immutable Bundle revisions */
+        get: operations["listBundleRevisions"];
+        put?: never;
+        /** Verify and import a signed Bundle document as pending review */
+        post: operations["importBundleRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/bundle-revisions/{bundleId}/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bundleId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve, reject, or revoke an imported Bundle revision */
+        post: operations["reviewBundleRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List cron schedules */
+        get: operations["listSchedules"];
+        put?: never;
+        /** Create a timezone-aware cron schedule */
+        post: operations["createSchedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/schedules/{scheduleId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Disable and remove a cron schedule */
+        delete: operations["deleteSchedule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/schedules/{scheduleId}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        /** List immutable execution records for a schedule */
+        get: operations["listScheduleRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List in-app notifications */
+        get: operations["listNotifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/{notificationId}/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                notificationId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge an in-app notification */
+        post: operations["acknowledgeNotification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List HMAC-signed HTTPS webhook endpoints */
+        get: operations["listWebhooks"];
+        put?: never;
+        /** Create a webhook and return its HMAC secret once */
+        post: operations["createWebhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhooks/{webhookId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                webhookId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Queue a signed webhook test delivery */
+        post: operations["testWebhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read workspace quota limits */
+        get: operations["getQuota"];
+        /** Replace workspace quota limits */
+        put: operations["putQuota"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read aggregate fleet usage and limits */
+        get: operations["getCapacity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/outbox/dead-letters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List transactional events whose publish retries were exhausted */
+        get: operations["listOutboxDeadLetters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/outbox/dead-letters/{eventId}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                eventId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reset a dead letter for normal publisher retry */
+        post: operations["replayOutboxDeadLetter"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1083,6 +1453,11 @@ export interface components {
             condition: "available" | "offline" | "maintenance";
             version: string;
             region: string;
+            /** @description Agent-reported runtime architecture such as amd64 or arm64. */
+            architecture: string;
+            /** @description True when automatic placement must exclude this node. */
+            draining: boolean;
+            drainReason?: string;
             address: string;
             /** Format: date-time */
             lastHeartbeatAt: string;
@@ -1094,6 +1469,13 @@ export interface components {
             runningServers: number;
             totalServers: number;
             capabilities: string[];
+        };
+        NodeResponse: {
+            data: components["schemas"]["Node"];
+        };
+        DrainNodeRequest: {
+            /** @default  */
+            reason: string;
         };
         GameDefinition: {
             id: string;
@@ -1227,6 +1609,297 @@ export interface components {
              * @description Soft-delete timestamp retained for recovery and garbage collection.
              */
             deletedAt?: string | null;
+        };
+        BackupPolicy: {
+            serverId: components["schemas"]["Uuid"];
+            retentionDays: number;
+            maxCount: number;
+            protectManual: boolean;
+            enabled: boolean;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        BackupPolicyRequest: {
+            retentionDays: number;
+            maxCount: number;
+            protectManual: boolean;
+            enabled: boolean;
+        };
+        BackupPolicyResponse: {
+            data: components["schemas"]["BackupPolicy"];
+        };
+        ServerUpgradeRequest: {
+            bundleDigest: string;
+        };
+        BundleSource: {
+            id: components["schemas"]["Uuid"];
+            name: string;
+            /** Format: uri */
+            indexUrl: string;
+            official: boolean;
+            enabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        BundleSourceRequest: {
+            name: string;
+            /** Format: uri */
+            indexUrl: string;
+            official: boolean;
+            /** @default true */
+            enabled: boolean;
+        };
+        BundleSourceResponse: {
+            data: components["schemas"]["BundleSource"];
+        };
+        BundleSourceListResponse: {
+            data: components["schemas"]["BundleSource"][];
+        };
+        BundleTrustRoot: {
+            id: components["schemas"]["Uuid"];
+            keyId: string;
+            name: string;
+            /** @enum {string} */
+            source: "official" | "private" | "operator";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            revokedAt?: string;
+        };
+        BundleTrustRootRequest: {
+            name: string;
+            /** @description A single Ed25519 PKIX public key in PEM encoding. */
+            publicKeyPem: string;
+            /**
+             * @default private
+             * @enum {string}
+             */
+            source: "official" | "private" | "operator";
+        };
+        BundleTrustRootResponse: {
+            data: components["schemas"]["BundleTrustRoot"];
+        };
+        BundleTrustRootListResponse: {
+            data: components["schemas"]["BundleTrustRoot"][];
+        };
+        BundleRevision: {
+            id: components["schemas"]["Uuid"];
+            gameDefinitionId: string;
+            definitionVersion: string;
+            gameVersion: string;
+            digest: string;
+            /** @enum {string} */
+            schemaVersion: "v1beta1";
+            license: string;
+            signatureKeyId: string;
+            signatureVerified: boolean;
+            /** @enum {string} */
+            reviewStatus: "pending" | "approved" | "rejected" | "revoked";
+            /** Format: date-time */
+            publishedAt: string;
+            /** Format: date-time */
+            revokedAt?: string;
+        };
+        BundleImportRequest: {
+            /** @description Canonical signed GameDefinition v1beta1 Bundle document. */
+            document: {
+                [key: string]: unknown;
+            };
+        };
+        BundleRevisionResponse: {
+            data: components["schemas"]["BundleRevision"];
+        };
+        BundleRevisionListResponse: {
+            data: components["schemas"]["BundleRevision"][];
+        };
+        BundleReviewRequest: {
+            /** @enum {string} */
+            decision: "approved" | "rejected" | "revoked";
+            /** @default  */
+            reason: string;
+        };
+        BundleReview: {
+            id: components["schemas"]["Uuid"];
+            bundleId: components["schemas"]["Uuid"];
+            reviewerId?: components["schemas"]["Uuid"];
+            /** @enum {string} */
+            decision: "approved" | "rejected" | "revoked";
+            reason: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        BundleReviewResponse: {
+            data: components["schemas"]["BundleReview"];
+        };
+        Schedule: {
+            id: components["schemas"]["Uuid"];
+            serverId?: components["schemas"]["Uuid"];
+            name: string;
+            /** @enum {string} */
+            action: "backup" | "start" | "stop" | "restart" | "retention-cleanup";
+            cronExpression: string;
+            /** @description IANA timezone identifier. */
+            timezone: string;
+            enabled: boolean;
+            /** @enum {string} */
+            missedRunPolicy: "skip" | "run-once" | "catch-up";
+            /** @enum {string} */
+            concurrencyPolicy: "forbid" | "allow" | "replace";
+            /** Format: date-time */
+            nextRunAt: string | null;
+            /** Format: date-time */
+            lastScheduledAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ScheduleRequest: {
+            serverId?: components["schemas"]["Uuid"];
+            name: string;
+            /** @enum {string} */
+            action: "backup" | "start" | "stop" | "restart" | "retention-cleanup";
+            cronExpression: string;
+            /** @default UTC */
+            timezone: string;
+            /** @default true */
+            enabled: boolean;
+            /**
+             * @default skip
+             * @enum {string}
+             */
+            missedRunPolicy: "skip" | "run-once" | "catch-up";
+            /**
+             * @default forbid
+             * @enum {string}
+             */
+            concurrencyPolicy: "forbid" | "allow" | "replace";
+        };
+        ScheduleResponse: {
+            data: components["schemas"]["Schedule"];
+        };
+        ScheduleListResponse: {
+            data: components["schemas"]["Schedule"][];
+        };
+        ScheduleRun: {
+            id: components["schemas"]["Uuid"];
+            scheduleId: components["schemas"]["Uuid"];
+            /** Format: date-time */
+            scheduledFor: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "succeeded" | "failed" | "skipped";
+            operationId?: components["schemas"]["Uuid"];
+            failureCode?: string;
+            /** Format: date-time */
+            startedAt?: string;
+            /** Format: date-time */
+            completedAt?: string;
+        };
+        ScheduleRunListResponse: {
+            data: components["schemas"]["ScheduleRun"][];
+        };
+        Notification: {
+            id: components["schemas"]["Uuid"];
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            category: string;
+            title: string;
+            message: string;
+            targetType: string;
+            targetId: string;
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            acknowledgedAt?: string;
+        };
+        NotificationListResponse: {
+            data: components["schemas"]["Notification"][];
+        };
+        WebhookEndpoint: {
+            id: components["schemas"]["Uuid"];
+            name: string;
+            /** Format: uri */
+            url: string;
+            enabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        WebhookRequest: {
+            name: string;
+            /** Format: uri */
+            url: string;
+            /** @default true */
+            enabled: boolean;
+        };
+        WebhookListResponse: {
+            data: components["schemas"]["WebhookEndpoint"][];
+        };
+        WebhookCredentialResponse: {
+            data: components["schemas"]["WebhookEndpoint"] & {
+                /** @description One-time plaintext HMAC secret. */
+                secret: string;
+            };
+        };
+        WebhookTestResponse: {
+            data: {
+                deliveryId: components["schemas"]["Uuid"];
+            };
+        };
+        QuotaRequest: {
+            maxNodes: number;
+            maxServers: number;
+            maxMemoryBytes: number;
+            maxDiskBytes: number;
+            maxRunningServers: number;
+            maxConcurrentCreates: number;
+            maxConcurrentBackups: number;
+            maxConcurrentUploads: number;
+        };
+        Quota: components["schemas"]["QuotaRequest"] & {
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        QuotaResponse: {
+            data: components["schemas"]["Quota"];
+        };
+        Capacity: {
+            nodeCount: number;
+            serverCount: number;
+            runningServerCount: number;
+            totalMemoryBytes: number;
+            allocatedMemoryBytes: number;
+            totalDiskBytes: number;
+            allocatedDiskBytes: number;
+            quota: components["schemas"]["Quota"];
+        };
+        CapacityResponse: {
+            data: components["schemas"]["Capacity"];
+        };
+        OutboxDeadLetter: {
+            id: components["schemas"]["Uuid"];
+            aggregateType: string;
+            aggregateId: string;
+            eventType: string;
+            eventVersion: number;
+            payload: {
+                [key: string]: unknown;
+            };
+            publishAttempts: number;
+            lastError: string;
+            /** Format: date-time */
+            businessAt: string;
+            /** Format: date-time */
+            deadLetteredAt: string;
+        };
+        OutboxDeadLetterListResponse: {
+            data: components["schemas"]["OutboxDeadLetter"][];
         };
         AuditEvent: {
             id: components["schemas"]["Uuid"];
@@ -1994,6 +2667,79 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
+    upgradeServerBundle: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+                /** @description Numeric server generation read before submitting the mutation. */
+                "If-Match": components["parameters"]["IfMatchGeneration"];
+            };
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ServerUpgradeRequest"];
+            };
+        };
+        responses: {
+            /** @description Bundle reconciliation accepted or idempotently reused */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            412: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+        };
+    };
+    rollbackServerBundle: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+                /** @description Numeric server generation read before submitting the mutation. */
+                "If-Match": components["parameters"]["IfMatchGeneration"];
+            };
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bundle rollback accepted or idempotently reused */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            412: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+        };
+    };
     listServerAllocations: {
         parameters: {
             query?: never;
@@ -2551,6 +3297,64 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
+    getServerBackupPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server backup policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupPolicyResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    putServerBackupPolicy: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated server backup policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupPolicyResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
     restoreServerBackup: {
         parameters: {
             query?: never;
@@ -2692,6 +3496,66 @@ export interface operations {
             404: components["responses"]["Error"];
         };
     };
+    drainNode: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                nodeId: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DrainNodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Node marked as draining */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    undrainNode: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                nodeId: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Node no longer draining */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
     issueAgentEnrollmentToken: {
         parameters: {
             query?: never;
@@ -2751,6 +3615,575 @@ export interface operations {
                 };
             };
             401: components["responses"]["Error"];
+        };
+    };
+    listBundleSources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bundle catalog sources */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleSourceListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createBundleSource: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BundleSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description Bundle source created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleSourceResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    listBundleTrustRoots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trust roots including revocation timestamps */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleTrustRootListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createBundleTrustRoot: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BundleTrustRootRequest"];
+            };
+        };
+        responses: {
+            /** @description Trust root created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleTrustRootResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    revokeBundleTrustRoot: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trust root and affected revisions revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listBundleRevisions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bundle revisions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleRevisionListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    importBundleRevision: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BundleImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified Bundle revision imported for review */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleRevisionResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    reviewBundleRevision: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                bundleId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BundleReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Review decision recorded */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BundleReviewResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    listSchedules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Schedules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createSchedule: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Schedule created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    deleteSchedule: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                scheduleId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Schedule deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listScheduleRuns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scheduleId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Schedule runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleRunListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listNotifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Notifications ordered newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+        };
+    };
+    acknowledgeNotification: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                notificationId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Notification acknowledged */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    listWebhooks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Webhook endpoints without secrets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createWebhook: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookRequest"];
+            };
+        };
+        responses: {
+            /** @description Webhook credential; plaintext secret is returned exactly once */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookCredentialResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    testWebhook: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                webhookId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Test delivery queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookTestResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+        };
+    };
+    getQuota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace quota */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    putQuota: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuotaRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated workspace quota */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    getCapacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Fleet capacity snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapacityResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    listOutboxDeadLetters: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Outbox dead letters */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutboxDeadLetterListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    replayOutboxDeadLetter: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                eventId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Event returned to the publish queue */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
         };
     };
     listOperations: {

@@ -23,6 +23,14 @@ tags:
     description: Registered node snapshots and capacity.
   - name: Catalog
     description: Approved GameDefinition and Bundle catalog entries.
+  - name: Automation
+    description: Backup policies, cron schedules, and their immutable execution history.
+  - name: Notifications
+    description: In-app notifications and HMAC-signed HTTPS webhook endpoints.
+  - name: Capacity
+    description: Workspace quota, fleet capacity, and node drain controls.
+  - name: Outbox
+    description: Administrator inspection and replay of exhausted transactional events.
   - name: Audit
     description: Append-only development audit events.
 paths:
@@ -499,6 +507,60 @@ paths:
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/upgrade:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Catalog]
+      operationId: upgradeServerBundle
+      summary: Reconcile a server to an approved immutable Bundle revision
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ServerUpgradeRequest'}
+      responses:
+        '202':
+          description: Bundle reconciliation accepted or idempotently reused
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/rollback:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Catalog]
+      operationId: rollbackServerBundle
+      summary: Reconcile a server to its last applied Bundle revision
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      responses:
+        '202':
+          description: Bundle rollback accepted or idempotently reused
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /servers/{serverId}/allocations:
     parameters:
       - $ref: '#/components/parameters/ServerId'
@@ -916,6 +978,44 @@ paths:
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/backup-policy:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      tags: [Automation]
+      operationId: getServerBackupPolicy
+      summary: Read automatic retention settings for a server
+      responses:
+        '200':
+          description: Server backup policy
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackupPolicyResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Automation]
+      operationId: putServerBackupPolicy
+      summary: Replace automatic retention settings for a server
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BackupPolicyRequest'}
+      responses:
+        '200':
+          description: Updated server backup policy
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackupPolicyResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /servers/{serverId}/backups/{backupId}/restore:
     parameters:
       - $ref: '#/components/parameters/ServerId'
@@ -1018,6 +1118,46 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+  /nodes/{nodeId}/drain:
+    parameters:
+      - $ref: '#/components/parameters/NodeId'
+    post:
+      tags: [Capacity]
+      operationId: drainNode
+      summary: Stop placing new workloads on a node
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DrainNodeRequest'}
+      responses:
+        '200':
+          description: Node marked as draining
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NodeResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Capacity]
+      operationId: undrainNode
+      summary: Allow new workload placement on a node
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: Node no longer draining
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NodeResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /agent-enrollment-tokens:
     post:
       tags: [Nodes]
@@ -1072,6 +1212,391 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/GameDefinition'}
         '401': {$ref: '#/components/responses/Error'}
+  /bundle-sources:
+    get:
+      tags: [Catalog]
+      operationId: listBundleSources
+      summary: List configured signed catalog indexes
+      responses:
+        '200':
+          description: Bundle catalog sources
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleSourceListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Catalog]
+      operationId: createBundleSource
+      summary: Add an HTTPS signed catalog index
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BundleSourceRequest'}
+      responses:
+        '201':
+          description: Bundle source created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleSourceResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /bundle-trust-roots:
+    get:
+      tags: [Catalog]
+      operationId: listBundleTrustRoots
+      summary: List Ed25519 publisher trust roots
+      responses:
+        '200':
+          description: Trust roots including revocation timestamps
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleTrustRootListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Catalog]
+      operationId: createBundleTrustRoot
+      summary: Add an Ed25519 publisher trust root
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BundleTrustRootRequest'}
+      responses:
+        '201':
+          description: Trust root created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleTrustRootResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /bundle-trust-roots/{keyId}:
+    parameters:
+      - name: keyId
+        in: path
+        required: true
+        schema: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    delete:
+      tags: [Catalog]
+      operationId: revokeBundleTrustRoot
+      summary: Revoke a trust root and block its revisions from new placement
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Trust root and affected revisions revoked}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /bundle-revisions:
+    get:
+      tags: [Catalog]
+      operationId: listBundleRevisions
+      summary: List imported immutable Bundle revisions
+      responses:
+        '200':
+          description: Bundle revisions
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleRevisionListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Catalog]
+      operationId: importBundleRevision
+      summary: Verify and import a signed Bundle document as pending review
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BundleImportRequest'}
+      responses:
+        '201':
+          description: Verified Bundle revision imported for review
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleRevisionResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /bundle-revisions/{bundleId}/reviews:
+    parameters:
+      - name: bundleId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    post:
+      tags: [Catalog]
+      operationId: reviewBundleRevision
+      summary: Approve, reject, or revoke an imported Bundle revision
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BundleReviewRequest'}
+      responses:
+        '201':
+          description: Review decision recorded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BundleReviewResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /schedules:
+    get:
+      tags: [Automation]
+      operationId: listSchedules
+      summary: List cron schedules
+      responses:
+        '200':
+          description: Schedules
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduleListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Automation]
+      operationId: createSchedule
+      summary: Create a timezone-aware cron schedule
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScheduleRequest'}
+      responses:
+        '201':
+          description: Schedule created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduleResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /schedules/{scheduleId}:
+    parameters:
+      - name: scheduleId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    delete:
+      tags: [Automation]
+      operationId: deleteSchedule
+      summary: Disable and remove a cron schedule
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Schedule deleted}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /schedules/{scheduleId}/runs:
+    parameters:
+      - name: scheduleId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    get:
+      tags: [Automation]
+      operationId: listScheduleRuns
+      summary: List immutable execution records for a schedule
+      responses:
+        '200':
+          description: Schedule runs
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScheduleRunListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: List in-app notifications
+      responses:
+        '200':
+          description: Notifications ordered newest first
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+  /notifications/{notificationId}/acknowledge:
+    parameters:
+      - name: notificationId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    post:
+      tags: [Notifications]
+      operationId: acknowledgeNotification
+      summary: Acknowledge an in-app notification
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Notification acknowledged}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /webhooks:
+    get:
+      tags: [Notifications]
+      operationId: listWebhooks
+      summary: List HMAC-signed HTTPS webhook endpoints
+      responses:
+        '200':
+          description: Webhook endpoints without secrets
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Notifications]
+      operationId: createWebhook
+      summary: Create a webhook and return its HMAC secret once
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WebhookRequest'}
+      responses:
+        '201':
+          description: Webhook credential; plaintext secret is returned exactly once
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookCredentialResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /webhooks/{webhookId}/test:
+    parameters:
+      - name: webhookId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    post:
+      tags: [Notifications]
+      operationId: testWebhook
+      summary: Queue a signed webhook test delivery
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          description: Test delivery queued
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookTestResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /quota:
+    get:
+      tags: [Capacity]
+      operationId: getQuota
+      summary: Read workspace quota limits
+      responses:
+        '200':
+          description: Workspace quota
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QuotaResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Capacity]
+      operationId: putQuota
+      summary: Replace workspace quota limits
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/QuotaRequest'}
+      responses:
+        '200':
+          description: Updated workspace quota
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QuotaResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /capacity:
+    get:
+      tags: [Capacity]
+      operationId: getCapacity
+      summary: Read aggregate fleet usage and limits
+      responses:
+        '200':
+          description: Fleet capacity snapshot
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CapacityResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /outbox/dead-letters:
+    get:
+      tags: [Outbox]
+      operationId: listOutboxDeadLetters
+      summary: List transactional events whose publish retries were exhausted
+      responses:
+        '200':
+          description: Outbox dead letters
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OutboxDeadLetterListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /outbox/dead-letters/{eventId}/replay:
+    parameters:
+      - name: eventId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    post:
+      tags: [Outbox]
+      operationId: replayOutboxDeadLetter
+      summary: Reset a dead letter for normal publisher retry
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Event returned to the publish queue}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /operations:
     get:
       tags: [Servers]
@@ -1709,13 +2234,16 @@ components:
             nextCursor: {type: [string, 'null']}
     Node:
       type: object
-      required: [id, name, condition, version, region, address, lastHeartbeatAt, cpuCores, memoryBytes, diskBytes, allocatedMemoryBytes, allocatedDiskBytes, runningServers, totalServers, capabilities]
+      required: [id, name, condition, version, region, architecture, draining, address, lastHeartbeatAt, cpuCores, memoryBytes, diskBytes, allocatedMemoryBytes, allocatedDiskBytes, runningServers, totalServers, capabilities]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         name: {type: string}
         condition: {type: string, enum: [available, offline, maintenance]}
         version: {type: string}
         region: {type: string}
+        architecture: {type: string, description: Agent-reported runtime architecture such as amd64 or arm64.}
+        draining: {type: boolean, description: True when automatic placement must exclude this node.}
+        drainReason: {type: string, maxLength: 500}
         address: {type: string}
         lastHeartbeatAt: {type: string, format: date-time}
         cpuCores: {type: integer}
@@ -1728,6 +2256,16 @@ components:
         capabilities:
           type: array
           items: {type: string}
+    NodeResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Node'}
+    DrainNodeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason: {type: string, maxLength: 500, default: ''}
     GameDefinition:
       type: object
       required: [id, bundleDigest, name, summary, version, gameVersion, status, capabilities, platforms, servers, icon, defaultMemoryMb, defaultDiskGb, signed, verified, runnable, supported, trustLevel, source, supportReasons, runtimeTarget]
@@ -1891,6 +2429,359 @@ components:
         failureCode: {type: [string, 'null'], description: Stable machine-readable failure code for the latest failed transition.}
         failureMessage: {type: [string, 'null'], description: Safe operator-facing explanation for the latest failed transition.}
         deletedAt: {type: [string, 'null'], format: date-time, description: Soft-delete timestamp retained for recovery and garbage collection.}
+    BackupPolicy:
+      type: object
+      additionalProperties: false
+      required: [serverId, retentionDays, maxCount, protectManual, enabled, updatedAt]
+      properties:
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        retentionDays: {type: integer, minimum: 1, maximum: 3650}
+        maxCount: {type: integer, minimum: 1, maximum: 1000}
+        protectManual: {type: boolean}
+        enabled: {type: boolean}
+        updatedAt: {type: string, format: date-time}
+    BackupPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [retentionDays, maxCount, protectManual, enabled]
+      properties:
+        retentionDays: {type: integer, minimum: 1, maximum: 3650}
+        maxCount: {type: integer, minimum: 1, maximum: 1000}
+        protectManual: {type: boolean}
+        enabled: {type: boolean}
+    BackupPolicyResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/BackupPolicy'}
+    ServerUpgradeRequest:
+      type: object
+      additionalProperties: false
+      required: [bundleDigest]
+      properties:
+        bundleDigest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    BundleSource:
+      type: object
+      additionalProperties: false
+      required: [id, name, indexUrl, official, enabled, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        indexUrl: {type: string, format: uri, pattern: '^https://'}
+        official: {type: boolean}
+        enabled: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    BundleSourceRequest:
+      type: object
+      additionalProperties: false
+      required: [name, indexUrl, official]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        indexUrl: {type: string, format: uri, pattern: '^https://'}
+        official: {type: boolean}
+        enabled: {type: boolean, default: true}
+    BundleSourceResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/BundleSource'}
+    BundleSourceListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/BundleSource'}
+    BundleTrustRoot:
+      type: object
+      additionalProperties: false
+      required: [id, keyId, name, source, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        keyId: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        source: {type: string, enum: [official, private, operator]}
+        createdAt: {type: string, format: date-time}
+        revokedAt: {type: string, format: date-time}
+    BundleTrustRootRequest:
+      type: object
+      additionalProperties: false
+      required: [name, publicKeyPem]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        publicKeyPem: {type: string, minLength: 1, description: A single Ed25519 PKIX public key in PEM encoding.}
+        source: {type: string, enum: [official, private, operator], default: private}
+    BundleTrustRootResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/BundleTrustRoot'}
+    BundleTrustRootListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/BundleTrustRoot'}
+    BundleRevision:
+      type: object
+      additionalProperties: false
+      required: [id, gameDefinitionId, definitionVersion, gameVersion, digest, schemaVersion, license, signatureKeyId, signatureVerified, reviewStatus, publishedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        gameDefinitionId: {type: string, minLength: 1}
+        definitionVersion: {type: string, minLength: 1}
+        gameVersion: {type: string, minLength: 1}
+        digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        schemaVersion: {type: string, enum: [v1beta1]}
+        license: {type: string, minLength: 1}
+        signatureKeyId: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        signatureVerified: {type: boolean}
+        reviewStatus: {type: string, enum: [pending, approved, rejected, revoked]}
+        publishedAt: {type: string, format: date-time}
+        revokedAt: {type: string, format: date-time}
+    BundleImportRequest:
+      type: object
+      additionalProperties: false
+      required: [document]
+      properties:
+        document:
+          type: object
+          additionalProperties: true
+          description: Canonical signed GameDefinition v1beta1 Bundle document.
+    BundleRevisionResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/BundleRevision'}
+    BundleRevisionListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/BundleRevision'}
+    BundleReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: {type: string, enum: [approved, rejected, revoked]}
+        reason: {type: string, maxLength: 2000, default: ''}
+    BundleReview:
+      type: object
+      additionalProperties: false
+      required: [id, bundleId, decision, reason, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        bundleId: {$ref: '#/components/schemas/Uuid'}
+        reviewerId: {$ref: '#/components/schemas/Uuid'}
+        decision: {type: string, enum: [approved, rejected, revoked]}
+        reason: {type: string, maxLength: 2000}
+        createdAt: {type: string, format: date-time}
+    BundleReviewResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/BundleReview'}
+    Schedule:
+      type: object
+      additionalProperties: false
+      required: [id, name, action, cronExpression, timezone, enabled, missedRunPolicy, concurrencyPolicy, nextRunAt, lastScheduledAt, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        action: {type: string, enum: [backup, start, stop, restart, retention-cleanup]}
+        cronExpression: {type: string, minLength: 1}
+        timezone: {type: string, minLength: 1, description: IANA timezone identifier.}
+        enabled: {type: boolean}
+        missedRunPolicy: {type: string, enum: [skip, run-once, catch-up]}
+        concurrencyPolicy: {type: string, enum: [forbid, allow, replace]}
+        nextRunAt: {type: [string, 'null'], format: date-time}
+        lastScheduledAt: {type: [string, 'null'], format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    ScheduleRequest:
+      type: object
+      additionalProperties: false
+      required: [name, action, cronExpression]
+      properties:
+        serverId: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        action: {type: string, enum: [backup, start, stop, restart, retention-cleanup]}
+        cronExpression: {type: string, minLength: 1}
+        timezone: {type: string, default: UTC}
+        enabled: {type: boolean, default: true}
+        missedRunPolicy: {type: string, enum: [skip, run-once, catch-up], default: skip}
+        concurrencyPolicy: {type: string, enum: [forbid, allow, replace], default: forbid}
+    ScheduleResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Schedule'}
+    ScheduleListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Schedule'}
+    ScheduleRun:
+      type: object
+      additionalProperties: false
+      required: [id, scheduleId, scheduledFor, status]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        scheduleId: {$ref: '#/components/schemas/Uuid'}
+        scheduledFor: {type: string, format: date-time}
+        status: {type: string, enum: [queued, running, succeeded, failed, skipped]}
+        operationId: {$ref: '#/components/schemas/Uuid'}
+        failureCode: {type: string}
+        startedAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time}
+    ScheduleRunListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/ScheduleRun'}
+    Notification:
+      type: object
+      additionalProperties: false
+      required: [id, severity, category, title, message, targetType, targetId, metadata, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        severity: {type: string, enum: [info, warning, critical]}
+        category: {type: string}
+        title: {type: string}
+        message: {type: string}
+        targetType: {type: string}
+        targetId: {type: string}
+        metadata: {type: object, additionalProperties: true}
+        createdAt: {type: string, format: date-time}
+        acknowledgedAt: {type: string, format: date-time}
+    NotificationListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Notification'}
+    WebhookEndpoint:
+      type: object
+      additionalProperties: false
+      required: [id, name, url, enabled, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        url: {type: string, format: uri, pattern: '^https://'}
+        enabled: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    WebhookRequest:
+      type: object
+      additionalProperties: false
+      required: [name, url]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        url: {type: string, format: uri, pattern: '^https://'}
+        enabled: {type: boolean, default: true}
+    WebhookListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/WebhookEndpoint'}
+    WebhookCredentialResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          allOf:
+            - $ref: '#/components/schemas/WebhookEndpoint'
+            - type: object
+              required: [secret]
+              properties:
+                secret: {type: string, minLength: 64, maxLength: 64, description: One-time plaintext HMAC secret.}
+    WebhookTestResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [deliveryId]
+          properties:
+            deliveryId: {$ref: '#/components/schemas/Uuid'}
+    QuotaRequest:
+      type: object
+      additionalProperties: false
+      required: [maxNodes, maxServers, maxMemoryBytes, maxDiskBytes, maxRunningServers, maxConcurrentCreates, maxConcurrentBackups, maxConcurrentUploads]
+      properties:
+        maxNodes: {type: integer, minimum: 1}
+        maxServers: {type: integer, minimum: 1}
+        maxMemoryBytes: {type: integer, minimum: 1}
+        maxDiskBytes: {type: integer, minimum: 1}
+        maxRunningServers: {type: integer, minimum: 1}
+        maxConcurrentCreates: {type: integer, minimum: 1}
+        maxConcurrentBackups: {type: integer, minimum: 1}
+        maxConcurrentUploads: {type: integer, minimum: 1}
+    Quota:
+      allOf:
+        - $ref: '#/components/schemas/QuotaRequest'
+        - type: object
+          required: [updatedAt]
+          properties:
+            updatedAt: {type: string, format: date-time}
+    QuotaResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Quota'}
+    Capacity:
+      type: object
+      additionalProperties: false
+      required: [nodeCount, serverCount, runningServerCount, totalMemoryBytes, allocatedMemoryBytes, totalDiskBytes, allocatedDiskBytes, quota]
+      properties:
+        nodeCount: {type: integer, minimum: 0}
+        serverCount: {type: integer, minimum: 0}
+        runningServerCount: {type: integer, minimum: 0}
+        totalMemoryBytes: {type: integer, minimum: 0}
+        allocatedMemoryBytes: {type: integer, minimum: 0}
+        totalDiskBytes: {type: integer, minimum: 0}
+        allocatedDiskBytes: {type: integer, minimum: 0}
+        quota: {$ref: '#/components/schemas/Quota'}
+    CapacityResponse:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: '#/components/schemas/Capacity'}
+    OutboxDeadLetter:
+      type: object
+      additionalProperties: false
+      required: [id, aggregateType, aggregateId, eventType, eventVersion, payload, publishAttempts, lastError, businessAt, deadLetteredAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        aggregateType: {type: string}
+        aggregateId: {type: string}
+        eventType: {type: string}
+        eventVersion: {type: integer, minimum: 1}
+        payload: {type: object, additionalProperties: true}
+        publishAttempts: {type: integer, minimum: 0}
+        lastError: {type: string}
+        businessAt: {type: string, format: date-time}
+        deadLetteredAt: {type: string, format: date-time}
+    OutboxDeadLetterListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/OutboxDeadLetter'}
     AuditEvent:
       type: object
       required: [id, actorName, action, targetType, targetName, result, operationId, createdAt]

@@ -1277,6 +1277,7 @@ type Task struct {
 	//	*Task_Backup
 	//	*Task_Extension
 	//	*Task_Reconcile
+	//	*Task_Migration
 	Payload       isTask_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1451,6 +1452,15 @@ func (x *Task) GetReconcile() *ReconcileTaskPayload {
 	return nil
 }
 
+func (x *Task) GetMigration() *MigrationTaskPayload {
+	if x != nil {
+		if x, ok := x.Payload.(*Task_Migration); ok {
+			return x.Migration
+		}
+	}
+	return nil
+}
+
 type isTask_Payload interface {
 	isTask_Payload()
 }
@@ -1482,6 +1492,10 @@ type Task_Reconcile struct {
 	Reconcile *ReconcileTaskPayload `protobuf:"bytes,17,opt,name=reconcile,proto3,oneof"`
 }
 
+type Task_Migration struct {
+	Migration *MigrationTaskPayload `protobuf:"bytes,18,opt,name=migration,proto3,oneof"`
+}
+
 func (*Task_PayloadJson) isTask_Payload() {}
 
 func (*Task_Provision) isTask_Payload() {}
@@ -1493,6 +1507,8 @@ func (*Task_Backup) isTask_Payload() {}
 func (*Task_Extension) isTask_Payload() {}
 
 func (*Task_Reconcile) isTask_Payload() {}
+
+func (*Task_Migration) isTask_Payload() {}
 
 type CapabilityRequirement struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
@@ -2417,6 +2433,127 @@ func (x *ExtensionTaskPayload) GetValue() []byte {
 	return nil
 }
 
+// Migration tasks are deliberately narrow. Data transfer uses the signed,
+// encrypted Object Backup flow; this payload only retires the fenced source
+// runtime after the target has restored and passed health checks.
+type MigrationTaskPayload struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Action:
+	//
+	//	*MigrationTaskPayload_CleanupSource
+	Action        isMigrationTaskPayload_Action `protobuf_oneof:"action"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MigrationTaskPayload) Reset() {
+	*x = MigrationTaskPayload{}
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrationTaskPayload) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrationTaskPayload) ProtoMessage() {}
+
+func (x *MigrationTaskPayload) ProtoReflect() protoreflect.Message {
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrationTaskPayload.ProtoReflect.Descriptor instead.
+func (*MigrationTaskPayload) Descriptor() ([]byte, []int) {
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *MigrationTaskPayload) GetAction() isMigrationTaskPayload_Action {
+	if x != nil {
+		return x.Action
+	}
+	return nil
+}
+
+func (x *MigrationTaskPayload) GetCleanupSource() *CleanupMigrationSource {
+	if x != nil {
+		if x, ok := x.Action.(*MigrationTaskPayload_CleanupSource); ok {
+			return x.CleanupSource
+		}
+	}
+	return nil
+}
+
+type isMigrationTaskPayload_Action interface {
+	isMigrationTaskPayload_Action()
+}
+
+type MigrationTaskPayload_CleanupSource struct {
+	CleanupSource *CleanupMigrationSource `protobuf:"bytes,1,opt,name=cleanup_source,json=cleanupSource,proto3,oneof"`
+}
+
+func (*MigrationTaskPayload_CleanupSource) isMigrationTaskPayload_Action() {}
+
+type CleanupMigrationSource struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	MigrationId      string                 `protobuf:"bytes,1,opt,name=migration_id,json=migrationId,proto3" json:"migration_id,omitempty"`
+	RemoveDataVolume bool                   `protobuf:"varint,2,opt,name=remove_data_volume,json=removeDataVolume,proto3" json:"remove_data_volume,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *CleanupMigrationSource) Reset() {
+	*x = CleanupMigrationSource{}
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CleanupMigrationSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CleanupMigrationSource) ProtoMessage() {}
+
+func (x *CleanupMigrationSource) ProtoReflect() protoreflect.Message {
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CleanupMigrationSource.ProtoReflect.Descriptor instead.
+func (*CleanupMigrationSource) Descriptor() ([]byte, []int) {
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *CleanupMigrationSource) GetMigrationId() string {
+	if x != nil {
+		return x.MigrationId
+	}
+	return ""
+}
+
+func (x *CleanupMigrationSource) GetRemoveDataVolume() bool {
+	if x != nil {
+		return x.RemoveDataVolume
+	}
+	return false
+}
+
 type TaskAck struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
@@ -2432,7 +2569,7 @@ type TaskAck struct {
 
 func (x *TaskAck) Reset() {
 	*x = TaskAck{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[24]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2444,7 +2581,7 @@ func (x *TaskAck) String() string {
 func (*TaskAck) ProtoMessage() {}
 
 func (x *TaskAck) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[24]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2457,7 +2594,7 @@ func (x *TaskAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskAck.ProtoReflect.Descriptor instead.
 func (*TaskAck) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *TaskAck) GetOperationId() string {
@@ -2518,7 +2655,7 @@ type TaskProgress struct {
 
 func (x *TaskProgress) Reset() {
 	*x = TaskProgress{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[25]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2530,7 +2667,7 @@ func (x *TaskProgress) String() string {
 func (*TaskProgress) ProtoMessage() {}
 
 func (x *TaskProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[25]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2543,7 +2680,7 @@ func (x *TaskProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskProgress.ProtoReflect.Descriptor instead.
 func (*TaskProgress) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *TaskProgress) GetOperationId() string {
@@ -2612,7 +2749,7 @@ type TaskResult struct {
 
 func (x *TaskResult) Reset() {
 	*x = TaskResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[26]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2624,7 +2761,7 @@ func (x *TaskResult) String() string {
 func (*TaskResult) ProtoMessage() {}
 
 func (x *TaskResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[26]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2637,7 +2774,7 @@ func (x *TaskResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskResult.ProtoReflect.Descriptor instead.
 func (*TaskResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{26}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *TaskResult) GetOperationId() string {
@@ -2708,7 +2845,7 @@ type LogBatch struct {
 
 func (x *LogBatch) Reset() {
 	*x = LogBatch{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2720,7 +2857,7 @@ func (x *LogBatch) String() string {
 func (*LogBatch) ProtoMessage() {}
 
 func (x *LogBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2733,7 +2870,7 @@ func (x *LogBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogBatch.ProtoReflect.Descriptor instead.
 func (*LogBatch) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *LogBatch) GetServerId() string {
@@ -2780,7 +2917,7 @@ type ServerObserved struct {
 
 func (x *ServerObserved) Reset() {
 	*x = ServerObserved{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2792,7 +2929,7 @@ func (x *ServerObserved) String() string {
 func (*ServerObserved) ProtoMessage() {}
 
 func (x *ServerObserved) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2805,7 +2942,7 @@ func (x *ServerObserved) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerObserved.ProtoReflect.Descriptor instead.
 func (*ServerObserved) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ServerObserved) GetServerId() string {
@@ -2880,7 +3017,7 @@ type RunningTaskHeartbeat struct {
 
 func (x *RunningTaskHeartbeat) Reset() {
 	*x = RunningTaskHeartbeat{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2892,7 +3029,7 @@ func (x *RunningTaskHeartbeat) String() string {
 func (*RunningTaskHeartbeat) ProtoMessage() {}
 
 func (x *RunningTaskHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2905,7 +3042,7 @@ func (x *RunningTaskHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunningTaskHeartbeat.ProtoReflect.Descriptor instead.
 func (*RunningTaskHeartbeat) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *RunningTaskHeartbeat) GetOperationId() string {
@@ -2968,7 +3105,7 @@ type MetricsBatch struct {
 
 func (x *MetricsBatch) Reset() {
 	*x = MetricsBatch{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2980,7 +3117,7 @@ func (x *MetricsBatch) String() string {
 func (*MetricsBatch) ProtoMessage() {}
 
 func (x *MetricsBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2993,7 +3130,7 @@ func (x *MetricsBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsBatch.ProtoReflect.Descriptor instead.
 func (*MetricsBatch) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *MetricsBatch) GetObservedAt() *timestamppb.Timestamp {
@@ -3036,7 +3173,7 @@ type ServerMetrics struct {
 
 func (x *ServerMetrics) Reset() {
 	*x = ServerMetrics{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3048,7 +3185,7 @@ func (x *ServerMetrics) String() string {
 func (*ServerMetrics) ProtoMessage() {}
 
 func (x *ServerMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3061,7 +3198,7 @@ func (x *ServerMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMetrics.ProtoReflect.Descriptor instead.
 func (*ServerMetrics) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ServerMetrics) GetServerId() string {
@@ -3155,7 +3292,7 @@ type EnrollRequest struct {
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3167,7 +3304,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3180,7 +3317,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *EnrollRequest) GetRegistrationToken() string {
@@ -3233,7 +3370,7 @@ type EnrollResponse struct {
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3245,7 +3382,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3258,7 +3395,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *EnrollResponse) GetNodeId() string {
@@ -3298,7 +3435,7 @@ type RotateCertificate struct {
 
 func (x *RotateCertificate) Reset() {
 	*x = RotateCertificate{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3310,7 +3447,7 @@ func (x *RotateCertificate) String() string {
 func (*RotateCertificate) ProtoMessage() {}
 
 func (x *RotateCertificate) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3323,7 +3460,7 @@ func (x *RotateCertificate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RotateCertificate.ProtoReflect.Descriptor instead.
 func (*RotateCertificate) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{34}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *RotateCertificate) GetRotateBefore() *timestamppb.Timestamp {
@@ -3345,7 +3482,7 @@ type CertificateSigningRequest struct {
 
 func (x *CertificateSigningRequest) Reset() {
 	*x = CertificateSigningRequest{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3357,7 +3494,7 @@ func (x *CertificateSigningRequest) String() string {
 func (*CertificateSigningRequest) ProtoMessage() {}
 
 func (x *CertificateSigningRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3370,7 +3507,7 @@ func (x *CertificateSigningRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertificateSigningRequest.ProtoReflect.Descriptor instead.
 func (*CertificateSigningRequest) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{35}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *CertificateSigningRequest) GetRequestId() string {
@@ -3409,7 +3546,7 @@ type CertificateResponse struct {
 
 func (x *CertificateResponse) Reset() {
 	*x = CertificateResponse{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3421,7 +3558,7 @@ func (x *CertificateResponse) String() string {
 func (*CertificateResponse) ProtoMessage() {}
 
 func (x *CertificateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3434,7 +3571,7 @@ func (x *CertificateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertificateResponse.ProtoReflect.Descriptor instead.
 func (*CertificateResponse) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{36}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *CertificateResponse) GetRequestId() string {
@@ -3474,7 +3611,7 @@ type Drain struct {
 
 func (x *Drain) Reset() {
 	*x = Drain{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[37]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3486,7 +3623,7 @@ func (x *Drain) String() string {
 func (*Drain) ProtoMessage() {}
 
 func (x *Drain) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[37]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3499,7 +3636,7 @@ func (x *Drain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Drain.ProtoReflect.Descriptor instead.
 func (*Drain) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{37}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *Drain) GetReason() string {
@@ -3532,7 +3669,7 @@ type FileOperationRequest struct {
 
 func (x *FileOperationRequest) Reset() {
 	*x = FileOperationRequest{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[38]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3544,7 +3681,7 @@ func (x *FileOperationRequest) String() string {
 func (*FileOperationRequest) ProtoMessage() {}
 
 func (x *FileOperationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[38]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3557,7 +3694,7 @@ func (x *FileOperationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileOperationRequest.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *FileOperationRequest) GetRequestId() string {
@@ -3728,7 +3865,7 @@ type FileOperationResponse struct {
 
 func (x *FileOperationResponse) Reset() {
 	*x = FileOperationResponse{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[39]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3740,7 +3877,7 @@ func (x *FileOperationResponse) String() string {
 func (*FileOperationResponse) ProtoMessage() {}
 
 func (x *FileOperationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[39]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3753,7 +3890,7 @@ func (x *FileOperationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileOperationResponse.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *FileOperationResponse) GetRequestId() string {
@@ -3917,7 +4054,7 @@ type FileOperationRequest_ListFilesInput struct {
 
 func (x *FileOperationRequest_ListFilesInput) Reset() {
 	*x = FileOperationRequest_ListFilesInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[42]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3929,7 +4066,7 @@ func (x *FileOperationRequest_ListFilesInput) String() string {
 func (*FileOperationRequest_ListFilesInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_ListFilesInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[42]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3942,7 +4079,7 @@ func (x *FileOperationRequest_ListFilesInput) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use FileOperationRequest_ListFilesInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_ListFilesInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 0}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 0}
 }
 
 func (x *FileOperationRequest_ListFilesInput) GetPath() string {
@@ -3961,7 +4098,7 @@ type FileOperationRequest_ReadFileInput struct {
 
 func (x *FileOperationRequest_ReadFileInput) Reset() {
 	*x = FileOperationRequest_ReadFileInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[43]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3973,7 +4110,7 @@ func (x *FileOperationRequest_ReadFileInput) String() string {
 func (*FileOperationRequest_ReadFileInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_ReadFileInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[43]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3986,7 +4123,7 @@ func (x *FileOperationRequest_ReadFileInput) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use FileOperationRequest_ReadFileInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_ReadFileInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 1}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 1}
 }
 
 func (x *FileOperationRequest_ReadFileInput) GetPath() string {
@@ -4007,7 +4144,7 @@ type FileOperationRequest_WriteFileInput struct {
 
 func (x *FileOperationRequest_WriteFileInput) Reset() {
 	*x = FileOperationRequest_WriteFileInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[44]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4019,7 +4156,7 @@ func (x *FileOperationRequest_WriteFileInput) String() string {
 func (*FileOperationRequest_WriteFileInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_WriteFileInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[44]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4032,7 +4169,7 @@ func (x *FileOperationRequest_WriteFileInput) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use FileOperationRequest_WriteFileInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_WriteFileInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 2}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 2}
 }
 
 func (x *FileOperationRequest_WriteFileInput) GetPath() string {
@@ -4065,7 +4202,7 @@ type FileOperationRequest_MakeDirectoryInput struct {
 
 func (x *FileOperationRequest_MakeDirectoryInput) Reset() {
 	*x = FileOperationRequest_MakeDirectoryInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[45]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4077,7 +4214,7 @@ func (x *FileOperationRequest_MakeDirectoryInput) String() string {
 func (*FileOperationRequest_MakeDirectoryInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_MakeDirectoryInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[45]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4090,7 +4227,7 @@ func (x *FileOperationRequest_MakeDirectoryInput) ProtoReflect() protoreflect.Me
 
 // Deprecated: Use FileOperationRequest_MakeDirectoryInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_MakeDirectoryInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 3}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 3}
 }
 
 func (x *FileOperationRequest_MakeDirectoryInput) GetPath() string {
@@ -4111,7 +4248,7 @@ type FileOperationRequest_MoveFileInput struct {
 
 func (x *FileOperationRequest_MoveFileInput) Reset() {
 	*x = FileOperationRequest_MoveFileInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[46]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4123,7 +4260,7 @@ func (x *FileOperationRequest_MoveFileInput) String() string {
 func (*FileOperationRequest_MoveFileInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_MoveFileInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[46]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4136,7 +4273,7 @@ func (x *FileOperationRequest_MoveFileInput) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use FileOperationRequest_MoveFileInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_MoveFileInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 4}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 4}
 }
 
 func (x *FileOperationRequest_MoveFileInput) GetSource() string {
@@ -4170,7 +4307,7 @@ type FileOperationRequest_RemoveFileInput struct {
 
 func (x *FileOperationRequest_RemoveFileInput) Reset() {
 	*x = FileOperationRequest_RemoveFileInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[47]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4182,7 +4319,7 @@ func (x *FileOperationRequest_RemoveFileInput) String() string {
 func (*FileOperationRequest_RemoveFileInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_RemoveFileInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[47]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4195,7 +4332,7 @@ func (x *FileOperationRequest_RemoveFileInput) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use FileOperationRequest_RemoveFileInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_RemoveFileInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 5}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 5}
 }
 
 func (x *FileOperationRequest_RemoveFileInput) GetPath() string {
@@ -4221,7 +4358,7 @@ type FileOperationRequest_DownloadBackupInput struct {
 
 func (x *FileOperationRequest_DownloadBackupInput) Reset() {
 	*x = FileOperationRequest_DownloadBackupInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[48]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4233,7 +4370,7 @@ func (x *FileOperationRequest_DownloadBackupInput) String() string {
 func (*FileOperationRequest_DownloadBackupInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_DownloadBackupInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[48]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4246,7 +4383,7 @@ func (x *FileOperationRequest_DownloadBackupInput) ProtoReflect() protoreflect.M
 
 // Deprecated: Use FileOperationRequest_DownloadBackupInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_DownloadBackupInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 6}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 6}
 }
 
 func (x *FileOperationRequest_DownloadBackupInput) GetBackupId() string {
@@ -4270,7 +4407,7 @@ type FileOperationRequest_UploadBackupInput struct {
 
 func (x *FileOperationRequest_UploadBackupInput) Reset() {
 	*x = FileOperationRequest_UploadBackupInput{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[49]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4282,7 +4419,7 @@ func (x *FileOperationRequest_UploadBackupInput) String() string {
 func (*FileOperationRequest_UploadBackupInput) ProtoMessage() {}
 
 func (x *FileOperationRequest_UploadBackupInput) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[49]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4295,7 +4432,7 @@ func (x *FileOperationRequest_UploadBackupInput) ProtoReflect() protoreflect.Mes
 
 // Deprecated: Use FileOperationRequest_UploadBackupInput.ProtoReflect.Descriptor instead.
 func (*FileOperationRequest_UploadBackupInput) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{38, 7}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{40, 7}
 }
 
 func (x *FileOperationRequest_UploadBackupInput) GetBackupId() string {
@@ -4353,7 +4490,7 @@ type FileOperationResponse_FileEntry struct {
 
 func (x *FileOperationResponse_FileEntry) Reset() {
 	*x = FileOperationResponse_FileEntry{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[50]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4365,7 +4502,7 @@ func (x *FileOperationResponse_FileEntry) String() string {
 func (*FileOperationResponse_FileEntry) ProtoMessage() {}
 
 func (x *FileOperationResponse_FileEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[50]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4378,7 +4515,7 @@ func (x *FileOperationResponse_FileEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileOperationResponse_FileEntry.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_FileEntry) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 0}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 0}
 }
 
 func (x *FileOperationResponse_FileEntry) GetName() string {
@@ -4425,7 +4562,7 @@ type FileOperationResponse_ListFilesResult struct {
 
 func (x *FileOperationResponse_ListFilesResult) Reset() {
 	*x = FileOperationResponse_ListFilesResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[51]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4437,7 +4574,7 @@ func (x *FileOperationResponse_ListFilesResult) String() string {
 func (*FileOperationResponse_ListFilesResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_ListFilesResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[51]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4450,7 +4587,7 @@ func (x *FileOperationResponse_ListFilesResult) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use FileOperationResponse_ListFilesResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_ListFilesResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 1}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 1}
 }
 
 func (x *FileOperationResponse_ListFilesResult) GetEntries() []*FileOperationResponse_FileEntry {
@@ -4472,7 +4609,7 @@ type FileOperationResponse_ReadFileResult struct {
 
 func (x *FileOperationResponse_ReadFileResult) Reset() {
 	*x = FileOperationResponse_ReadFileResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[52]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4484,7 +4621,7 @@ func (x *FileOperationResponse_ReadFileResult) String() string {
 func (*FileOperationResponse_ReadFileResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_ReadFileResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[52]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4497,7 +4634,7 @@ func (x *FileOperationResponse_ReadFileResult) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use FileOperationResponse_ReadFileResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_ReadFileResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 2}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 2}
 }
 
 func (x *FileOperationResponse_ReadFileResult) GetContent() []byte {
@@ -4536,7 +4673,7 @@ type FileOperationResponse_WriteFileResult struct {
 
 func (x *FileOperationResponse_WriteFileResult) Reset() {
 	*x = FileOperationResponse_WriteFileResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[53]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4548,7 +4685,7 @@ func (x *FileOperationResponse_WriteFileResult) String() string {
 func (*FileOperationResponse_WriteFileResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_WriteFileResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[53]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4561,7 +4698,7 @@ func (x *FileOperationResponse_WriteFileResult) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use FileOperationResponse_WriteFileResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_WriteFileResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 3}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 3}
 }
 
 type FileOperationResponse_MakeDirectoryResult struct {
@@ -4572,7 +4709,7 @@ type FileOperationResponse_MakeDirectoryResult struct {
 
 func (x *FileOperationResponse_MakeDirectoryResult) Reset() {
 	*x = FileOperationResponse_MakeDirectoryResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[54]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4584,7 +4721,7 @@ func (x *FileOperationResponse_MakeDirectoryResult) String() string {
 func (*FileOperationResponse_MakeDirectoryResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_MakeDirectoryResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[54]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4597,7 +4734,7 @@ func (x *FileOperationResponse_MakeDirectoryResult) ProtoReflect() protoreflect.
 
 // Deprecated: Use FileOperationResponse_MakeDirectoryResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_MakeDirectoryResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 4}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 4}
 }
 
 type FileOperationResponse_MoveFileResult struct {
@@ -4608,7 +4745,7 @@ type FileOperationResponse_MoveFileResult struct {
 
 func (x *FileOperationResponse_MoveFileResult) Reset() {
 	*x = FileOperationResponse_MoveFileResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[55]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4620,7 +4757,7 @@ func (x *FileOperationResponse_MoveFileResult) String() string {
 func (*FileOperationResponse_MoveFileResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_MoveFileResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[55]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4633,7 +4770,7 @@ func (x *FileOperationResponse_MoveFileResult) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use FileOperationResponse_MoveFileResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_MoveFileResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 5}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 5}
 }
 
 type FileOperationResponse_RemoveFileResult struct {
@@ -4644,7 +4781,7 @@ type FileOperationResponse_RemoveFileResult struct {
 
 func (x *FileOperationResponse_RemoveFileResult) Reset() {
 	*x = FileOperationResponse_RemoveFileResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[56]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4656,7 +4793,7 @@ func (x *FileOperationResponse_RemoveFileResult) String() string {
 func (*FileOperationResponse_RemoveFileResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_RemoveFileResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[56]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4669,7 +4806,7 @@ func (x *FileOperationResponse_RemoveFileResult) ProtoReflect() protoreflect.Mes
 
 // Deprecated: Use FileOperationResponse_RemoveFileResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_RemoveFileResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 6}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 6}
 }
 
 type FileOperationResponse_DownloadBackupResult struct {
@@ -4684,7 +4821,7 @@ type FileOperationResponse_DownloadBackupResult struct {
 
 func (x *FileOperationResponse_DownloadBackupResult) Reset() {
 	*x = FileOperationResponse_DownloadBackupResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[57]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4696,7 +4833,7 @@ func (x *FileOperationResponse_DownloadBackupResult) String() string {
 func (*FileOperationResponse_DownloadBackupResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_DownloadBackupResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[57]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4709,7 +4846,7 @@ func (x *FileOperationResponse_DownloadBackupResult) ProtoReflect() protoreflect
 
 // Deprecated: Use FileOperationResponse_DownloadBackupResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_DownloadBackupResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 7}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 7}
 }
 
 func (x *FileOperationResponse_DownloadBackupResult) GetContent() []byte {
@@ -4748,7 +4885,7 @@ type FileOperationResponse_UploadBackupResult struct {
 
 func (x *FileOperationResponse_UploadBackupResult) Reset() {
 	*x = FileOperationResponse_UploadBackupResult{}
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[58]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4760,7 +4897,7 @@ func (x *FileOperationResponse_UploadBackupResult) String() string {
 func (*FileOperationResponse_UploadBackupResult) ProtoMessage() {}
 
 func (x *FileOperationResponse_UploadBackupResult) ProtoReflect() protoreflect.Message {
-	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[58]
+	mi := &file_gugumanager_agent_v1_agent_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4773,7 +4910,7 @@ func (x *FileOperationResponse_UploadBackupResult) ProtoReflect() protoreflect.M
 
 // Deprecated: Use FileOperationResponse_UploadBackupResult.ProtoReflect.Descriptor instead.
 func (*FileOperationResponse_UploadBackupResult) Descriptor() ([]byte, []int) {
-	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{39, 8}
+	return file_gugumanager_agent_v1_agent_proto_rawDescGZIP(), []int{41, 8}
 }
 
 var File_gugumanager_agent_v1_agent_proto protoreflect.FileDescriptor
@@ -4857,7 +4994,7 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\x14disk_available_bytes\x18\x05 \x01(\x04R\x12diskAvailableBytes\x12\x19\n" +
 	"\bcpu_load\x18\x06 \x01(\x01R\acpuLoad\x12#\n" +
 	"\ragent_version\x18\a \x01(\tR\fagentVersion\x12U\n" +
-	"\x12running_operations\x18\b \x03(\v2&.gugumanager.agent.v1.RunningOperationR\x11runningOperations\"\xe3\x06\n" +
+	"\x12running_operations\x18\b \x03(\v2&.gugumanager.agent.v1.RunningOperationR\x11runningOperations\"\xaf\a\n" +
 	"\x04Task\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1e\n" +
@@ -4879,7 +5016,8 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\x05power\x18\f \x01(\v2&.gugumanager.agent.v1.PowerTaskPayloadH\x00R\x05power\x12A\n" +
 	"\x06backup\x18\r \x01(\v2'.gugumanager.agent.v1.BackupTaskPayloadH\x00R\x06backup\x12J\n" +
 	"\textension\x18\x0e \x01(\v2*.gugumanager.agent.v1.ExtensionTaskPayloadH\x00R\textension\x12J\n" +
-	"\treconcile\x18\x11 \x01(\v2*.gugumanager.agent.v1.ReconcileTaskPayloadH\x00R\treconcileB\t\n" +
+	"\treconcile\x18\x11 \x01(\v2*.gugumanager.agent.v1.ReconcileTaskPayloadH\x00R\treconcile\x12J\n" +
+	"\tmigration\x18\x12 \x01(\v2*.gugumanager.agent.v1.MigrationTaskPayloadH\x00R\tmigrationB\t\n" +
 	"\apayload\"Z\n" +
 	"\x15CapabilityRequirement\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
@@ -4962,7 +5100,13 @@ const file_gugumanager_agent_v1_agent_proto_rawDesc = "" +
 	"\x14delete_remote_object\x18\x03 \x01(\bR\x12deleteRemoteObject\"G\n" +
 	"\x14ExtensionTaskPayload\x12\x19\n" +
 	"\btype_url\x18\x01 \x01(\tR\atypeUrl\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value\"\xcd\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\"w\n" +
+	"\x14MigrationTaskPayload\x12U\n" +
+	"\x0ecleanup_source\x18\x01 \x01(\v2,.gugumanager.agent.v1.CleanupMigrationSourceH\x00R\rcleanupSourceB\b\n" +
+	"\x06action\"i\n" +
+	"\x16CleanupMigrationSource\x12!\n" +
+	"\fmigration_id\x18\x01 \x01(\tR\vmigrationId\x12,\n" +
+	"\x12remove_data_volume\x18\x02 \x01(\bR\x10removeDataVolume\"\xcd\x01\n" +
 	"\aTaskAck\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x1d\n" +
@@ -5198,7 +5342,7 @@ func file_gugumanager_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_gugumanager_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_gugumanager_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 59)
+var file_gugumanager_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 61)
 var file_gugumanager_agent_v1_agent_proto_goTypes = []any{
 	(NetworkProtocol)(0),                               // 0: gugumanager.agent.v1.NetworkProtocol
 	(PowerAction)(0),                                   // 1: gugumanager.agent.v1.PowerAction
@@ -5228,128 +5372,132 @@ var file_gugumanager_agent_v1_agent_proto_goTypes = []any{
 	(*RestoreBackupPayload)(nil),                       // 25: gugumanager.agent.v1.RestoreBackupPayload
 	(*DeleteBackupPayload)(nil),                        // 26: gugumanager.agent.v1.DeleteBackupPayload
 	(*ExtensionTaskPayload)(nil),                       // 27: gugumanager.agent.v1.ExtensionTaskPayload
-	(*TaskAck)(nil),                                    // 28: gugumanager.agent.v1.TaskAck
-	(*TaskProgress)(nil),                               // 29: gugumanager.agent.v1.TaskProgress
-	(*TaskResult)(nil),                                 // 30: gugumanager.agent.v1.TaskResult
-	(*LogBatch)(nil),                                   // 31: gugumanager.agent.v1.LogBatch
-	(*ServerObserved)(nil),                             // 32: gugumanager.agent.v1.ServerObserved
-	(*RunningTaskHeartbeat)(nil),                       // 33: gugumanager.agent.v1.RunningTaskHeartbeat
-	(*MetricsBatch)(nil),                               // 34: gugumanager.agent.v1.MetricsBatch
-	(*ServerMetrics)(nil),                              // 35: gugumanager.agent.v1.ServerMetrics
-	(*EnrollRequest)(nil),                              // 36: gugumanager.agent.v1.EnrollRequest
-	(*EnrollResponse)(nil),                             // 37: gugumanager.agent.v1.EnrollResponse
-	(*RotateCertificate)(nil),                          // 38: gugumanager.agent.v1.RotateCertificate
-	(*CertificateSigningRequest)(nil),                  // 39: gugumanager.agent.v1.CertificateSigningRequest
-	(*CertificateResponse)(nil),                        // 40: gugumanager.agent.v1.CertificateResponse
-	(*Drain)(nil),                                      // 41: gugumanager.agent.v1.Drain
-	(*FileOperationRequest)(nil),                       // 42: gugumanager.agent.v1.FileOperationRequest
-	(*FileOperationResponse)(nil),                      // 43: gugumanager.agent.v1.FileOperationResponse
-	nil,                                                // 44: gugumanager.agent.v1.ProvisionTaskPayload.VariablesEntry
-	nil,                                                // 45: gugumanager.agent.v1.DesiredRuntimeSpec.VariablesEntry
-	(*FileOperationRequest_ListFilesInput)(nil),        // 46: gugumanager.agent.v1.FileOperationRequest.ListFilesInput
-	(*FileOperationRequest_ReadFileInput)(nil),         // 47: gugumanager.agent.v1.FileOperationRequest.ReadFileInput
-	(*FileOperationRequest_WriteFileInput)(nil),        // 48: gugumanager.agent.v1.FileOperationRequest.WriteFileInput
-	(*FileOperationRequest_MakeDirectoryInput)(nil),    // 49: gugumanager.agent.v1.FileOperationRequest.MakeDirectoryInput
-	(*FileOperationRequest_MoveFileInput)(nil),         // 50: gugumanager.agent.v1.FileOperationRequest.MoveFileInput
-	(*FileOperationRequest_RemoveFileInput)(nil),       // 51: gugumanager.agent.v1.FileOperationRequest.RemoveFileInput
-	(*FileOperationRequest_DownloadBackupInput)(nil),   // 52: gugumanager.agent.v1.FileOperationRequest.DownloadBackupInput
-	(*FileOperationRequest_UploadBackupInput)(nil),     // 53: gugumanager.agent.v1.FileOperationRequest.UploadBackupInput
-	(*FileOperationResponse_FileEntry)(nil),            // 54: gugumanager.agent.v1.FileOperationResponse.FileEntry
-	(*FileOperationResponse_ListFilesResult)(nil),      // 55: gugumanager.agent.v1.FileOperationResponse.ListFilesResult
-	(*FileOperationResponse_ReadFileResult)(nil),       // 56: gugumanager.agent.v1.FileOperationResponse.ReadFileResult
-	(*FileOperationResponse_WriteFileResult)(nil),      // 57: gugumanager.agent.v1.FileOperationResponse.WriteFileResult
-	(*FileOperationResponse_MakeDirectoryResult)(nil),  // 58: gugumanager.agent.v1.FileOperationResponse.MakeDirectoryResult
-	(*FileOperationResponse_MoveFileResult)(nil),       // 59: gugumanager.agent.v1.FileOperationResponse.MoveFileResult
-	(*FileOperationResponse_RemoveFileResult)(nil),     // 60: gugumanager.agent.v1.FileOperationResponse.RemoveFileResult
-	(*FileOperationResponse_DownloadBackupResult)(nil), // 61: gugumanager.agent.v1.FileOperationResponse.DownloadBackupResult
-	(*FileOperationResponse_UploadBackupResult)(nil),   // 62: gugumanager.agent.v1.FileOperationResponse.UploadBackupResult
-	(*timestamppb.Timestamp)(nil),                      // 63: google.protobuf.Timestamp
+	(*MigrationTaskPayload)(nil),                       // 28: gugumanager.agent.v1.MigrationTaskPayload
+	(*CleanupMigrationSource)(nil),                     // 29: gugumanager.agent.v1.CleanupMigrationSource
+	(*TaskAck)(nil),                                    // 30: gugumanager.agent.v1.TaskAck
+	(*TaskProgress)(nil),                               // 31: gugumanager.agent.v1.TaskProgress
+	(*TaskResult)(nil),                                 // 32: gugumanager.agent.v1.TaskResult
+	(*LogBatch)(nil),                                   // 33: gugumanager.agent.v1.LogBatch
+	(*ServerObserved)(nil),                             // 34: gugumanager.agent.v1.ServerObserved
+	(*RunningTaskHeartbeat)(nil),                       // 35: gugumanager.agent.v1.RunningTaskHeartbeat
+	(*MetricsBatch)(nil),                               // 36: gugumanager.agent.v1.MetricsBatch
+	(*ServerMetrics)(nil),                              // 37: gugumanager.agent.v1.ServerMetrics
+	(*EnrollRequest)(nil),                              // 38: gugumanager.agent.v1.EnrollRequest
+	(*EnrollResponse)(nil),                             // 39: gugumanager.agent.v1.EnrollResponse
+	(*RotateCertificate)(nil),                          // 40: gugumanager.agent.v1.RotateCertificate
+	(*CertificateSigningRequest)(nil),                  // 41: gugumanager.agent.v1.CertificateSigningRequest
+	(*CertificateResponse)(nil),                        // 42: gugumanager.agent.v1.CertificateResponse
+	(*Drain)(nil),                                      // 43: gugumanager.agent.v1.Drain
+	(*FileOperationRequest)(nil),                       // 44: gugumanager.agent.v1.FileOperationRequest
+	(*FileOperationResponse)(nil),                      // 45: gugumanager.agent.v1.FileOperationResponse
+	nil,                                                // 46: gugumanager.agent.v1.ProvisionTaskPayload.VariablesEntry
+	nil,                                                // 47: gugumanager.agent.v1.DesiredRuntimeSpec.VariablesEntry
+	(*FileOperationRequest_ListFilesInput)(nil),        // 48: gugumanager.agent.v1.FileOperationRequest.ListFilesInput
+	(*FileOperationRequest_ReadFileInput)(nil),         // 49: gugumanager.agent.v1.FileOperationRequest.ReadFileInput
+	(*FileOperationRequest_WriteFileInput)(nil),        // 50: gugumanager.agent.v1.FileOperationRequest.WriteFileInput
+	(*FileOperationRequest_MakeDirectoryInput)(nil),    // 51: gugumanager.agent.v1.FileOperationRequest.MakeDirectoryInput
+	(*FileOperationRequest_MoveFileInput)(nil),         // 52: gugumanager.agent.v1.FileOperationRequest.MoveFileInput
+	(*FileOperationRequest_RemoveFileInput)(nil),       // 53: gugumanager.agent.v1.FileOperationRequest.RemoveFileInput
+	(*FileOperationRequest_DownloadBackupInput)(nil),   // 54: gugumanager.agent.v1.FileOperationRequest.DownloadBackupInput
+	(*FileOperationRequest_UploadBackupInput)(nil),     // 55: gugumanager.agent.v1.FileOperationRequest.UploadBackupInput
+	(*FileOperationResponse_FileEntry)(nil),            // 56: gugumanager.agent.v1.FileOperationResponse.FileEntry
+	(*FileOperationResponse_ListFilesResult)(nil),      // 57: gugumanager.agent.v1.FileOperationResponse.ListFilesResult
+	(*FileOperationResponse_ReadFileResult)(nil),       // 58: gugumanager.agent.v1.FileOperationResponse.ReadFileResult
+	(*FileOperationResponse_WriteFileResult)(nil),      // 59: gugumanager.agent.v1.FileOperationResponse.WriteFileResult
+	(*FileOperationResponse_MakeDirectoryResult)(nil),  // 60: gugumanager.agent.v1.FileOperationResponse.MakeDirectoryResult
+	(*FileOperationResponse_MoveFileResult)(nil),       // 61: gugumanager.agent.v1.FileOperationResponse.MoveFileResult
+	(*FileOperationResponse_RemoveFileResult)(nil),     // 62: gugumanager.agent.v1.FileOperationResponse.RemoveFileResult
+	(*FileOperationResponse_DownloadBackupResult)(nil), // 63: gugumanager.agent.v1.FileOperationResponse.DownloadBackupResult
+	(*FileOperationResponse_UploadBackupResult)(nil),   // 64: gugumanager.agent.v1.FileOperationResponse.UploadBackupResult
+	(*timestamppb.Timestamp)(nil),                      // 65: google.protobuf.Timestamp
 }
 var file_gugumanager_agent_v1_agent_proto_depIdxs = []int32{
-	63, // 0: gugumanager.agent.v1.ResolveSecretResponse.expires_at:type_name -> google.protobuf.Timestamp
+	65, // 0: gugumanager.agent.v1.ResolveSecretResponse.expires_at:type_name -> google.protobuf.Timestamp
 	10, // 1: gugumanager.agent.v1.ConnectRequest.hello:type_name -> gugumanager.agent.v1.Hello
 	14, // 2: gugumanager.agent.v1.ConnectRequest.heartbeat:type_name -> gugumanager.agent.v1.Heartbeat
-	28, // 3: gugumanager.agent.v1.ConnectRequest.task_ack:type_name -> gugumanager.agent.v1.TaskAck
-	29, // 4: gugumanager.agent.v1.ConnectRequest.task_progress:type_name -> gugumanager.agent.v1.TaskProgress
-	30, // 5: gugumanager.agent.v1.ConnectRequest.task_result:type_name -> gugumanager.agent.v1.TaskResult
-	31, // 6: gugumanager.agent.v1.ConnectRequest.log_batch:type_name -> gugumanager.agent.v1.LogBatch
-	32, // 7: gugumanager.agent.v1.ConnectRequest.server_observed:type_name -> gugumanager.agent.v1.ServerObserved
-	33, // 8: gugumanager.agent.v1.ConnectRequest.running_task_heartbeat:type_name -> gugumanager.agent.v1.RunningTaskHeartbeat
-	34, // 9: gugumanager.agent.v1.ConnectRequest.metrics_batch:type_name -> gugumanager.agent.v1.MetricsBatch
-	39, // 10: gugumanager.agent.v1.ConnectRequest.certificate_signing_request:type_name -> gugumanager.agent.v1.CertificateSigningRequest
-	43, // 11: gugumanager.agent.v1.ConnectRequest.file_operation_response:type_name -> gugumanager.agent.v1.FileOperationResponse
+	30, // 3: gugumanager.agent.v1.ConnectRequest.task_ack:type_name -> gugumanager.agent.v1.TaskAck
+	31, // 4: gugumanager.agent.v1.ConnectRequest.task_progress:type_name -> gugumanager.agent.v1.TaskProgress
+	32, // 5: gugumanager.agent.v1.ConnectRequest.task_result:type_name -> gugumanager.agent.v1.TaskResult
+	33, // 6: gugumanager.agent.v1.ConnectRequest.log_batch:type_name -> gugumanager.agent.v1.LogBatch
+	34, // 7: gugumanager.agent.v1.ConnectRequest.server_observed:type_name -> gugumanager.agent.v1.ServerObserved
+	35, // 8: gugumanager.agent.v1.ConnectRequest.running_task_heartbeat:type_name -> gugumanager.agent.v1.RunningTaskHeartbeat
+	36, // 9: gugumanager.agent.v1.ConnectRequest.metrics_batch:type_name -> gugumanager.agent.v1.MetricsBatch
+	41, // 10: gugumanager.agent.v1.ConnectRequest.certificate_signing_request:type_name -> gugumanager.agent.v1.CertificateSigningRequest
+	45, // 11: gugumanager.agent.v1.ConnectRequest.file_operation_response:type_name -> gugumanager.agent.v1.FileOperationResponse
 	9,  // 12: gugumanager.agent.v1.ConnectRequest.console_command_result:type_name -> gugumanager.agent.v1.ConsoleCommandResult
 	11, // 13: gugumanager.agent.v1.ConnectResponse.welcome:type_name -> gugumanager.agent.v1.Welcome
 	15, // 14: gugumanager.agent.v1.ConnectResponse.task:type_name -> gugumanager.agent.v1.Task
-	38, // 15: gugumanager.agent.v1.ConnectResponse.rotate_certificate:type_name -> gugumanager.agent.v1.RotateCertificate
-	41, // 16: gugumanager.agent.v1.ConnectResponse.drain:type_name -> gugumanager.agent.v1.Drain
-	40, // 17: gugumanager.agent.v1.ConnectResponse.certificate_response:type_name -> gugumanager.agent.v1.CertificateResponse
+	40, // 15: gugumanager.agent.v1.ConnectResponse.rotate_certificate:type_name -> gugumanager.agent.v1.RotateCertificate
+	43, // 16: gugumanager.agent.v1.ConnectResponse.drain:type_name -> gugumanager.agent.v1.Drain
+	42, // 17: gugumanager.agent.v1.ConnectResponse.certificate_response:type_name -> gugumanager.agent.v1.CertificateResponse
 	8,  // 18: gugumanager.agent.v1.ConnectResponse.console_command:type_name -> gugumanager.agent.v1.ConsoleCommand
-	42, // 19: gugumanager.agent.v1.ConnectResponse.file_operation_request:type_name -> gugumanager.agent.v1.FileOperationRequest
+	44, // 19: gugumanager.agent.v1.ConnectResponse.file_operation_request:type_name -> gugumanager.agent.v1.FileOperationRequest
 	12, // 20: gugumanager.agent.v1.Hello.capabilities:type_name -> gugumanager.agent.v1.Capability
 	13, // 21: gugumanager.agent.v1.Hello.running_operations:type_name -> gugumanager.agent.v1.RunningOperation
-	63, // 22: gugumanager.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	65, // 22: gugumanager.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	13, // 23: gugumanager.agent.v1.Heartbeat.running_operations:type_name -> gugumanager.agent.v1.RunningOperation
-	63, // 24: gugumanager.agent.v1.Task.deadline:type_name -> google.protobuf.Timestamp
+	65, // 24: gugumanager.agent.v1.Task.deadline:type_name -> google.protobuf.Timestamp
 	16, // 25: gugumanager.agent.v1.Task.required_capabilities:type_name -> gugumanager.agent.v1.CapabilityRequirement
 	17, // 26: gugumanager.agent.v1.Task.provision:type_name -> gugumanager.agent.v1.ProvisionTaskPayload
 	22, // 27: gugumanager.agent.v1.Task.power:type_name -> gugumanager.agent.v1.PowerTaskPayload
 	23, // 28: gugumanager.agent.v1.Task.backup:type_name -> gugumanager.agent.v1.BackupTaskPayload
 	27, // 29: gugumanager.agent.v1.Task.extension:type_name -> gugumanager.agent.v1.ExtensionTaskPayload
 	19, // 30: gugumanager.agent.v1.Task.reconcile:type_name -> gugumanager.agent.v1.ReconcileTaskPayload
-	20, // 31: gugumanager.agent.v1.ProvisionTaskPayload.resource_limits:type_name -> gugumanager.agent.v1.ResourceLimits
-	21, // 32: gugumanager.agent.v1.ProvisionTaskPayload.allocations:type_name -> gugumanager.agent.v1.PortAllocation
-	44, // 33: gugumanager.agent.v1.ProvisionTaskPayload.variables:type_name -> gugumanager.agent.v1.ProvisionTaskPayload.VariablesEntry
-	20, // 34: gugumanager.agent.v1.DesiredRuntimeSpec.resource_limits:type_name -> gugumanager.agent.v1.ResourceLimits
-	21, // 35: gugumanager.agent.v1.DesiredRuntimeSpec.allocations:type_name -> gugumanager.agent.v1.PortAllocation
-	45, // 36: gugumanager.agent.v1.DesiredRuntimeSpec.variables:type_name -> gugumanager.agent.v1.DesiredRuntimeSpec.VariablesEntry
-	18, // 37: gugumanager.agent.v1.ReconcileTaskPayload.desired:type_name -> gugumanager.agent.v1.DesiredRuntimeSpec
-	0,  // 38: gugumanager.agent.v1.PortAllocation.protocol:type_name -> gugumanager.agent.v1.NetworkProtocol
-	1,  // 39: gugumanager.agent.v1.PowerTaskPayload.action:type_name -> gugumanager.agent.v1.PowerAction
-	24, // 40: gugumanager.agent.v1.BackupTaskPayload.create:type_name -> gugumanager.agent.v1.CreateBackupPayload
-	25, // 41: gugumanager.agent.v1.BackupTaskPayload.restore:type_name -> gugumanager.agent.v1.RestoreBackupPayload
-	26, // 42: gugumanager.agent.v1.BackupTaskPayload.delete:type_name -> gugumanager.agent.v1.DeleteBackupPayload
-	63, // 43: gugumanager.agent.v1.CreateBackupPayload.retain_until:type_name -> google.protobuf.Timestamp
-	2,  // 44: gugumanager.agent.v1.ServerObserved.observed_power:type_name -> gugumanager.agent.v1.ObservedPower
-	3,  // 45: gugumanager.agent.v1.ServerObserved.health_condition:type_name -> gugumanager.agent.v1.HealthCondition
-	63, // 46: gugumanager.agent.v1.ServerObserved.observed_at:type_name -> google.protobuf.Timestamp
-	63, // 47: gugumanager.agent.v1.RunningTaskHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	63, // 48: gugumanager.agent.v1.MetricsBatch.observed_at:type_name -> google.protobuf.Timestamp
-	35, // 49: gugumanager.agent.v1.MetricsBatch.servers:type_name -> gugumanager.agent.v1.ServerMetrics
-	12, // 50: gugumanager.agent.v1.EnrollRequest.capabilities:type_name -> gugumanager.agent.v1.Capability
-	63, // 51: gugumanager.agent.v1.EnrollResponse.expires_at:type_name -> google.protobuf.Timestamp
-	63, // 52: gugumanager.agent.v1.RotateCertificate.rotate_before:type_name -> google.protobuf.Timestamp
-	63, // 53: gugumanager.agent.v1.CertificateResponse.expires_at:type_name -> google.protobuf.Timestamp
-	46, // 54: gugumanager.agent.v1.FileOperationRequest.list:type_name -> gugumanager.agent.v1.FileOperationRequest.ListFilesInput
-	47, // 55: gugumanager.agent.v1.FileOperationRequest.read:type_name -> gugumanager.agent.v1.FileOperationRequest.ReadFileInput
-	48, // 56: gugumanager.agent.v1.FileOperationRequest.write:type_name -> gugumanager.agent.v1.FileOperationRequest.WriteFileInput
-	49, // 57: gugumanager.agent.v1.FileOperationRequest.mkdir:type_name -> gugumanager.agent.v1.FileOperationRequest.MakeDirectoryInput
-	50, // 58: gugumanager.agent.v1.FileOperationRequest.move:type_name -> gugumanager.agent.v1.FileOperationRequest.MoveFileInput
-	51, // 59: gugumanager.agent.v1.FileOperationRequest.remove:type_name -> gugumanager.agent.v1.FileOperationRequest.RemoveFileInput
-	52, // 60: gugumanager.agent.v1.FileOperationRequest.download_backup:type_name -> gugumanager.agent.v1.FileOperationRequest.DownloadBackupInput
-	53, // 61: gugumanager.agent.v1.FileOperationRequest.upload_backup:type_name -> gugumanager.agent.v1.FileOperationRequest.UploadBackupInput
-	55, // 62: gugumanager.agent.v1.FileOperationResponse.list:type_name -> gugumanager.agent.v1.FileOperationResponse.ListFilesResult
-	56, // 63: gugumanager.agent.v1.FileOperationResponse.read:type_name -> gugumanager.agent.v1.FileOperationResponse.ReadFileResult
-	57, // 64: gugumanager.agent.v1.FileOperationResponse.write:type_name -> gugumanager.agent.v1.FileOperationResponse.WriteFileResult
-	58, // 65: gugumanager.agent.v1.FileOperationResponse.mkdir:type_name -> gugumanager.agent.v1.FileOperationResponse.MakeDirectoryResult
-	59, // 66: gugumanager.agent.v1.FileOperationResponse.move:type_name -> gugumanager.agent.v1.FileOperationResponse.MoveFileResult
-	60, // 67: gugumanager.agent.v1.FileOperationResponse.remove:type_name -> gugumanager.agent.v1.FileOperationResponse.RemoveFileResult
-	61, // 68: gugumanager.agent.v1.FileOperationResponse.download_backup:type_name -> gugumanager.agent.v1.FileOperationResponse.DownloadBackupResult
-	62, // 69: gugumanager.agent.v1.FileOperationResponse.upload_backup:type_name -> gugumanager.agent.v1.FileOperationResponse.UploadBackupResult
-	63, // 70: gugumanager.agent.v1.FileOperationResponse.FileEntry.modified_at:type_name -> google.protobuf.Timestamp
-	54, // 71: gugumanager.agent.v1.FileOperationResponse.ListFilesResult.entries:type_name -> gugumanager.agent.v1.FileOperationResponse.FileEntry
-	63, // 72: gugumanager.agent.v1.FileOperationResponse.ReadFileResult.modified_at:type_name -> google.protobuf.Timestamp
-	6,  // 73: gugumanager.agent.v1.AgentGatewayService.Connect:input_type -> gugumanager.agent.v1.ConnectRequest
-	36, // 74: gugumanager.agent.v1.AgentGatewayService.Enroll:input_type -> gugumanager.agent.v1.EnrollRequest
-	4,  // 75: gugumanager.agent.v1.AgentGatewayService.ResolveSecret:input_type -> gugumanager.agent.v1.ResolveSecretRequest
-	7,  // 76: gugumanager.agent.v1.AgentGatewayService.Connect:output_type -> gugumanager.agent.v1.ConnectResponse
-	37, // 77: gugumanager.agent.v1.AgentGatewayService.Enroll:output_type -> gugumanager.agent.v1.EnrollResponse
-	5,  // 78: gugumanager.agent.v1.AgentGatewayService.ResolveSecret:output_type -> gugumanager.agent.v1.ResolveSecretResponse
-	76, // [76:79] is the sub-list for method output_type
-	73, // [73:76] is the sub-list for method input_type
-	73, // [73:73] is the sub-list for extension type_name
-	73, // [73:73] is the sub-list for extension extendee
-	0,  // [0:73] is the sub-list for field type_name
+	28, // 31: gugumanager.agent.v1.Task.migration:type_name -> gugumanager.agent.v1.MigrationTaskPayload
+	20, // 32: gugumanager.agent.v1.ProvisionTaskPayload.resource_limits:type_name -> gugumanager.agent.v1.ResourceLimits
+	21, // 33: gugumanager.agent.v1.ProvisionTaskPayload.allocations:type_name -> gugumanager.agent.v1.PortAllocation
+	46, // 34: gugumanager.agent.v1.ProvisionTaskPayload.variables:type_name -> gugumanager.agent.v1.ProvisionTaskPayload.VariablesEntry
+	20, // 35: gugumanager.agent.v1.DesiredRuntimeSpec.resource_limits:type_name -> gugumanager.agent.v1.ResourceLimits
+	21, // 36: gugumanager.agent.v1.DesiredRuntimeSpec.allocations:type_name -> gugumanager.agent.v1.PortAllocation
+	47, // 37: gugumanager.agent.v1.DesiredRuntimeSpec.variables:type_name -> gugumanager.agent.v1.DesiredRuntimeSpec.VariablesEntry
+	18, // 38: gugumanager.agent.v1.ReconcileTaskPayload.desired:type_name -> gugumanager.agent.v1.DesiredRuntimeSpec
+	0,  // 39: gugumanager.agent.v1.PortAllocation.protocol:type_name -> gugumanager.agent.v1.NetworkProtocol
+	1,  // 40: gugumanager.agent.v1.PowerTaskPayload.action:type_name -> gugumanager.agent.v1.PowerAction
+	24, // 41: gugumanager.agent.v1.BackupTaskPayload.create:type_name -> gugumanager.agent.v1.CreateBackupPayload
+	25, // 42: gugumanager.agent.v1.BackupTaskPayload.restore:type_name -> gugumanager.agent.v1.RestoreBackupPayload
+	26, // 43: gugumanager.agent.v1.BackupTaskPayload.delete:type_name -> gugumanager.agent.v1.DeleteBackupPayload
+	65, // 44: gugumanager.agent.v1.CreateBackupPayload.retain_until:type_name -> google.protobuf.Timestamp
+	29, // 45: gugumanager.agent.v1.MigrationTaskPayload.cleanup_source:type_name -> gugumanager.agent.v1.CleanupMigrationSource
+	2,  // 46: gugumanager.agent.v1.ServerObserved.observed_power:type_name -> gugumanager.agent.v1.ObservedPower
+	3,  // 47: gugumanager.agent.v1.ServerObserved.health_condition:type_name -> gugumanager.agent.v1.HealthCondition
+	65, // 48: gugumanager.agent.v1.ServerObserved.observed_at:type_name -> google.protobuf.Timestamp
+	65, // 49: gugumanager.agent.v1.RunningTaskHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	65, // 50: gugumanager.agent.v1.MetricsBatch.observed_at:type_name -> google.protobuf.Timestamp
+	37, // 51: gugumanager.agent.v1.MetricsBatch.servers:type_name -> gugumanager.agent.v1.ServerMetrics
+	12, // 52: gugumanager.agent.v1.EnrollRequest.capabilities:type_name -> gugumanager.agent.v1.Capability
+	65, // 53: gugumanager.agent.v1.EnrollResponse.expires_at:type_name -> google.protobuf.Timestamp
+	65, // 54: gugumanager.agent.v1.RotateCertificate.rotate_before:type_name -> google.protobuf.Timestamp
+	65, // 55: gugumanager.agent.v1.CertificateResponse.expires_at:type_name -> google.protobuf.Timestamp
+	48, // 56: gugumanager.agent.v1.FileOperationRequest.list:type_name -> gugumanager.agent.v1.FileOperationRequest.ListFilesInput
+	49, // 57: gugumanager.agent.v1.FileOperationRequest.read:type_name -> gugumanager.agent.v1.FileOperationRequest.ReadFileInput
+	50, // 58: gugumanager.agent.v1.FileOperationRequest.write:type_name -> gugumanager.agent.v1.FileOperationRequest.WriteFileInput
+	51, // 59: gugumanager.agent.v1.FileOperationRequest.mkdir:type_name -> gugumanager.agent.v1.FileOperationRequest.MakeDirectoryInput
+	52, // 60: gugumanager.agent.v1.FileOperationRequest.move:type_name -> gugumanager.agent.v1.FileOperationRequest.MoveFileInput
+	53, // 61: gugumanager.agent.v1.FileOperationRequest.remove:type_name -> gugumanager.agent.v1.FileOperationRequest.RemoveFileInput
+	54, // 62: gugumanager.agent.v1.FileOperationRequest.download_backup:type_name -> gugumanager.agent.v1.FileOperationRequest.DownloadBackupInput
+	55, // 63: gugumanager.agent.v1.FileOperationRequest.upload_backup:type_name -> gugumanager.agent.v1.FileOperationRequest.UploadBackupInput
+	57, // 64: gugumanager.agent.v1.FileOperationResponse.list:type_name -> gugumanager.agent.v1.FileOperationResponse.ListFilesResult
+	58, // 65: gugumanager.agent.v1.FileOperationResponse.read:type_name -> gugumanager.agent.v1.FileOperationResponse.ReadFileResult
+	59, // 66: gugumanager.agent.v1.FileOperationResponse.write:type_name -> gugumanager.agent.v1.FileOperationResponse.WriteFileResult
+	60, // 67: gugumanager.agent.v1.FileOperationResponse.mkdir:type_name -> gugumanager.agent.v1.FileOperationResponse.MakeDirectoryResult
+	61, // 68: gugumanager.agent.v1.FileOperationResponse.move:type_name -> gugumanager.agent.v1.FileOperationResponse.MoveFileResult
+	62, // 69: gugumanager.agent.v1.FileOperationResponse.remove:type_name -> gugumanager.agent.v1.FileOperationResponse.RemoveFileResult
+	63, // 70: gugumanager.agent.v1.FileOperationResponse.download_backup:type_name -> gugumanager.agent.v1.FileOperationResponse.DownloadBackupResult
+	64, // 71: gugumanager.agent.v1.FileOperationResponse.upload_backup:type_name -> gugumanager.agent.v1.FileOperationResponse.UploadBackupResult
+	65, // 72: gugumanager.agent.v1.FileOperationResponse.FileEntry.modified_at:type_name -> google.protobuf.Timestamp
+	56, // 73: gugumanager.agent.v1.FileOperationResponse.ListFilesResult.entries:type_name -> gugumanager.agent.v1.FileOperationResponse.FileEntry
+	65, // 74: gugumanager.agent.v1.FileOperationResponse.ReadFileResult.modified_at:type_name -> google.protobuf.Timestamp
+	6,  // 75: gugumanager.agent.v1.AgentGatewayService.Connect:input_type -> gugumanager.agent.v1.ConnectRequest
+	38, // 76: gugumanager.agent.v1.AgentGatewayService.Enroll:input_type -> gugumanager.agent.v1.EnrollRequest
+	4,  // 77: gugumanager.agent.v1.AgentGatewayService.ResolveSecret:input_type -> gugumanager.agent.v1.ResolveSecretRequest
+	7,  // 78: gugumanager.agent.v1.AgentGatewayService.Connect:output_type -> gugumanager.agent.v1.ConnectResponse
+	39, // 79: gugumanager.agent.v1.AgentGatewayService.Enroll:output_type -> gugumanager.agent.v1.EnrollResponse
+	5,  // 80: gugumanager.agent.v1.AgentGatewayService.ResolveSecret:output_type -> gugumanager.agent.v1.ResolveSecretResponse
+	78, // [78:81] is the sub-list for method output_type
+	75, // [75:78] is the sub-list for method input_type
+	75, // [75:75] is the sub-list for extension type_name
+	75, // [75:75] is the sub-list for extension extendee
+	0,  // [0:75] is the sub-list for field type_name
 }
 
 func init() { file_gugumanager_agent_v1_agent_proto_init() }
@@ -5387,13 +5535,17 @@ func file_gugumanager_agent_v1_agent_proto_init() {
 		(*Task_Backup)(nil),
 		(*Task_Extension)(nil),
 		(*Task_Reconcile)(nil),
+		(*Task_Migration)(nil),
 	}
 	file_gugumanager_agent_v1_agent_proto_msgTypes[19].OneofWrappers = []any{
 		(*BackupTaskPayload_Create)(nil),
 		(*BackupTaskPayload_Restore)(nil),
 		(*BackupTaskPayload_Delete)(nil),
 	}
-	file_gugumanager_agent_v1_agent_proto_msgTypes[38].OneofWrappers = []any{
+	file_gugumanager_agent_v1_agent_proto_msgTypes[24].OneofWrappers = []any{
+		(*MigrationTaskPayload_CleanupSource)(nil),
+	}
+	file_gugumanager_agent_v1_agent_proto_msgTypes[40].OneofWrappers = []any{
 		(*FileOperationRequest_List)(nil),
 		(*FileOperationRequest_Read)(nil),
 		(*FileOperationRequest_Write)(nil),
@@ -5403,7 +5555,7 @@ func file_gugumanager_agent_v1_agent_proto_init() {
 		(*FileOperationRequest_DownloadBackup)(nil),
 		(*FileOperationRequest_UploadBackup)(nil),
 	}
-	file_gugumanager_agent_v1_agent_proto_msgTypes[39].OneofWrappers = []any{
+	file_gugumanager_agent_v1_agent_proto_msgTypes[41].OneofWrappers = []any{
 		(*FileOperationResponse_List)(nil),
 		(*FileOperationResponse_Read)(nil),
 		(*FileOperationResponse_Write)(nil),
@@ -5419,7 +5571,7 @@ func file_gugumanager_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gugumanager_agent_v1_agent_proto_rawDesc), len(file_gugumanager_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   59,
+			NumMessages:   61,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
