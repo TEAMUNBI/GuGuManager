@@ -79,6 +79,8 @@ func (f *fakeFileRuntime) RemoveContainer(_ context.Context, _ string, _ bool) e
 	return nil
 }
 
+func (f *fakeFileRuntime) RenameContainer(_ context.Context, _, _ string) error { return nil }
+
 func (f *fakeFileRuntime) InspectContainer(_ context.Context, _ string) (runtime.ContainerStatus, error) {
 	return f.inspectStatus, f.inspectErr
 }

@@ -448,6 +448,12 @@ func (s *Postgres) UpdateUser(userID string, input domain.UpdateUserInput, actor
 		if _, err = tx.ExecContext(ctx, `UPDATE password_reset_tokens SET consumed_at = $1 WHERE user_id = $2 AND consumed_at IS NULL`, now, userID); err != nil {
 			return domain.User{}, domain.NewProblem("INTERNAL_ERROR", "无法撤销重置令牌", true)
 		}
+		if _, err = tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL`, now, userID); err != nil {
+			return domain.User{}, domain.NewProblem("INTERNAL_ERROR", "无法撤销 API Token", true)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE console_connection_tokens SET consumed_at = $1 WHERE user_id = $2 AND consumed_at IS NULL`, now, userID); err != nil {
+			return domain.User{}, domain.NewProblem("INTERNAL_ERROR", "无法撤销控制台连接令牌", true)
+		}
 	}
 
 	_, _ = tx.ExecContext(ctx, `
@@ -575,6 +581,12 @@ func (s *Postgres) ResetPassword(token string, password string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL`, now, userID); err != nil {
 		return domain.NewProblem("INTERNAL_ERROR", "无法撤销用户会话", true)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL`, now, userID); err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法撤销 API Token", true)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE console_connection_tokens SET consumed_at = $1 WHERE user_id = $2 AND consumed_at IS NULL`, now, userID); err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法撤销控制台连接令牌", true)
 	}
 
 	_, _ = tx.ExecContext(ctx, `

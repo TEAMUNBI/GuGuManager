@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +47,10 @@ type ControlPlane interface {
 	CreateUser(input domain.CreateUserInput, actor domain.User) (domain.User, error)
 	UpdateUser(userID string, input domain.UpdateUserInput, actor domain.User) (domain.User, error)
 	IssuePasswordResetToken(userID string, actor domain.User) (domain.PasswordResetToken, error)
+	CreateAPIToken(input domain.CreateAPITokenInput, actor domain.User) (domain.APITokenCredential, error)
+	APITokens(userID string) []domain.APIToken
+	RevokeAPIToken(tokenID string, actor domain.User) error
+	AuthenticateAPIToken(token string) (domain.APITokenPrincipal, error)
 	ServerMembership(serverID string, userID string) (domain.ServerMembership, error)
 	PutServerMembership(serverID string, userID string, permissions []string, actor domain.User) (domain.ServerMembership, error)
 	DeleteServerMembership(serverID string, userID string, actor domain.User) error
@@ -69,6 +74,8 @@ type ControlPlane interface {
 	GameDefinitions() []domain.GameDefinition
 	AuditEvents() []domain.AuditEvent
 	Console(serverID string) ([]domain.ConsoleLine, error)
+	IssueConsoleConnectionToken(serverID string, userID string) (domain.ConsoleConnectionCredential, error)
+	ConsumeConsoleConnectionToken(token string) (domain.ConsoleConnectionPrincipal, error)
 	SubscribeConsoleLines(serverID string) (<-chan domain.ConsoleLine, func())
 	SendConsoleCommand(serverID string, command string, actor domain.User) error
 	RecordConsoleCommandResult(serverID string, actor domain.User, result domain.ConsoleCommandResult) error
@@ -98,6 +105,47 @@ type CommandDispatcher interface {
 // stores intentionally do not implement it because they have no dependencies.
 type ReadinessChecker interface {
 	Readiness(context.Context) error
+}
+
+type automationControlPlane interface {
+	Schedules() ([]domain.Schedule, error)
+	CreateSchedule(domain.ScheduleInput, domain.User) (domain.Schedule, error)
+	DeleteSchedule(string, domain.User) error
+	ScheduleRuns(string) ([]domain.ScheduleRun, error)
+	BackupPolicy(string) (domain.BackupPolicy, error)
+	PutBackupPolicy(string, domain.BackupPolicyInput, domain.User) (domain.BackupPolicy, error)
+	Notifications() ([]domain.Notification, error)
+	AcknowledgeNotification(string, domain.User) error
+	Webhooks() ([]domain.WebhookEndpoint, error)
+	CreateWebhook(domain.WebhookInput, domain.User) (domain.WebhookCredential, error)
+	TestWebhook(context.Context, string, domain.User) (string, error)
+	EmitNotification(context.Context, string, string, string, string, string, string, string, map[string]any) (string, error)
+	Quota() (domain.Quota, error)
+	PutQuota(domain.Quota, domain.User) (domain.Quota, error)
+	Capacity() (domain.Capacity, error)
+	SetNodeDrain(string, bool, string, domain.User) (domain.Node, error)
+}
+
+type catalogManagementControlPlane interface {
+	BundleSources() ([]domain.BundleSource, error)
+	CreateBundleSource(domain.BundleSourceInput, domain.User) (domain.BundleSource, error)
+	BundleTrustRoots() ([]domain.BundleTrustRoot, error)
+	CreateBundleTrustRoot(domain.BundleTrustRootInput, domain.User) (domain.BundleTrustRoot, error)
+	RevokeBundleTrustRoot(string, domain.User) error
+	BundleRevisions() ([]domain.BundleRevision, error)
+	ImportBundle(domain.BundleImportInput, domain.User) (domain.BundleRevision, error)
+	ReviewBundle(string, domain.BundleReviewInput, domain.User) (domain.BundleReview, error)
+	UpgradeServer(string, string, int64, string, domain.User) (domain.Operation, error)
+	RollbackServer(string, int64, string, domain.User) (domain.Operation, error)
+}
+
+type outboxManagementControlPlane interface {
+	OutboxDeadLetters(context.Context) ([]domain.OutboxDeadLetter, error)
+	ReplayDeadLetter(context.Context, string) error
+}
+
+type auditQueryControlPlane interface {
+	AuditEventsPage(context.Context, domain.AuditQuery) (domain.AuditEventPage, error)
 }
 
 // Option 配置 Handler。
@@ -130,8 +178,10 @@ type Handler struct {
 }
 
 type principal struct {
-	Token   string
-	Session domain.SessionView
+	Token       string
+	Session     domain.SessionView
+	Scopes      []string
+	ViaAPIToken bool
 }
 
 type contextKey string
@@ -169,12 +219,17 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("GET /api/v1/users/{userID}", h.auth(h.user))
 	mux.HandleFunc("PATCH /api/v1/users/{userID}", h.auth(h.updateUser))
 	mux.HandleFunc("POST /api/v1/users/{userID}/password-reset-tokens", h.auth(h.issuePasswordResetToken))
+	mux.HandleFunc("GET /api/v1/api-tokens", h.auth(h.apiTokens))
+	mux.HandleFunc("POST /api/v1/api-tokens", h.auth(h.createAPIToken))
+	mux.HandleFunc("DELETE /api/v1/api-tokens/{tokenID}", h.auth(h.revokeAPIToken))
 	mux.HandleFunc("GET /api/v1/overview", h.auth(h.overview))
 	mux.HandleFunc("GET /api/v1/servers", h.auth(h.servers))
 	mux.HandleFunc("POST /api/v1/servers", h.auth(h.createServer))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}", h.auth(h.server))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/permissions", h.auth(h.serverPermissions))
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/power", h.auth(h.power))
+	mux.HandleFunc("POST /api/v1/servers/{serverID}/upgrade", h.auth(h.upgradeServer))
+	mux.HandleFunc("POST /api/v1/servers/{serverID}/rollback", h.auth(h.rollbackServer))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/allocations", h.auth(h.allocations))
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/allocations", h.auth(h.createAllocation))
 	mux.HandleFunc("PATCH /api/v1/servers/{serverID}/allocations/{allocationID}", h.auth(h.setPrimaryAllocation))
@@ -185,7 +240,8 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("PUT /api/v1/servers/{serverID}/members/{userID}", h.auth(h.putServerMembership))
 	mux.HandleFunc("DELETE /api/v1/servers/{serverID}/members/{userID}", h.auth(h.deleteServerMembership))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/console", h.auth(h.console))
-	mux.HandleFunc("GET /api/v1/servers/{serverID}/console/stream", h.auth(h.consoleStream))
+	mux.HandleFunc("POST /api/v1/servers/{serverID}/console-tokens", h.auth(h.issueConsoleToken))
+	mux.HandleFunc("GET /api/v1/servers/{serverID}/console/stream", h.consoleStream)
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/console/commands", h.auth(h.consoleCommand))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/files", h.auth(h.files))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/files/content", h.auth(h.fileContent))
@@ -194,17 +250,43 @@ func New(service ControlPlane, logger *slog.Logger, opts ...Option) http.Handler
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/files/moves", h.auth(h.moveFile))
 	mux.HandleFunc("DELETE /api/v1/servers/{serverID}/files", h.auth(h.deleteFile))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/backups", h.auth(h.backups))
+	mux.HandleFunc("GET /api/v1/servers/{serverID}/backup-policy", h.auth(h.backupPolicy))
+	mux.HandleFunc("PUT /api/v1/servers/{serverID}/backup-policy", h.auth(h.putBackupPolicy))
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/backups", h.auth(h.createBackup))
 	mux.HandleFunc("POST /api/v1/servers/{serverID}/backups/{backupID}/restore", h.auth(h.restoreBackup))
 	mux.HandleFunc("DELETE /api/v1/servers/{serverID}/backups/{backupID}", h.auth(h.deleteBackup))
 	mux.HandleFunc("GET /api/v1/servers/{serverID}/backups/{backupID}/download", h.auth(h.downloadBackup))
 	mux.HandleFunc("GET /api/v1/nodes", h.auth(h.nodes))
 	mux.HandleFunc("DELETE /api/v1/nodes/{nodeID}", h.auth(h.revokeNode))
+	mux.HandleFunc("POST /api/v1/nodes/{nodeID}/drain", h.auth(h.drainNode))
+	mux.HandleFunc("DELETE /api/v1/nodes/{nodeID}/drain", h.auth(h.undrainNode))
 	mux.HandleFunc("POST /api/v1/agent-enrollment-tokens", h.auth(h.issueAgentEnrollmentToken))
 	mux.HandleFunc("GET /api/v1/game-definitions", h.auth(h.games))
+	mux.HandleFunc("GET /api/v1/bundle-sources", h.auth(h.bundleSources))
+	mux.HandleFunc("POST /api/v1/bundle-sources", h.auth(h.createBundleSource))
+	mux.HandleFunc("GET /api/v1/bundle-trust-roots", h.auth(h.bundleTrustRoots))
+	mux.HandleFunc("POST /api/v1/bundle-trust-roots", h.auth(h.createBundleTrustRoot))
+	mux.HandleFunc("DELETE /api/v1/bundle-trust-roots/{keyID}", h.auth(h.revokeBundleTrustRoot))
+	mux.HandleFunc("GET /api/v1/bundle-revisions", h.auth(h.bundleRevisions))
+	mux.HandleFunc("POST /api/v1/bundle-revisions", h.auth(h.importBundleRevision))
+	mux.HandleFunc("POST /api/v1/bundle-revisions/{bundleID}/reviews", h.auth(h.reviewBundleRevision))
 	mux.HandleFunc("GET /api/v1/operations", h.auth(h.operations))
 	mux.HandleFunc("GET /api/v1/operations/{operationID}", h.auth(h.operation))
 	mux.HandleFunc("GET /api/v1/audit-events", h.auth(h.audit))
+	mux.HandleFunc("GET /api/v1/schedules", h.auth(h.schedules))
+	mux.HandleFunc("POST /api/v1/schedules", h.auth(h.createSchedule))
+	mux.HandleFunc("DELETE /api/v1/schedules/{scheduleID}", h.auth(h.deleteSchedule))
+	mux.HandleFunc("GET /api/v1/schedules/{scheduleID}/runs", h.auth(h.scheduleRuns))
+	mux.HandleFunc("GET /api/v1/notifications", h.auth(h.notifications))
+	mux.HandleFunc("POST /api/v1/notifications/{notificationID}/acknowledge", h.auth(h.acknowledgeNotification))
+	mux.HandleFunc("GET /api/v1/webhooks", h.auth(h.webhooks))
+	mux.HandleFunc("POST /api/v1/webhooks", h.auth(h.createWebhook))
+	mux.HandleFunc("POST /api/v1/webhooks/{webhookID}/test", h.auth(h.testWebhook))
+	mux.HandleFunc("GET /api/v1/quota", h.auth(h.quota))
+	mux.HandleFunc("PUT /api/v1/quota", h.auth(h.putQuota))
+	mux.HandleFunc("GET /api/v1/capacity", h.auth(h.capacity))
+	mux.HandleFunc("GET /api/v1/outbox/dead-letters", h.auth(h.outboxDeadLetters))
+	mux.HandleFunc("POST /api/v1/outbox/dead-letters/{eventID}/replay", h.auth(h.replayOutboxDeadLetter))
 	return h.middleware(mux)
 }
 
@@ -229,6 +311,18 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 
 func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+			credential := strings.TrimSpace(authorization[len("Bearer "):])
+			resolved, err := h.service.AuthenticateAPIToken(credential)
+			if err != nil {
+				h.writeError(w, traceID(r), err)
+				return
+			}
+			session := domain.SessionView{User: resolved.User, Environment: resolved.Environment}
+			ctx := context.WithValue(r.Context(), principalKey, principal{Session: session, Scopes: resolved.Scopes, ViaAPIToken: true})
+			next(w, r.WithContext(ctx))
+			return
+		}
 		cookie, err := r.Cookie(sessionCookie)
 		if err != nil {
 			h.writeError(w, traceID(r), domain.NewProblem("AUTH_REQUIRED", "请先登录", false))
@@ -246,6 +340,9 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 
 func (h *Handler) requireCSRF(w http.ResponseWriter, r *http.Request) bool {
 	actor := principalFrom(r)
+	if actor.ViaAPIToken {
+		return true
+	}
 	if !h.service.ValidateCSRF(actor.Token, r.Header.Get("X-CSRF-Token")) {
 		h.writeError(w, traceID(r), domain.NewProblem("CSRF_FAILED", "请求安全令牌无效，请刷新页面后重试", false))
 		return false
@@ -254,7 +351,12 @@ func (h *Handler) requireCSRF(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (h *Handler) requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
-	for _, role := range principalFrom(r).Session.User.Roles {
+	actor := principalFrom(r)
+	if actor.ViaAPIToken && !containsScope(actor.Scopes, "platform.admin") {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "API Token 缺少 platform.admin scope", false))
+		return false
+	}
+	for _, role := range actor.Session.User.Roles {
 		if role == "platform_admin" {
 			return true
 		}
@@ -264,12 +366,26 @@ func (h *Handler) requirePlatformAdmin(w http.ResponseWriter, r *http.Request) b
 }
 
 func (h *Handler) authorizeServer(w http.ResponseWriter, r *http.Request, permission string) bool {
-	actor := principalFrom(r).Session.User
+	resolved := principalFrom(r)
+	if resolved.ViaAPIToken && !containsScope(resolved.Scopes, permission) {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "API Token 缺少所需服务器 scope", false))
+		return false
+	}
+	actor := resolved.Session.User
 	if err := h.service.AuthorizeServer(actor.ID, r.PathValue("serverID"), permission); err != nil {
 		h.writeError(w, traceID(r), err)
 		return false
 	}
 	return true
+}
+
+func containsScope(scopes []string, required string) bool {
+	for _, scope := range scopes {
+		if scope == required {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) allowSensitiveRequest(w http.ResponseWriter, r *http.Request, scope string) (*identity.AttemptReservation, string, bool) {
@@ -485,6 +601,53 @@ func (h *Handler) issuePasswordResetToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.writeData(w, http.StatusCreated, issued)
+}
+
+func (h *Handler) apiTokens(w http.ResponseWriter, r *http.Request) {
+	actor := principalFrom(r)
+	if actor.ViaAPIToken {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "API Token 不能管理其他 API Token", false))
+		return
+	}
+	h.writeData(w, http.StatusOK, h.service.APITokens(actor.Session.User.ID))
+}
+
+func (h *Handler) createAPIToken(w http.ResponseWriter, r *http.Request) {
+	actor := principalFrom(r)
+	if actor.ViaAPIToken {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "API Token 不能签发其他 API Token", false))
+		return
+	}
+	if !h.requireCSRF(w, r) {
+		return
+	}
+	var input domain.CreateAPITokenInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "API Token 请求格式无效")
+		return
+	}
+	credential, err := h.service.CreateAPIToken(input, actor.Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, credential)
+}
+
+func (h *Handler) revokeAPIToken(w http.ResponseWriter, r *http.Request) {
+	actor := principalFrom(r)
+	if actor.ViaAPIToken {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "API Token 不能管理其他 API Token", false))
+		return
+	}
+	if !h.requireCSRF(w, r) {
+		return
+	}
+	if err := h.service.RevokeAPIToken(r.PathValue("tokenID"), actor.Session.User); err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
@@ -921,7 +1084,39 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
 	if !h.requirePlatformAdmin(w, r) {
 		return
 	}
-	h.writeData(w, http.StatusOK, h.service.AuditEvents())
+	service, ok := h.service.(auditQueryControlPlane)
+	if !ok {
+		h.writeData(w, http.StatusOK, h.service.AuditEvents())
+		return
+	}
+	query := domain.AuditQuery{
+		Cursor: r.URL.Query().Get("cursor"), Actor: r.URL.Query().Get("actor"), Action: r.URL.Query().Get("action"),
+		TargetType: r.URL.Query().Get("targetType"), Result: r.URL.Query().Get("result"),
+	}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 200 {
+			h.writeError(w, traceID(r), domain.NewProblem("VALIDATION_FAILED", "limit 必须在 1 到 200 之间", false))
+			return
+		}
+		query.Limit = limit
+	}
+	for raw, target := range map[string]**time.Time{"from": &query.From, "to": &query.To} {
+		if value := r.URL.Query().Get(raw); value != "" {
+			parsed, err := time.Parse(time.RFC3339, value)
+			if err != nil {
+				h.writeError(w, traceID(r), domain.NewProblem("VALIDATION_FAILED", raw+" 必须是 RFC3339 时间", false))
+				return
+			}
+			*target = &parsed
+		}
+	}
+	page, err := service.AuditEventsPage(r.Context(), query)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, page)
 }
 
 func (h *Handler) console(w http.ResponseWriter, r *http.Request) {
@@ -936,31 +1131,49 @@ func (h *Handler) console(w http.ResponseWriter, r *http.Request) {
 	h.writeData(w, http.StatusOK, lines)
 }
 
-// consoleStreamFrame 是控制台 WebSocket 的推送帧：
-//   - {"type":"history","lines":[...]} 连接建立后的历史行快照；
-//   - {"type":"line","line":{...}} 后续实时增量。
+// consoleStreamFrame is the versioned real-time console protocol. Snapshot and
+// reset frames make reconnect behavior explicit instead of silently skipping a
+// retention gap. Revoked closes an already-open connection after access loss.
 type consoleStreamFrame struct {
-	Type  string               `json:"type"`
-	Lines []domain.ConsoleLine `json:"lines,omitempty"`
-	Line  domain.ConsoleLine   `json:"line,omitempty"`
+	Version int                  `json:"version"`
+	Type    string               `json:"type"`
+	Lines   []domain.ConsoleLine `json:"lines,omitempty"`
+	Line    domain.ConsoleLine   `json:"line,omitempty"`
+	Reason  string               `json:"reason,omitempty"`
 }
 
-// consoleStreamUpgrader 把控制台实时流升级为 WebSocket。鉴权沿用会话 Cookie
-// （h.auth 已校验），授权沿用 servers.console；CheckOrigin 用 gorilla 默认的
-// 同源校验，阻止跨站 WebSocket 劫持。
-var consoleStreamUpgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 4096,
+func (h *Handler) issueConsoleToken(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.console") || !h.requireCSRF(w, r) {
+		return
+	}
+	actor := principalFrom(r).Session.User
+	credential, err := h.service.IssueConsoleConnectionToken(r.PathValue("serverID"), actor.ID)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, credential)
 }
 
 // consoleStream 把服务器控制台日志实时推送给浏览器：先发历史快照，再转发
 // Agent 上报的增量行。客户端断开或订阅取消时退出。心跳用 Ping 帧探测死链。
 func (h *Handler) consoleStream(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeServer(w, r, "servers.console") {
+	serverID := r.PathValue("serverID")
+	if !sameOriginWebSocketRequest(r) {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "控制台连接 Origin 不受信任", false))
 		return
 	}
-	serverID := r.PathValue("serverID")
-	conn, err := consoleStreamUpgrader.Upgrade(w, r, nil)
+	resolved, err := h.service.ConsumeConsoleConnectionToken(strings.TrimSpace(r.URL.Query().Get("token")))
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	if resolved.ServerID != serverID {
+		h.writeError(w, traceID(r), domain.NewProblem("FORBIDDEN", "控制台连接令牌与服务器不匹配", false))
+		return
+	}
+	upgrader := websocket.Upgrader{ReadBufferSize: 1024, WriteBufferSize: 4096, CheckOrigin: sameOriginWebSocketRequest}
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Debug("console stream upgrade", "server", serverID, "error", err)
 		return
@@ -969,10 +1182,23 @@ func (h *Handler) consoleStream(w http.ResponseWriter, r *http.Request) {
 
 	lines, err := h.service.Console(serverID)
 	if err != nil {
-		_ = conn.WriteJSON(consoleStreamFrame{Type: "error", Lines: nil, Line: domain.ConsoleLine{Message: err.Error()}})
+		_ = conn.WriteJSON(consoleStreamFrame{Version: 1, Type: "error", Reason: "CONSOLE_UNAVAILABLE"})
 		return
 	}
-	if err := conn.WriteJSON(consoleStreamFrame{Type: "history", Lines: lines}); err != nil {
+	after, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("after")), 10, 64)
+	frameType := "snapshot"
+	if after > 0 && len(lines) > 0 && after < lines[0].Sequence-1 {
+		frameType = "reset"
+	} else if after > 0 {
+		filtered := make([]domain.ConsoleLine, 0, len(lines))
+		for _, line := range lines {
+			if line.Sequence > after {
+				filtered = append(filtered, line)
+			}
+		}
+		lines = filtered
+	}
+	if err := conn.WriteJSON(consoleStreamFrame{Version: 1, Type: frameType, Lines: lines}); err != nil {
 		return
 	}
 
@@ -992,13 +1218,22 @@ func (h *Handler) consoleStream(w http.ResponseWriter, r *http.Request) {
 
 	ping := time.NewTicker(30 * time.Second)
 	defer ping.Stop()
+	authorization := time.NewTicker(time.Second)
+	defer authorization.Stop()
 	for {
 		select {
 		case line, ok := <-stream:
 			if !ok {
 				return
 			}
-			if err := conn.WriteJSON(consoleStreamFrame{Type: "line", Line: line}); err != nil {
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteJSON(consoleStreamFrame{Version: 1, Type: "line", Line: line}); err != nil {
+				return
+			}
+		case <-authorization.C:
+			if err := h.service.AuthorizeServer(resolved.UserID, serverID, "servers.console"); err != nil {
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.WriteJSON(consoleStreamFrame{Version: 1, Type: "revoked", Reason: "ACCESS_REVOKED"})
 				return
 			}
 		case <-ping.C:
@@ -1009,6 +1244,20 @@ func (h *Handler) consoleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func sameOriginWebSocketRequest(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	// Non-browser Agent/CLI clients do not send Origin; the one-time token still
+	// authenticates them. Browsers always send Origin and must match Host.
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, r.Host)
 }
 
 func (h *Handler) consoleCommand(w http.ResponseWriter, r *http.Request) {
@@ -1268,6 +1517,525 @@ func (h *Handler) downloadBackup(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) automationService(w http.ResponseWriter, r *http.Request) (automationControlPlane, bool) {
+	service, ok := h.service.(automationControlPlane)
+	if !ok {
+		h.writeError(w, traceID(r), domain.NewProblem("CAPABILITY_UNSUPPORTED", "当前存储适配器不支持自动化运维资源", false))
+	}
+	return service, ok
+}
+
+func (h *Handler) catalogManagementService(w http.ResponseWriter, r *http.Request) (catalogManagementControlPlane, bool) {
+	service, ok := h.service.(catalogManagementControlPlane)
+	if !ok {
+		h.writeError(w, traceID(r), domain.NewProblem("CAPABILITY_UNSUPPORTED", "当前存储适配器不支持签名 Bundle 管理", false))
+	}
+	return service, ok
+}
+
+func (h *Handler) bundleSources(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.BundleSources()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) createBundleSource(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.BundleSourceInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "Bundle source 格式无效")
+		return
+	}
+	item, err := service.CreateBundleSource(input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, item)
+}
+
+func (h *Handler) bundleTrustRoots(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.BundleTrustRoots()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) createBundleTrustRoot(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.BundleTrustRootInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "Bundle trust root 格式无效")
+		return
+	}
+	item, err := service.CreateBundleTrustRoot(input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, item)
+}
+
+func (h *Handler) revokeBundleTrustRoot(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	if err := service.RevokeBundleTrustRoot(r.PathValue("keyID"), principalFrom(r).Session.User); err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) bundleRevisions(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.BundleRevisions()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) importBundleRevision(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.BundleImportInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "签名 Bundle 文档格式无效")
+		return
+	}
+	item, err := service.ImportBundle(input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, item)
+}
+
+func (h *Handler) reviewBundleRevision(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.BundleReviewInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "Bundle 审核请求格式无效")
+		return
+	}
+	item, err := service.ReviewBundle(r.PathValue("bundleID"), input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, item)
+}
+
+func (h *Handler) upgradeServer(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.startup.write") || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	expected, ok := h.ifMatchGeneration(w, r)
+	if !ok {
+		return
+	}
+	var input domain.ServerUpgradeInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "服务器升级请求格式无效")
+		return
+	}
+	operation, err := service.UpgradeServer(r.PathValue("serverID"), input.BundleDigest, expected, r.Header.Get("Idempotency-Key"), principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusAccepted, operation)
+}
+
+func (h *Handler) rollbackServer(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.startup.write") || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.catalogManagementService(w, r)
+	if !ok {
+		return
+	}
+	expected, ok := h.ifMatchGeneration(w, r)
+	if !ok {
+		return
+	}
+	operation, err := service.RollbackServer(r.PathValue("serverID"), expected, r.Header.Get("Idempotency-Key"), principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusAccepted, operation)
+}
+
+func (h *Handler) schedules(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.Schedules()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) createSchedule(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.ScheduleInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "Schedule 配置格式无效")
+		return
+	}
+	item, err := service.CreateSchedule(input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, item)
+}
+
+func (h *Handler) deleteSchedule(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	if err := service.DeleteSchedule(r.PathValue("scheduleID"), principalFrom(r).Session.User); err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) scheduleRuns(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.ScheduleRuns(r.PathValue("scheduleID"))
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) backupPolicy(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.backups.read") {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	policy, err := service.BackupPolicy(r.PathValue("serverID"))
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, policy)
+}
+
+func (h *Handler) putBackupPolicy(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeServer(w, r, "servers.backups.delete") || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.BackupPolicyInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "备份策略格式无效")
+		return
+	}
+	policy, err := service.PutBackupPolicy(r.PathValue("serverID"), input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, policy)
+}
+
+func (h *Handler) notifications(w http.ResponseWriter, r *http.Request) {
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.Notifications()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) acknowledgeNotification(w http.ResponseWriter, r *http.Request) {
+	if !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	if err := service.AcknowledgeNotification(r.PathValue("notificationID"), principalFrom(r).Session.User); err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) webhooks(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	items, err := service.Webhooks()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) createWebhook(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.WebhookInput
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "Webhook 配置格式无效")
+		return
+	}
+	credential, err := service.CreateWebhook(input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusCreated, credential)
+}
+
+func (h *Handler) testWebhook(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	deliveryID, err := service.TestWebhook(r.Context(), r.PathValue("webhookID"), principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusAccepted, map[string]string{"deliveryId": deliveryID})
+}
+
+func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	item, err := service.Quota()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, item)
+}
+
+func (h *Handler) putQuota(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	var input domain.Quota
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "配额配置格式无效")
+		return
+	}
+	item, err := service.PutQuota(input, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, item)
+}
+
+func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	item, err := service.Capacity()
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, item)
+}
+
+func (h *Handler) drainNode(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		h.writeJSONDecodeError(w, r, err, "节点排空请求格式无效")
+		return
+	}
+	node, err := service.SetNodeDrain(r.PathValue("nodeID"), true, input.Reason, principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, node)
+}
+
+func (h *Handler) undrainNode(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.automationService(w, r)
+	if !ok {
+		return
+	}
+	node, err := service.SetNodeDrain(r.PathValue("nodeID"), false, "", principalFrom(r).Session.User)
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, node)
+}
+
+func (h *Handler) outboxDeadLetters(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
+	service, ok := h.service.(outboxManagementControlPlane)
+	if !ok {
+		h.writeError(w, traceID(r), domain.NewProblem("CAPABILITY_UNSUPPORTED", "当前数据适配器不支持 Outbox 管理", false))
+		return
+	}
+	items, err := service.OutboxDeadLetters(r.Context())
+	if err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	h.writeData(w, http.StatusOK, items)
+}
+
+func (h *Handler) replayOutboxDeadLetter(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) || !h.requireCSRF(w, r) {
+		return
+	}
+	service, ok := h.service.(outboxManagementControlPlane)
+	if !ok {
+		h.writeError(w, traceID(r), domain.NewProblem("CAPABILITY_UNSUPPORTED", "当前数据适配器不支持 Outbox 管理", false))
+		return
+	}
+	if err := service.ReplayDeadLetter(r.Context(), r.PathValue("eventID")); err != nil {
+		h.writeError(w, traceID(r), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) writeData(w http.ResponseWriter, status int, data any) {
 	h.writeJSON(w, status, map[string]any{"data": data})
 }
@@ -1349,7 +2117,7 @@ func statusFor(code string) int {
 		return http.StatusConflict
 	case "PRECONDITION_FAILED":
 		return http.StatusPreconditionFailed
-	case "VALIDATION_FAILED", "PATH_ESCAPE_BLOCKED", "INSUFFICIENT_RESOURCE", "GAME_DEFINITION_NOT_APPROVED", "PACKAGE_INCOMPATIBLE", "CONSOLE_UNSUPPORTED", "CAPABILITY_UNSUPPORTED":
+	case "VALIDATION_FAILED", "PATH_ESCAPE_BLOCKED", "INSUFFICIENT_RESOURCE", "QUOTA_EXCEEDED", "GAME_DEFINITION_NOT_APPROVED", "PACKAGE_INCOMPATIBLE", "CONSOLE_UNSUPPORTED", "CAPABILITY_UNSUPPORTED":
 		return http.StatusUnprocessableEntity
 	case "BACKUP_INTEGRITY_FAILED":
 		return http.StatusUnprocessableEntity

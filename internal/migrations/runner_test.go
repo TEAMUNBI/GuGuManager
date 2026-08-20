@@ -82,6 +82,15 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		"server_metric_history",
 		"console_logs",
 		"secret_handles",
+		"object_manifests",
+		"backup_policies",
+		"object_tombstones",
+		"schedules",
+		"notifications",
+		"webhook_endpoints",
+		"workspace_quotas",
+		"server_migrations",
+		"server_bundle_history",
 	} {
 		assertPublicTableExists(t, db, table, true)
 	}
@@ -93,8 +102,8 @@ func TestRunMigrationsUpDown(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if applied != 11 {
-		t.Fatalf("schema_migrations rows = %d, want 11", applied)
+	if applied != 16 {
+		t.Fatalf("schema_migrations rows = %d, want 16", applied)
 	}
 
 	// Idempotency: a repeated up must be a no-op without error.
@@ -115,6 +124,15 @@ func TestRunMigrationsUpDown(t *testing.T) {
 		"password_reset_tokens",
 		"audit_events",
 		"secret_handles",
+		"object_manifests",
+		"backup_policies",
+		"object_tombstones",
+		"schedules",
+		"notifications",
+		"webhook_endpoints",
+		"workspace_quotas",
+		"server_migrations",
+		"server_bundle_history",
 	} {
 		assertPublicTableExists(t, db, table, false)
 	}

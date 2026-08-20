@@ -1,0 +1,17 @@
+package gugumanager:extension@1.0.0;
+
+interface host {
+  record http-response {
+    status: u16,
+    body: list<u8>,
+  }
+
+  progress: func(percent: u8, message: string);
+  read-file: func(path: string) -> result<list<u8>, string>;
+  write-file: func(path: string, content: list<u8>) -> result<_, string>;
+  https-get: func(url: string, secret-binding: option<string>) -> result<http-response, string>;
+}
+world extension {
+  import host;
+  export run: func(input: list<u8>) -> result<list<u8>, string>;
+}

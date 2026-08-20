@@ -38,7 +38,7 @@ func (s *Postgres) ReencryptStartupSecrets(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT sv.server_id::text, gb.game_definition_id, sv.values
+		SELECT sv.server_id::text, gb.game_definition_id, gb.digest, sv.values
 		FROM startup_values sv
 		JOIN servers s ON s.id = sv.server_id AND s.deleted_at IS NULL
 		JOIN game_bundles gb ON gb.id = s.game_bundle_id
@@ -49,12 +49,13 @@ func (s *Postgres) ReencryptStartupSecrets(ctx context.Context) (int, error) {
 	type startupDocument struct {
 		serverID string
 		gameID   string
+		digest   string
 		raw      []byte
 	}
 	var documents []startupDocument
 	for rows.Next() {
 		var document startupDocument
-		if err := rows.Scan(&document.serverID, &document.gameID, &document.raw); err != nil {
+		if err := rows.Scan(&document.serverID, &document.gameID, &document.digest, &document.raw); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan startup values for rotation: %w", err)
 		}
@@ -69,15 +70,16 @@ func (s *Postgres) ReencryptStartupSecrets(ctx context.Context) (int, error) {
 	}
 	processed := 0
 	for _, document := range documents {
-		game, err := fixedCatalogGame(document.gameID)
+		revision, err := s.trustedCatalogRevision(ctx, tx, document.gameID, document.digest)
 		if err != nil {
 			return processed, fmt.Errorf("resolve game %s for server %s: %w", document.gameID, document.serverID, err)
 		}
+		game := revision.Game
 		values, err := decodeSecretJSON(document.raw)
 		if err != nil {
 			return processed, fmt.Errorf("decode startup values for server %s: %w", document.serverID, err)
 		}
-		server := domain.Server{ID: document.serverID, GameID: document.gameID, GameBundleDigest: game.BundleDigest, GameDefinitionVersion: game.Version}
+		server := domain.Server{ID: document.serverID, GameID: document.gameID, GameBundleDigest: document.digest, GameDefinitionVersion: game.Version}
 		startup, _, err := startupFromFixedBundle(server, game, nil)
 		if err != nil {
 			return processed, fmt.Errorf("resolve startup schema for server %s: %w", document.serverID, err)

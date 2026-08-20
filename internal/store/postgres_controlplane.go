@@ -311,7 +311,8 @@ func (s *Postgres) GameDefinitions() []domain.GameDefinition {
 			continue
 		}
 		markCatalogBundleUntrusted(&game, gameSourceDatabaseMetadata)
-		if fixed, err := fixedCatalogGame(game.ID); err == nil && fixed.BundleDigest == game.BundleDigest {
+		if revision, err := s.trustedCatalogRevision(ctx, s.db, game.ID, game.BundleDigest); err == nil {
+			fixed := revision.Game
 			game.Summary = fixed.Summary
 			game.Capabilities = append([]string(nil), fixed.Capabilities...)
 			game.Platforms = append([]string(nil), fixed.Platforms...)
@@ -359,6 +360,86 @@ func (s *Postgres) AuditEvents() []domain.AuditEvent {
 		events = append(events, event)
 	}
 	return events
+}
+
+// AuditEventsPage uses the immutable (created_at,id) tuple as an opaque cursor
+// and applies filters in SQL, so concurrent inserts cannot duplicate or skip
+// rows while an administrator pages through the log.
+func (s *Postgres) AuditEventsPage(ctx context.Context, query domain.AuditQuery) (domain.AuditEventPage, error) {
+	if query.Limit < 1 {
+		query.Limit = 50
+	}
+	if query.Limit > 200 {
+		query.Limit = 200
+	}
+	var cursorTime time.Time
+	var cursorID string
+	if query.Cursor != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(query.Cursor)
+		if err != nil {
+			return domain.AuditEventPage{}, domain.NewProblem("VALIDATION_FAILED", "审计游标无效", false)
+		}
+		var cursor struct {
+			CreatedAt time.Time `json:"createdAt"`
+			ID        string    `json:"id"`
+		}
+		if json.Unmarshal(decoded, &cursor) != nil || cursor.CreatedAt.IsZero() || cursor.ID == "" {
+			return domain.AuditEventPage{}, domain.NewProblem("VALIDATION_FAILED", "审计游标无效", false)
+		}
+		cursorTime, cursorID = cursor.CreatedAt, cursor.ID
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT e.id::text, COALESCE(u.display_name, e.actor_type), e.action, e.target_type, e.target_id,
+		       e.result, COALESCE(e.operation_id::text, ''), e.created_at
+		FROM audit_events e LEFT JOIN users u ON u.id=e.actor_id
+		WHERE ($1='' OR COALESCE(u.display_name,e.actor_type) ILIKE '%' || $1 || '%')
+		  AND ($2='' OR e.action=$2) AND ($3='' OR e.target_type=$3) AND ($4='' OR e.result=$4)
+		  AND ($5::timestamptz IS NULL OR e.created_at >= $5)
+		  AND ($6::timestamptz IS NULL OR e.created_at <= $6)
+		  AND ($7::timestamptz IS NULL OR (e.created_at,e.id) < ($7,$8::uuid))
+		ORDER BY e.created_at DESC,e.id DESC LIMIT $9
+	`, strings.TrimSpace(query.Actor), strings.TrimSpace(query.Action), strings.TrimSpace(query.TargetType), strings.TrimSpace(query.Result),
+		query.From, query.To, nullTime(cursorTime), nullString(cursorID), query.Limit+1)
+	if err != nil {
+		return domain.AuditEventPage{}, domain.NewProblem("INTERNAL_ERROR", "无法读取审计日志", true)
+	}
+	defer rows.Close()
+	items := make([]domain.AuditEvent, 0, query.Limit+1)
+	for rows.Next() {
+		event, err := scanAuditEvent(rows)
+		if err != nil {
+			return domain.AuditEventPage{}, err
+		}
+		items = append(items, event)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.AuditEventPage{}, err
+	}
+	page := domain.AuditEventPage{Items: items}
+	if len(items) > query.Limit {
+		last := items[query.Limit-1]
+		encoded, _ := json.Marshal(struct {
+			CreatedAt time.Time `json:"createdAt"`
+			ID        string    `json:"id"`
+		}{last.CreatedAt, last.ID})
+		page.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+		page.Items = items[:query.Limit]
+	}
+	return page, nil
+}
+
+func nullTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
+}
+
+func nullString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // VisibleOperations returns operations for servers the user can read, newest
@@ -726,7 +807,6 @@ func (s *Postgres) RequestPower(serverID string, action domain.PowerAction, idem
 	if existing, ok, err := s.lookupIdempotentTask(ctx, scope, idempotencyKey, digest); err != nil || ok {
 		return existing, err
 	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法开始事务", true)
@@ -799,10 +879,11 @@ func (s *Postgres) validateRequiredStartupVariables(ctx context.Context, tx *sql
 		ID: row.ID, GameID: row.GameID, GameBundleDigest: row.GameBundleDigest,
 		GameDefinitionVersion: row.GameDefinitionVersion, NodeID: row.NodeID, Generation: row.Generation,
 	}
-	game, err := fixedCatalogGame(row.GameID)
+	revision, err := s.trustedCatalogRevision(ctx, tx, row.GameID, row.GameBundleDigest)
 	if err != nil {
 		return err
 	}
+	game := revision.Game
 	startup, _, err := startupFromFixedBundle(server, game, nil)
 	if err != nil {
 		return err
@@ -975,8 +1056,12 @@ func (s *Postgres) CreateAllocation(
 	}
 
 	operationID := id.New()
+	taskInput, err := s.materializeDesiredRuntimeTx(ctx, tx, row, nextGeneration)
+	if err != nil {
+		return domain.Operation{}, err
+	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "network.allocation.create", now, "")
+		nextGeneration, actor.ID, currentActor, "network.allocation.create", now, taskInput)
 }
 
 // SetPrimaryAllocation switches which active allocation is primary and
@@ -1069,8 +1154,12 @@ func (s *Postgres) SetPrimaryAllocation(
 	}
 
 	operationID := id.New()
+	taskInput, err := s.materializeDesiredRuntimeTx(ctx, tx, row, nextGeneration)
+	if err != nil {
+		return domain.Operation{}, err
+	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "network.allocation.primary", now, "")
+		nextGeneration, actor.ID, currentActor, "network.allocation.primary", now, taskInput)
 }
 
 // DeleteAllocation releases an allocation (soft delete) and enqueues a
@@ -1175,8 +1264,12 @@ func (s *Postgres) DeleteAllocation(
 	}
 
 	operationID := id.New()
+	taskInput, err := s.materializeDesiredRuntimeTx(ctx, tx, row, nextGeneration)
+	if err != nil {
+		return domain.Operation{}, err
+	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "network.allocation.delete", now, "")
+		nextGeneration, actor.ID, currentActor, "network.allocation.delete", now, taskInput)
 }
 
 // Startup returns the Startup declaration resolved from the fixed bundle plus
@@ -1189,10 +1282,11 @@ func (s *Postgres) Startup(serverID string) (domain.Startup, error) {
 	if err != nil {
 		return domain.Startup{}, err
 	}
-	game, err := fixedCatalogGame(server.GameID)
+	revision, err := s.trustedCatalogRevision(ctx, s.db, server.GameID, server.GameBundleDigest)
 	if err != nil {
 		return domain.Startup{}, err
 	}
+	game := revision.Game
 	startup, _, err := startupFromFixedBundle(server, game, nil)
 	if err != nil {
 		return domain.Startup{}, err
@@ -1342,10 +1436,11 @@ func (s *Postgres) UpdateStartup(
 		ID: row.ID, GameID: row.GameID, GameBundleDigest: row.GameBundleDigest,
 		GameDefinitionVersion: row.GameDefinitionVersion, NodeID: row.NodeID, Generation: row.Generation,
 	}
-	game, err := fixedCatalogGame(row.GameID)
+	revision, err := s.trustedCatalogRevision(ctx, tx, row.GameID, row.GameBundleDigest)
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	game := revision.Game
 	startup, _, err := startupFromFixedBundle(server, game, nil)
 	if err != nil {
 		return domain.Operation{}, err
@@ -1398,8 +1493,12 @@ func (s *Postgres) UpdateStartup(
 	}
 
 	operationID := id.New()
+	taskInput, err := s.materializeDesiredRuntimeTx(ctx, tx, row, nextGeneration)
+	if err != nil {
+		return domain.Operation{}, err
+	}
 	return s.commitWriteTask(ctx, tx, scope, idempotencyKey, digest, operationID, serverID, row.NodeID, taskType,
-		nextGeneration, actor.ID, currentActor, "server.startup.update", now, "")
+		nextGeneration, actor.ID, currentActor, "server.startup.update", now, taskInput)
 }
 
 // normalizeStartupUpdates validates the update map against the declared
@@ -1868,6 +1967,21 @@ func (s *Postgres) CreateBackup(serverID string, idempotencyKey string, actor do
 	if existing, ok, err := s.lookupIdempotentTask(ctx, scope, idempotencyKey, digest); err != nil || ok {
 		return existing, err
 	}
+	quota, err := s.Quota()
+	if err != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法读取备份配额", true)
+	}
+	var activeBackups, activeUploads int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+		 (SELECT count(*) FROM server_tasks WHERE task_type IN ('backup','restore','backup-delete') AND status IN ('queued','leased','running')),
+		 (SELECT count(*) FROM backups WHERE remote_status = 'uploading')
+	`).Scan(&activeBackups, &activeUploads); err != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法统计备份并发配额", true)
+	}
+	if activeBackups >= quota.MaxConcurrentBackups || activeUploads >= quota.MaxConcurrentUploads {
+		return domain.Operation{}, domain.NewProblem("QUOTA_EXCEEDED", "备份或上传并发配额已用尽", true)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1944,6 +2058,31 @@ func (s *Postgres) RestoreBackup(serverID string, backupID string, idempotencyKe
 	}
 	if existing, ok, err := s.lookupIdempotentTask(ctx, scope, idempotencyKey, digest); err != nil || ok {
 		return existing, err
+	}
+	// Stage a verified remote recovery point on the current node before the
+	// transactional state change. Agent upload is immutable and idempotent.
+	var preflightNodeID, preflightDigest, preflightManifest, preflightRemoteStatus string
+	var preflightSize sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT s.node_id::text, COALESCE(b.content_digest, ''), COALESCE(b.manifest_digest, ''),
+		       b.size_bytes, b.remote_status
+		FROM backups b JOIN servers s ON s.id = b.server_id
+		WHERE b.id = $1 AND b.server_id = $2
+	`, backupID, serverID).Scan(&preflightNodeID, &preflightDigest, &preflightManifest, &preflightSize, &preflightRemoteStatus); err == nil &&
+		preflightRemoteStatus == "ready" && preflightSize.Valid {
+		if dispatcher := s.getFileDispatcher(); dispatcher != nil {
+			if uploader, ok := dispatcher.(BackupUploader); ok {
+				remote, available, remoteErr := s.remoteBackupContent(ctx, backupID, preflightDigest, preflightSize.Int64)
+				if remoteErr != nil {
+					return domain.Operation{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "远程恢复点完整性校验失败", false)
+				}
+				if available {
+					if err := uploader.UploadBackup(ctx, preflightNodeID, serverID, backupID, remote, preflightDigest, preflightManifest); err != nil {
+						return domain.Operation{}, mapAgentFileError(errorCodeFromDispatcher(err))
+					}
+				}
+			}
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -2128,26 +2267,6 @@ func (s *Postgres) DownloadBackup(serverID string, backupID string, actor domain
 	if _, err := s.authorizeServer(ctx, actor.ID, serverID, "servers.backups.read"); err != nil {
 		return domain.BackupContent{}, err
 	}
-
-	var nodeID, nodeCondition string
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(s.node_id::text, ''), COALESCE(n.condition, 'offline')
-		FROM servers s
-		LEFT JOIN nodes n ON n.id = s.node_id
-		WHERE s.id = $1 AND s.deleted_at IS NULL
-	`, serverID).Scan(&nodeID, &nodeCondition); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "服务器不存在", false)
-		}
-		return domain.BackupContent{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
-	}
-	if nodeCondition != "available" {
-		return domain.BackupContent{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法下载备份", true)
-	}
-	if nodeID == "" {
-		return domain.BackupContent{}, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
-	}
-
 	var backupStatus, expectedChecksum string
 	var expectedSize sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `
@@ -2167,6 +2286,30 @@ func (s *Postgres) DownloadBackup(serverID string, backupID string, actor domain
 	}
 	if !backupChecksumValid(expectedChecksum) || !expectedSize.Valid || expectedSize.Int64 < 0 {
 		return domain.BackupContent{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "备份完整性元数据无效", false)
+	}
+	if remote, available, err := s.remoteBackupContent(ctx, backupID, expectedChecksum, expectedSize.Int64); err != nil {
+		return domain.BackupContent{}, domain.NewProblem("BACKUP_INTEGRITY_FAILED", "远程备份完整性校验失败", false)
+	} else if available {
+		return remote, nil
+	}
+
+	var nodeID, nodeCondition string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(s.node_id::text, ''), COALESCE(n.condition, 'offline')
+		FROM servers s
+		LEFT JOIN nodes n ON n.id = s.node_id
+		WHERE s.id = $1 AND s.deleted_at IS NULL
+	`, serverID).Scan(&nodeID, &nodeCondition); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.BackupContent{}, domain.NewProblem("NOT_FOUND", "服务器不存在", false)
+		}
+		return domain.BackupContent{}, domain.NewProblem("INTERNAL_ERROR", "无法查询服务器", true)
+	}
+	if nodeCondition != "available" {
+		return domain.BackupContent{}, domain.NewProblem("NODE_OFFLINE", "节点当前离线，无法下载备份", true)
+	}
+	if nodeID == "" {
+		return domain.BackupContent{}, domain.NewProblem("VALIDATION_FAILED", "服务器尚未分配到节点", false)
 	}
 
 	fd := s.getFileDispatcher()

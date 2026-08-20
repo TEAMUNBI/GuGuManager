@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -14,25 +13,10 @@ import (
 	"github.com/gugumanager/gugumanager/internal/store"
 )
 
-// wsDial 用已登录客户端的会话 cookie 建立控制台实时流连接。
-func wsDial(t *testing.T, serverURL string, client *http.Client, path string) *websocket.Conn {
+func wsDial(t *testing.T, serverURL string, path string) *websocket.Conn {
 	t.Helper()
-	u, err := url.Parse(serverURL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
-	var cookieValue string
-	for _, cookie := range client.Jar.Cookies(u) {
-		if cookie.Name == sessionCookie {
-			cookieValue = cookie.Value
-			break
-		}
-	}
-	if cookieValue == "" {
-		t.Fatal("no session cookie in jar")
-	}
 	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + path
-	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Cookie": []string{sessionCookie + "=" + cookieValue}})
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		if resp != nil {
 			resp.Body.Close()
@@ -49,9 +33,27 @@ func TestConsoleStreamPushesHistoryThenLiveLines(t *testing.T) {
 	testServer := httptest.NewServer(handler)
 	defer testServer.Close()
 	client, session := authenticatedClient(t, testServer.URL)
+	issued := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console-tokens", "", map[string]string{"X-CSRF-Token": session.CSRFToken})
+	if issued.StatusCode != http.StatusCreated {
+		issued.Body.Close()
+		t.Fatalf("issue console token status = %d, want 201", issued.StatusCode)
+	}
+	var credential struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	decodeResponse(t, issued, &credential)
 
-	conn := wsDial(t, testServer.URL, client, "/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console/stream")
+	conn := wsDial(t, testServer.URL, "/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console/stream?token="+credential.Data.Token)
 	defer conn.Close()
+	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console/stream?token=" + credential.Data.Token
+	if replay, response, err := websocket.DefaultDialer.Dial(wsURL, nil); err == nil {
+		replay.Close()
+		t.Fatal("expected consumed console token replay to fail")
+	} else if response != nil {
+		response.Body.Close()
+	}
 
 	// 第一帧必须是历史快照。
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -61,8 +63,8 @@ func TestConsoleStreamPushesHistoryThenLiveLines(t *testing.T) {
 	if err := conn.ReadJSON(&frame); err != nil {
 		t.Fatalf("read history frame: %v", err)
 	}
-	if frame.Type != "history" {
-		t.Fatalf("first frame type = %q, want history", frame.Type)
+	if frame.Type != "snapshot" || frame.Version != 1 {
+		t.Fatalf("first frame = %+v, want v1 snapshot", frame)
 	}
 
 	// 发送命令产生两行日志，应经 WS 实时推送（替代轮询）。
@@ -104,4 +106,32 @@ func TestConsoleStreamRequiresAuthorization(t *testing.T) {
 	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated ws status = %d, want 401", resp.StatusCode)
 	}
+}
+
+func TestConsoleStreamRejectsCrossOriginBeforeConsumingToken(t *testing.T) {
+	service := store.NewMemory("development", "admin@gugu.local", "gugu-dev-2026", "agent-token", time.Millisecond)
+	defer func() { _ = service.Close() }()
+	handler := New(service, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+	client, session := authenticatedClient(t, testServer.URL)
+	issued := doJSON(t, client, http.MethodPost, testServer.URL+"/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console-tokens", "", map[string]string{"X-CSRF-Token": session.CSRFToken})
+	var credential struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	decodeResponse(t, issued, &credential)
+	path := "/api/v1/servers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/console/stream?token=" + credential.Data.Token
+	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + path
+	header := http.Header{"Origin": []string{"https://attacker.invalid"}}
+	if conn, response, err := websocket.DefaultDialer.Dial(wsURL, header); err == nil {
+		conn.Close()
+		t.Fatal("cross-origin console connection succeeded")
+	} else if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin response = %+v, err=%v", response, err)
+	}
+	// The rejected handshake must not burn the one-time token.
+	conn := wsDial(t, testServer.URL, path)
+	conn.Close()
 }

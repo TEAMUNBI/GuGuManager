@@ -400,6 +400,7 @@ func verifyServerFingerprint(expected string) func(rawCerts [][]byte, verifiedCh
 func defaultCapabilities() []*agentv1.Capability {
 	return []*agentv1.Capability{
 		{Name: "runtime.container", Version: "1"},
+		{Name: "server.reconcile", Version: "1"},
 		{Name: "platform." + runtime.GOOS + "." + runtime.GOARCH, Version: "1"},
 	}
 }
@@ -585,6 +586,8 @@ func taskPayloadMessage(task *agentv1.Task) proto.Message {
 		return p.Backup
 	case *agentv1.Task_Extension:
 		return p.Extension
+	case *agentv1.Task_Reconcile:
+		return p.Reconcile
 	default:
 		return nil
 	}
@@ -848,7 +851,26 @@ func (a *agent) sendTaskResult(outbound connectRequestSender, task *agentv1.Task
 }
 
 func resolveTaskSecretHandles(ctx context.Context, gateway agentv1.AgentGatewayServiceClient, task *agentv1.Task) error {
-	if task == nil || task.GetType() != "provision" || gateway == nil {
+	if task == nil || gateway == nil || (task.GetType() != "provision" && task.GetType() != "reconcile") {
+		return nil
+	}
+	if task.GetType() == "reconcile" {
+		payload := task.GetReconcile()
+		if payload == nil || payload.GetDesired() == nil {
+			return nil
+		}
+		for key, value := range payload.GetDesired().GetVariables() {
+			if !strings.HasPrefix(value, "sh:v1:") {
+				continue
+			}
+			resolved, err := gateway.ResolveSecret(ctx, &agentv1.ResolveSecretRequest{
+				OperationId: task.GetOperationId(), ServerId: task.GetServerId(), Handle: value,
+			})
+			if err != nil {
+				return fmt.Errorf("resolve reconcile secret %q: %w", key, err)
+			}
+			payload.Desired.Variables[key] = resolved.GetValue()
+		}
 		return nil
 	}
 	payload := task.GetProvision()

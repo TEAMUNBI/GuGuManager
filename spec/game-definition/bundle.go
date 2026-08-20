@@ -31,6 +31,7 @@ type canonicalBundle struct {
 	Ports             json.RawMessage   `json:"ports"`
 	Install           json.RawMessage   `json:"install"`
 	Lifecycle         json.RawMessage   `json:"lifecycle"`
+	Revision          json.RawMessage   `json:"revision,omitempty"`
 }
 
 type canonicalBundleSource struct {
@@ -62,6 +63,7 @@ type canonicalBundleSource struct {
 		} `json:"runtime"`
 		Install   json.RawMessage `json:"install"`
 		Lifecycle json.RawMessage `json:"lifecycle"`
+		Bundle    json.RawMessage `json:"bundle"`
 	} `json:"spec"`
 }
 
@@ -69,7 +71,7 @@ type canonicalBundleSource struct {
 // It intentionally covers executable Bundle content and ignores source-file
 // whitespace, so the embedded catalog and a published bundle share identity.
 func CanonicalBundleDigest(content []byte) (string, error) {
-	if err := ValidateV1Alpha1JSON(content); err != nil {
+	if err := ValidateJSON(content); err != nil {
 		return "", err
 	}
 	var source canonicalBundleSource
@@ -94,6 +96,7 @@ func CanonicalBundleDigest(content []byte) (string, error) {
 		Stop: source.Spec.Runtime.Stop, Health: source.Spec.Runtime.Health,
 		Ports: source.Spec.Runtime.Ports, Install: source.Spec.Install,
 		Lifecycle: source.Spec.Lifecycle,
+		Revision:  source.Spec.Bundle,
 	}
 	canonical, err := json.Marshal(bundle)
 	if err != nil {

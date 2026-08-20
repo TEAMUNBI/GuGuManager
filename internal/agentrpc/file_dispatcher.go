@@ -197,3 +197,26 @@ func (s *Server) DownloadBackup(ctx context.Context, nodeID, serverID, backupID 
 		Filename:  result.GetFilename(),
 	}, nil
 }
+
+// UploadBackup stages an integrity-pinned remote recovery point on a target
+// Agent before a restore or migration task is enqueued.
+func (s *Server) UploadBackup(ctx context.Context, nodeID, serverID, backupID string, content domain.BackupContent, expectedDigest, expectedManifestDigest string) error {
+	req := &agentv1.FileOperationRequest{
+		ServerId: serverID,
+		Operation: &agentv1.FileOperationRequest_UploadBackup{UploadBackup: &agentv1.FileOperationRequest_UploadBackupInput{
+			BackupId: backupID, Content: content.Content, Base64: content.Base64, SizeBytes: uint64(content.SizeBytes),
+			ExpectedContentDigest: expectedDigest, ExpectedManifestDigest: expectedManifestDigest,
+		}},
+	}
+	resp, err := s.DispatchFileOperation(ctx, nodeID, req)
+	if err != nil {
+		return err
+	}
+	if !resp.GetSucceeded() {
+		return &store.AgentFileError{Code: resp.GetErrorCode()}
+	}
+	if resp.GetUploadBackup() == nil {
+		return &store.AgentFileError{Code: "INTERNAL_ERROR"}
+	}
+	return nil
+}

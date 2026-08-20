@@ -1,0 +1,86 @@
+{
+  "gameDefinitionId": "io.gugumanager.vintagestory",
+  "definitionVersion": "0.4.0",
+  "gameVersion": "1.20.4",
+  "digest": "sha256:11086f3d751133e16ad6423fec491a72d8d15f52bd8e224677f02812a9bbd57a",
+  "schemaVersion": "gugumanager.io/games/v1beta1",
+  "license": "Apache-2.0",
+  "compatibility": {
+    "agent": "\u003e=0.1 \u003c1.0",
+    "panel": "\u003e=0.1 \u003c1.0",
+    "platforms": "linux/amd64"
+  },
+  "capabilities": [
+    "console",
+    "backup"
+  ],
+  "image": "registry.invalid/gugumanager/vintagestory@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+  "command": {
+    "args": [
+      "--dataPath",
+      "/data"
+    ],
+    "executable": "/opt/vintagestory/VintagestoryServer"
+  },
+  "adapter": "container/v1",
+  "user": "1000:1000",
+  "workingDir": "/data",
+  "dataMounts": [
+    {
+      "backup": true,
+      "name": "server-data",
+      "target": "/data"
+    }
+  ],
+  "variables": {
+    "schema": {
+      "properties": {
+        "max_clients": {
+          "default": 8,
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "world_name": {
+          "default": "Aurora Isles",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "world_name",
+        "max_clients"
+      ],
+      "type": "object"
+    }
+  },
+  "stop": {
+    "method": "console",
+    "timeoutSeconds": 30,
+    "value": "/stop"
+  },
+  "health": {
+    "failureThreshold": 4,
+    "intervalSeconds": 15,
+    "portRef": "game",
+    "timeoutSeconds": 5,
+    "type": "tcp"
+  },
+  "ports": [
+    {
+      "containerPort": 42420,
+      "name": "game",
+      "protocol": "tcp",
+      "role": "primary"
+    }
+  ],
+  "install": {},
+  "lifecycle": {
+    "configure": "builtin.bindings",
+    "install": "builtin.artifacts"
+  },
+  "revision": {
+    "artifacts": []
+  }
+}

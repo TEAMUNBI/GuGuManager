@@ -1,0 +1,118 @@
+{
+  "gameDefinitionId": "io.gugumanager.papermc",
+  "definitionVersion": "1.0.0",
+  "gameVersion": "1.21.8",
+  "digest": "sha256:cfc35ab46bc327a793ffed93eefb08e8fb82f61b5510f613e7dfcc6800e52544",
+  "schemaVersion": "gugumanager.io/games/v1beta1",
+  "license": "Apache-2.0",
+  "compatibility": {
+    "agent": "\u003e=0.1 \u003c1.0",
+    "panel": "\u003e=0.1 \u003c1.0",
+    "platforms": "linux/amd64,linux/arm64"
+  },
+  "capabilities": [
+    "console",
+    "query",
+    "backup",
+    "update"
+  ],
+  "image": "itzg/minecraft-server@sha256:da92e9d215c159cd53a0e960d9a9cb67b5455ba1a7fca5b35d92be1e0bde857a",
+  "command": {
+    "args": [],
+    "executable": "/image/scripts/start"
+  },
+  "adapter": "container/v1",
+  "user": "0:0",
+  "workingDir": "/data",
+  "environment": {
+    "EULA": "TRUE",
+    "MEMORY": "{{ memory_mb }}M",
+    "PAPER_BUILD": "60",
+    "TYPE": "PAPER",
+    "VERSION": "1.21.8"
+  },
+  "dataMounts": [
+    {
+      "backup": true,
+      "name": "server-data",
+      "target": "/data"
+    }
+  ],
+  "console": {
+    "adapter": "minecraft-rcon/v1",
+    "port": 25575
+  },
+  "variables": {
+    "bindings": [
+      {
+        "name": "MEMORY",
+        "target": "environment",
+        "template": "{{ value }}M",
+        "variable": "memory_mb"
+      }
+    ],
+    "schema": {
+      "properties": {
+        "accept_eula": {
+          "const": true,
+          "default": true,
+          "type": "boolean"
+        },
+        "memory_mb": {
+          "default": 2048,
+          "maximum": 32768,
+          "minimum": 1024,
+          "type": "integer"
+        },
+        "rcon_password": {
+          "maxLength": 128,
+          "minLength": 8,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accept_eula",
+        "memory_mb"
+      ],
+      "type": "object"
+    },
+    "secrets": [
+      "rcon_password"
+    ]
+  },
+  "stop": {
+    "method": "console",
+    "timeoutSeconds": 30,
+    "value": "stop"
+  },
+  "health": {
+    "failureThreshold": 6,
+    "intervalSeconds": 10,
+    "portRef": "game",
+    "timeoutSeconds": 5,
+    "type": "tcp"
+  },
+  "ports": [
+    {
+      "containerPort": 25565,
+      "name": "game",
+      "protocol": "tcp",
+      "role": "primary"
+    }
+  ],
+  "install": {},
+  "lifecycle": {
+    "configure": "builtin.bindings",
+    "install": "builtin.artifacts",
+    "update": "builtin.replace-artifacts"
+  },
+  "revision": {
+    "artifacts": []
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "keyId": "sha256:15796db294a58f2b7314f4a45e037a77212d35db923654c7d59ca7ffda276b55",
+    "payloadDigest": "sha256:94f0135947c5cf69149e39c36d1f3516bc42fcc32afbc272ae077b30768bbc46",
+    "value": "vKSJtZS105Vo2rnPXJHFExo2atIp0kRqqx/hB5UAE2KzX/JFJ0igPHKl/d/lDon3/8cw/bYxvhOqtDBy5ibQAg"
+  }
+}

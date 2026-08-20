@@ -33,6 +33,11 @@ type passwordResetRecord struct {
 	ExpiresAt time.Time
 }
 
+type memoryAPITokenRecord struct {
+	Token  domain.APIToken
+	UserID string
+}
+
 type Memory struct {
 	mu                  sync.RWMutex
 	fileMutationGates   sync.Map
@@ -49,6 +54,9 @@ type Memory struct {
 	sessions            map[[32]byte]domain.Session
 	memberships         map[string]map[string]domain.ServerMembership
 	passwordResetTokens map[[32]byte]passwordResetRecord
+	apiTokens           map[string]memoryAPITokenRecord
+	apiTokenByDigest    map[[32]byte]string
+	consoleTokens       map[[32]byte]domain.ConsoleConnectionPrincipal
 	setupRequired       bool
 	bootstrapToken      [32]byte
 	bootstrapExpiresAt  time.Time
@@ -128,6 +136,9 @@ func newMemoryAt(environment string, adminEmail string, adminPassword string, ag
 		sessions:            map[[32]byte]domain.Session{},
 		memberships:         map[string]map[string]domain.ServerMembership{},
 		passwordResetTokens: map[[32]byte]passwordResetRecord{},
+		apiTokens:           map[string]memoryAPITokenRecord{},
+		apiTokenByDigest:    map[[32]byte]string{},
+		consoleTokens:       map[[32]byte]domain.ConsoleConnectionPrincipal{},
 		servers:             map[string]domain.Server{},
 		allocations:         map[string]domain.Allocation{},
 		allocationOrder:     map[string][]string{},

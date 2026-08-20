@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Link, NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { Cpu, Gamepad2, LayoutDashboard, ListTodo, LogOut, Menu, Network, PanelLeftClose, PanelLeftOpen, ServerCog, Settings, ShieldCheck, UsersRound, X } from "lucide-react";
+import { Cpu, Gamepad2, KeyRound, LayoutDashboard, ListTodo, LogOut, Menu, Network, PanelLeftClose, PanelLeftOpen, ServerCog, Settings, ShieldCheck, Trash2, UsersRound, X } from "lucide-react";
 import { api, ApiError } from "../lib/api";
-import type { Session } from "../lib/types";
+import type { APIToken, Session } from "../lib/types";
 import { ErrorState, LoadingState } from "../components/PageState";
 import { LoginPage } from "../pages/LoginPage";
 import { OverviewPage } from "../pages/OverviewPage";
@@ -74,13 +74,23 @@ interface SettingsCopy {
   apiDetail: string;
   fallbackActive: string;
   fallbackDetail: string;
+	apiTokens: string;
+	apiTokensDescription: string;
+	tokenName: string;
+	tokenScope: string;
+	createToken: string;
+	creatingToken: string;
+	revokeToken: string;
+	noTokens: string;
+	oneTimeToken: string;
+	oneTimeWarning: string;
 }
 
 const settingsCopy: LocalizedCopy<SettingsCopy> = {
-  "zh-CN": { eyebrow: "管理 / 系统状态", title: "系统状态", description: "查看当前登录信息、数据适配器和 API 接入状态。", currentSession: "当前登录", identity: "登录账号", displayName: "显示名称", email: "邮箱地址", role: "权限角色", environment: "运行环境", adapter: "数据适配器", memory: "进程内开发模式", adapterDescription: "当前使用进程内数据适配器；PostgreSQL、Agent mTLS 与 OCI 运行时仍在接入中。", apiActive: "API 接口已启用", apiDetail: "REST v1 / 幂等请求 / 审计日志", fallbackActive: "本地模拟数据已启用", fallbackDetail: "后端不可用时仍可预览和检查界面" },
-  en: { eyebrow: "ADMIN / SYSTEM STATUS", title: "System status", description: "Review the current session, data adapter, and API integration status.", currentSession: "CURRENT SESSION", identity: "Signed-in account", displayName: "Display name", email: "Email", role: "Role", environment: "Environment", adapter: "DATA ADAPTER", memory: "In-memory development mode", adapterDescription: "This workspace uses an in-process adapter while PostgreSQL, Agent mTLS, and OCI runtime integrations are in progress.", apiActive: "API contract active", apiDetail: "REST v1 / idempotency / audit log", fallbackActive: "Local fallback active", fallbackDetail: "Mock data keeps the interface available when the backend is offline" },
-  ja: { eyebrow: "管理 / システム状態", title: "システム状態", description: "現在のセッション、データアダプター、API 接続状態を確認します。", currentSession: "現在のセッション", identity: "サインイン中のアカウント", displayName: "表示名", email: "メール", role: "ロール", environment: "環境", adapter: "データアダプター", memory: "インメモリ開発モード", adapterDescription: "PostgreSQL、Agent mTLS、OCI ランタイムの統合中は、プロセス内アダプターを使用します。", apiActive: "API 契約は有効", apiDetail: "REST v1 / 冪等性 / 監査ログ", fallbackActive: "ローカルフォールバックは有効", fallbackDetail: "バックエンド停止時もモックデータで画面を確認できます" },
-  ko: { eyebrow: "관리 / 시스템 상태", title: "시스템 상태", description: "현재 세션, 데이터 어댑터 및 API 연결 상태를 확인합니다.", currentSession: "현재 세션", identity: "로그인 계정", displayName: "표시 이름", email: "이메일", role: "역할", environment: "환경", adapter: "데이터 어댑터", memory: "인메모리 개발 모드", adapterDescription: "PostgreSQL, Agent mTLS 및 OCI 런타임을 통합하는 동안 프로세스 내 어댑터를 사용합니다.", apiActive: "API 계약 활성", apiDetail: "REST v1 / 멱등성 / 감사 로그", fallbackActive: "로컬 대체 경로 활성", fallbackDetail: "백엔드가 오프라인이어도 모의 데이터로 화면을 확인할 수 있습니다" },
+  "zh-CN": { eyebrow: "管理 / 系统状态", title: "系统状态", description: "查看当前登录信息、数据适配器和 API 接入状态。", currentSession: "当前登录", identity: "登录账号", displayName: "显示名称", email: "邮箱地址", role: "权限角色", environment: "运行环境", adapter: "数据适配器", memory: "环境选择的运行适配器", adapterDescription: "生产环境使用 PostgreSQL、Redis、mTLS Agent 与 OCI Runtime；开发环境保持隔离的进程内适配器。", apiActive: "API 接口已启用", apiDetail: "REST v1 / Bearer Token / 幂等任务 / 审计", fallbackActive: "开发预览边界", fallbackDetail: "只有本地 Vite 首次探测失败时才会进入 Mock；生产环境永不回退。", apiTokens: "API Token", apiTokensDescription: "为自动化创建最小权限的持久凭据。明文只显示一次。", tokenName: "Token 名称", tokenScope: "权限范围", createToken: "创建 Token", creatingToken: "正在创建…", revokeToken: "撤销 Token", noTokens: "尚未创建 API Token。", oneTimeToken: "一次性凭据", oneTimeWarning: "请立即复制；关闭或刷新后无法再次查看。" },
+  en: { eyebrow: "ADMIN / SYSTEM STATUS", title: "System status", description: "Review the current session, data adapter, and API integration status.", currentSession: "CURRENT SESSION", identity: "Signed-in account", displayName: "Display name", email: "Email", role: "Role", environment: "Environment", adapter: "DATA ADAPTER", memory: "Environment-selected runtime adapter", adapterDescription: "Production uses PostgreSQL, Redis, the mTLS Agent, and the OCI runtime; development keeps the isolated in-process adapter.", apiActive: "API contract active", apiDetail: "REST v1 / bearer tokens / idempotent tasks / audit", fallbackActive: "Development preview boundary", fallbackDetail: "Mock is entered only after the first local Vite probe fails; production never falls back.", apiTokens: "API tokens", apiTokensDescription: "Create least-privilege persistent credentials for automation. Plaintext is shown once.", tokenName: "Token name", tokenScope: "Scope", createToken: "Create token", creatingToken: "Creating…", revokeToken: "Revoke token", noTokens: "No API tokens have been created.", oneTimeToken: "One-time credential", oneTimeWarning: "Copy it now; it cannot be shown again after closing or refreshing." },
+  ja: { eyebrow: "管理 / システム状態", title: "システム状態", description: "現在のセッション、データアダプター、API 接続状態を確認します。", currentSession: "現在のセッション", identity: "サインイン中のアカウント", displayName: "表示名", email: "メール", role: "ロール", environment: "環境", adapter: "データアダプター", memory: "環境で選択されたランタイム", adapterDescription: "本番は PostgreSQL、Redis、mTLS Agent、OCI Runtime を使用し、開発は隔離されたインプロセス実装を維持します。", apiActive: "API 契約は有効", apiDetail: "REST v1 / Bearer Token / 冪等タスク / 監査", fallbackActive: "開発プレビュー境界", fallbackDetail: "Mock はローカル Vite の初回接続失敗時のみ使用され、本番ではフォールバックしません。", apiTokens: "API Token", apiTokensDescription: "自動化用の最小権限の永続認証情報を作成します。平文は一度だけ表示されます。", tokenName: "Token 名", tokenScope: "スコープ", createToken: "Token を作成", creatingToken: "作成中…", revokeToken: "Token を失効", noTokens: "API Token はありません。", oneTimeToken: "一度だけ表示される認証情報", oneTimeWarning: "今すぐコピーしてください。閉じるか更新すると再表示できません。" },
+  ko: { eyebrow: "관리 / 시스템 상태", title: "시스템 상태", description: "현재 세션, 데이터 어댑터 및 API 연결 상태를 확인합니다.", currentSession: "현재 세션", identity: "로그인 계정", displayName: "표시 이름", email: "이메일", role: "역할", environment: "환경", adapter: "데이터 어댑터", memory: "환경에서 선택한 런타임", adapterDescription: "프로덕션은 PostgreSQL, Redis, mTLS Agent와 OCI Runtime을 사용하며 개발은 격리된 인프로세스 어댑터를 유지합니다.", apiActive: "API 계약 활성", apiDetail: "REST v1 / Bearer Token / 멱등 작업 / 감사", fallbackActive: "개발 미리보기 경계", fallbackDetail: "Mock은 로컬 Vite 최초 연결 실패 때만 사용되며 프로덕션에서는 대체되지 않습니다.", apiTokens: "API Token", apiTokensDescription: "자동화를 위한 최소 권한 영구 자격 증명을 만듭니다. 평문은 한 번만 표시됩니다.", tokenName: "Token 이름", tokenScope: "범위", createToken: "Token 만들기", creatingToken: "만드는 중…", revokeToken: "Token 취소", noTokens: "생성된 API Token이 없습니다.", oneTimeToken: "일회성 자격 증명", oneTimeWarning: "지금 복사하세요. 닫거나 새로 고치면 다시 볼 수 없습니다." },
 };
 
 interface AppContextValue {
@@ -311,5 +321,26 @@ function NavItem({ to, icon, label, compact, end = false }: { to: string; icon: 
 function SettingsPage() {
   const { session } = useAppContext();
   const copy = useCopy(settingsCopy);
-  return <section className="page settings-page"><div className="page-heading"><div><h1>{copy.title}</h1><p className="lede">{copy.description}</p></div></div><div className="settings-grid"><div className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">{copy.currentSession}</p><h2>{copy.identity}</h2></div><ShieldCheck size={20} /></div><dl className="detail-list"><div><dt>{copy.displayName}</dt><dd>{session.user.displayName}</dd></div><div><dt>{copy.email}</dt><dd>{session.user.email}</dd></div><div><dt>{copy.role}</dt><dd><span className="code-pill">{session.user.roles.join(" / ")}</span></dd></div><div><dt>{copy.environment}</dt><dd><span className="env-pill">{session.environment}</span></dd></div></dl></div><div className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">{copy.adapter}</p><h2>{copy.memory}</h2></div><Cpu size={20} /></div><p className="panel-copy">{copy.adapterDescription}</p><div className="adapter-check"><span className="check-mark">✓</span><span><strong>{copy.apiActive}</strong><small>{copy.apiDetail}</small></span></div><div className="adapter-check"><span className="check-mark">✓</span><span><strong>{copy.fallbackActive}</strong><small>{copy.fallbackDetail}</small></span></div></div></div></section>;
+  const [tokens, setTokens] = useState<APIToken[]>([]);
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState("servers.read");
+  const [credential, setCredential] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const loadTokens = useCallback(async () => {
+    try { setTokens(await api.apiTokens()); } catch { setTokens([]); }
+  }, []);
+  useEffect(() => { void loadTokens(); }, [loadTokens]);
+  const createToken = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      const created = await api.createAPIToken({ name: name.trim(), scopes: [scope] }, session.csrfToken);
+      setCredential(created.token);
+      setName("");
+      await loadTokens();
+    } finally { setBusy(false); }
+  };
+  const revoke = async (id: string) => { await api.revokeAPIToken(id, session.csrfToken); await loadTokens(); };
+  return <section className="page settings-page"><div className="page-heading"><div><h1>{copy.title}</h1><p className="lede">{copy.description}</p></div></div><div className="settings-grid"><div className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">{copy.currentSession}</p><h2>{copy.identity}</h2></div><ShieldCheck size={20} /></div><dl className="detail-list"><div><dt>{copy.displayName}</dt><dd>{session.user.displayName}</dd></div><div><dt>{copy.email}</dt><dd>{session.user.email}</dd></div><div><dt>{copy.role}</dt><dd><span className="code-pill">{session.user.roles.join(" / ")}</span></dd></div><div><dt>{copy.environment}</dt><dd><span className="env-pill">{session.environment}</span></dd></div></dl></div><div className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">{copy.adapter}</p><h2>{copy.memory}</h2></div><Cpu size={20} /></div><p className="panel-copy">{copy.adapterDescription}</p><div className="adapter-check"><span className="check-mark">✓</span><span><strong>{copy.apiActive}</strong><small>{copy.apiDetail}</small></span></div><div className="adapter-check"><span className="check-mark">✓</span><span><strong>{copy.fallbackActive}</strong><small>{copy.fallbackDetail}</small></span></div></div><div className="panel settings-panel settings-token-panel"><div className="panel-heading"><div><p className="eyebrow">{copy.apiTokens}</p><h2>{copy.apiTokens}</h2></div><KeyRound size={20} /></div><p className="panel-copy">{copy.apiTokensDescription}</p>{credential && <div className="one-time-credential" role="status"><strong>{copy.oneTimeToken}</strong><code translate="no">{credential}</code><small>{copy.oneTimeWarning}</small></div>}<form className="token-create-form" onSubmit={createToken}><label>{copy.tokenName}<input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} required /></label><label>{copy.tokenScope}<select value={scope} onChange={(event) => setScope(event.target.value)}><option value="servers.read">servers.read</option><option value="servers.power">servers.power</option><option value="servers.console">servers.console</option><option value="servers.backups.create">servers.backups.create</option><option value="platform.admin">platform.admin</option></select></label><button className="button primary" disabled={busy || !name.trim()}>{busy ? copy.creatingToken : copy.createToken}</button></form><div className="token-list">{tokens.map((token) => <div className="token-row" key={token.id}><div><strong>{token.name}</strong><code>{token.scopes.join(", ")}</code></div><button className="icon-button danger-button" onClick={() => void revoke(token.id)} aria-label={`${copy.revokeToken}: ${token.name}`} title={copy.revokeToken}><Trash2 size={16} /></button></div>)}{!tokens.length && <p className="panel-copy">{copy.noTokens}</p>}</div></div></div></section>;
 }

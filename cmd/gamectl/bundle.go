@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +19,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/gugumanager/gugumanager/internal/domain"
 	gamedefinition "github.com/gugumanager/gugumanager/spec/game-definition"
 )
 
@@ -44,6 +49,8 @@ type Bundle struct {
 	Ports             json.RawMessage   `json:"ports"`
 	Install           json.RawMessage   `json:"install"`
 	Lifecycle         json.RawMessage   `json:"lifecycle"`
+	Revision          json.RawMessage   `json:"revision,omitempty"`
+	Signature         *BundleSignature  `json:"signature,omitempty"`
 }
 
 // bundleSourceDefinition decodes the parts of a GameDefinition a Bundle is
@@ -78,6 +85,7 @@ type bundleSourceDefinition struct {
 		} `json:"runtime"`
 		Install   json.RawMessage `json:"install"`
 		Lifecycle json.RawMessage `json:"lifecycle"`
+		Bundle    json.RawMessage `json:"bundle"`
 	} `json:"spec"`
 }
 
@@ -91,7 +99,7 @@ func buildBundle(inputPath string) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := gamedefinition.ValidateV1Alpha1JSON(content); err != nil {
+	if err := gamedefinition.ValidateJSON(content); err != nil {
 		return nil, fmt.Errorf("%s is not a valid GameDefinition: %w", inputPath, err)
 	}
 	var definition bundleSourceDefinition
@@ -134,6 +142,7 @@ func buildBundle(inputPath string) (*Bundle, error) {
 		Ports:             definition.Spec.Runtime.Ports,
 		Install:           definition.Spec.Install,
 		Lifecycle:         definition.Spec.Lifecycle,
+		Revision:          definition.Spec.Bundle,
 	}
 	bundle.Digest, err = gamedefinition.CanonicalBundleDigest(content)
 	if err != nil {
@@ -172,18 +181,25 @@ func compatibilityStrings(raw map[string]json.RawMessage) (map[string]string, er
 }
 
 func bundleCommand(args []string) {
-	flags := flag.NewFlagSet("bundle", flag.ExitOnError)
-	_ = flags.Parse(args)
-	remaining := flags.Args()
-	if len(remaining) == 0 {
+	if len(args) == 0 {
 		bundleUsage()
 		os.Exit(2)
 	}
-	switch remaining[0] {
+	switch args[0] {
 	case "build":
-		buildCommand(remaining[1:])
+		buildCommand(args[1:])
+	case "convert":
+		convertCommand(args[1:])
+	case "sign":
+		signCommand(args[1:])
+	case "verify":
+		verifyCommand(args[1:])
+	case "index-build":
+		indexBuildCommand(args[1:])
+	case "index-sign":
+		indexSignCommand(args[1:])
 	case "publish":
-		publishCommand(remaining[1:])
+		publishCommand(args[1:])
 	default:
 		bundleUsage()
 		os.Exit(2)
@@ -191,11 +207,13 @@ func bundleCommand(args []string) {
 }
 
 func buildCommand(args []string) {
-	if len(args) != 1 {
+	flags := flag.NewFlagSet("bundle build", flag.ContinueOnError)
+	outputPath := flags.String("out", "", "bundle output path (default stdout)")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
 		bundleUsage()
 		os.Exit(2)
 	}
-	bundle, err := buildBundle(args[0])
+	bundle, err := buildBundle(flags.Arg(0))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bundle build failed: %v\n", err)
 		os.Exit(1)
@@ -205,26 +223,69 @@ func buildCommand(args []string) {
 		fmt.Fprintf(os.Stderr, "bundle build failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println(string(output))
+	if *outputPath == "" {
+		fmt.Println(string(output))
+		return
+	}
+	if err := writeBundle(*outputPath, *bundle); err != nil {
+		fmt.Fprintf(os.Stderr, "bundle build failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("built", bundle.Digest, "to", *outputPath)
 }
 
-func publishCommand(args []string) {
-	if len(args) != 1 {
+func convertCommand(args []string) {
+	flags := flag.NewFlagSet("bundle convert", flag.ContinueOnError)
+	outputPath := flags.String("out", "", "v1beta1 GameDefinition output path")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || *outputPath == "" {
 		bundleUsage()
 		os.Exit(2)
 	}
-	content, err := os.ReadFile(args[0])
+	content, err := os.ReadFile(flags.Arg(0))
+	if err == nil {
+		content, err = gamedefinition.NormalizeToV1Beta1JSON(content)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bundle convert failed: %v\n", err)
+		os.Exit(1)
+	}
+	var formatted bytes.Buffer
+	if err := json.Indent(&formatted, content, "", "  "); err != nil {
+		fmt.Fprintf(os.Stderr, "bundle convert failed: %v\n", err)
+		os.Exit(1)
+	}
+	formatted.WriteByte('\n')
+	if err := atomicWriteBytes(*outputPath, formatted.Bytes()); err != nil {
+		fmt.Fprintf(os.Stderr, "bundle convert failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("converted", flags.Arg(0), "to", *outputPath)
+}
+
+func publishCommand(args []string) {
+	flags := flag.NewFlagSet("bundle publish", flag.ContinueOnError)
+	trustRoot := flags.String("trust-root", os.Getenv("GUGU_BUNDLE_TRUST_ROOT"), "Ed25519 public trust root PEM")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || *trustRoot == "" {
+		bundleUsage()
+		os.Exit(2)
+	}
+	bundlePath := flags.Arg(0)
+	bundle, err := readBundle(bundlePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bundle publish failed: %v\n", err)
 		os.Exit(1)
 	}
-	var bundle Bundle
-	if err := json.Unmarshal(content, &bundle); err != nil {
+	public, err := loadEd25519PublicKey(*trustRoot)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "bundle publish failed: %v\n", err)
 		os.Exit(1)
 	}
-	if !isBundleDigest(bundle.Digest) {
-		fmt.Fprintf(os.Stderr, "bundle publish failed: digest %q is not a sha256:<64 lowercase hex> value\n", bundle.Digest)
+	if err := verifyBundleSignature(bundle, public); err != nil {
+		fmt.Fprintf(os.Stderr, "bundle publish failed: %v\n", err)
+		os.Exit(1)
+	}
+	if bundle.SchemaVersion != gamedefinition.APIVersionV1Beta1 {
+		fmt.Fprintf(os.Stderr, "bundle publish failed: schemaVersion must be %s\n", gamedefinition.APIVersionV1Beta1)
 		os.Exit(1)
 	}
 	dsn := os.Getenv("GUGU_DATABASE_URL")
@@ -238,12 +299,73 @@ func publishCommand(args []string) {
 		os.Exit(1)
 	}
 	defer db.Close()
-	source := "file://" + filepath.ToSlash(args[0])
+	publicPEM, err := marshalEd25519PublicKeyPEM(public)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bundle publish failed: %v\n", err)
+		os.Exit(1)
+	}
+	if err := registerBundleTrustRoot(db, bundle.Signature.KeyID, publicPEM, filepath.Base(*trustRoot)); err != nil {
+		fmt.Fprintf(os.Stderr, "bundle publish failed: %v\n", err)
+		os.Exit(1)
+	}
+	source := "file://" + filepath.ToSlash(bundlePath)
 	if err := publishBundle(db, bundle, source); err != nil {
 		fmt.Fprintf(os.Stderr, "bundle publish failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("published", bundle.Digest, "as", bundle.GameDefinitionID, bundle.DefinitionVersion)
+}
+
+func signCommand(args []string) {
+	flags := flag.NewFlagSet("bundle sign", flag.ContinueOnError)
+	keyPath := flags.String("key", "", "Ed25519 PKCS#8 private key PEM")
+	output := flags.String("out", "", "signed bundle output path")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || *keyPath == "" || *output == "" {
+		bundleUsage()
+		os.Exit(2)
+	}
+	bundle, err := readBundle(flags.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bundle sign failed: %v\n", err)
+		os.Exit(1)
+	}
+	private, err := loadEd25519PrivateKey(*keyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bundle sign failed: %v\n", err)
+		os.Exit(1)
+	}
+	signed, err := signBundle(bundle, private)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bundle sign failed: %v\n", err)
+		os.Exit(1)
+	}
+	if err := writeBundle(*output, signed); err != nil {
+		fmt.Fprintf(os.Stderr, "bundle sign failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("signed", signed.Digest, "with", signed.Signature.KeyID)
+}
+
+func verifyCommand(args []string) {
+	flags := flag.NewFlagSet("bundle verify", flag.ContinueOnError)
+	keyPath := flags.String("key", "", "Ed25519 public trust root PEM")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || *keyPath == "" {
+		bundleUsage()
+		os.Exit(2)
+	}
+	bundle, err := readBundle(flags.Arg(0))
+	if err == nil {
+		var public ed25519.PublicKey
+		public, err = loadEd25519PublicKey(*keyPath)
+		if err == nil {
+			err = verifyBundleSignature(bundle, public)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bundle verify failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("verified", bundle.Digest, "as", bundle.Signature.KeyID)
 }
 
 func isBundleDigest(digest string) bool {
@@ -296,27 +418,138 @@ func publishBundle(db *sql.DB, bundle Bundle, source string) error {
 	if err != nil {
 		return fmt.Errorf("encode compatibility: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	document, err := json.Marshal(bundle)
+	if err != nil {
+		return fmt.Errorf("encode bundle document: %w", err)
+	}
+	runtimeTarget, err := runtimeTargetFromBundle(bundle)
+	if err != nil {
+		return err
+	}
+	runtimeTargetJSON, err := json.Marshal(runtimeTarget)
+	if err != nil {
+		return fmt.Errorf("encode runtime target: %w", err)
+	}
+	manifestJSON := []byte("[]")
+	extensionsJSON := []byte("[]")
+	var sbomJSON any
+	if len(bundle.Revision) > 0 {
+		var revision gamedefinition.BundleRevisionMetadata
+		if err := json.Unmarshal(bundle.Revision, &revision); err != nil {
+			return fmt.Errorf("decode bundle revision metadata: %w", err)
+		}
+		manifestJSON, _ = json.Marshal(revision.Artifacts)
+		extensionsJSON, _ = json.Marshal(revision.Extensions)
+		if revision.SBOM != nil {
+			encoded, _ := json.Marshal(revision.SBOM)
+			sbomJSON = string(encoded)
+		}
+	}
+	signatureJSON, err := json.Marshal(bundle.Signature)
+	if err != nil || bundle.Signature == nil {
+		return errors.New("bundle signature is required")
+	}
+	var insertedID string
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO game_bundles (
 			game_definition_id, definition_version, game_version, digest,
-			schema_version, license, compatibility, published_at
+			schema_version, license, compatibility, published_at, document,
+			runtime_target, artifact_manifest, extensions, sbom, signature,
+			signature_key_id, signature_verified_at, review_status, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())
-		ON CONFLICT (game_definition_id, definition_version) DO UPDATE
-		SET game_version = EXCLUDED.game_version,
-		    digest = EXCLUDED.digest,
-		    license = EXCLUDED.license,
-		    compatibility = EXCLUDED.compatibility,
-		    published_at = now()
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), $8::jsonb,
+		        $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
+		        $14, now(), 'approved', now())
+		ON CONFLICT (game_definition_id, definition_version) DO NOTHING
+		RETURNING id::text
 	`, bundle.GameDefinitionID, bundle.DefinitionVersion, bundle.GameVersion, bundle.Digest,
-		bundle.SchemaVersion, bundle.License, string(compatibility)); err != nil {
+		bundle.SchemaVersion, bundle.License, string(compatibility), string(document), string(runtimeTargetJSON),
+		string(manifestJSON), string(extensionsJSON), sbomJSON, string(signatureJSON), bundle.Signature.KeyID).Scan(&insertedID)
+	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("upsert game_bundles: %w", err)
+	}
+	if err == sql.ErrNoRows {
+		var existingDigest string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT digest FROM game_bundles WHERE game_definition_id = $1 AND definition_version = $2
+		`, bundle.GameDefinitionID, bundle.DefinitionVersion).Scan(&existingDigest); err != nil {
+			return fmt.Errorf("read immutable bundle revision: %w", err)
+		}
+		if existingDigest != bundle.Digest {
+			return fmt.Errorf("immutable revision %s@%s is already bound to %s", bundle.GameDefinitionID, bundle.DefinitionVersion, existingDigest)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE game_bundles SET review_status = 'approved', revoked_at = NULL, updated_at = now()
+			WHERE game_definition_id = $1 AND definition_version = $2 AND digest = $3
+		`, bundle.GameDefinitionID, bundle.DefinitionVersion, bundle.Digest); err != nil {
+			return fmt.Errorf("approve existing bundle revision: %w", err)
+		}
 	}
 
 	return tx.Commit()
 }
 
+func registerBundleTrustRoot(db *sql.DB, keyID, publicPEM, name string) error {
+	_, err := db.Exec(`
+		INSERT INTO bundle_trust_roots (key_id, name, public_key_pem, source)
+		VALUES ($1, $2, $3, 'operator')
+		ON CONFLICT (key_id) DO UPDATE SET name = EXCLUDED.name, public_key_pem = EXCLUDED.public_key_pem, revoked_at = NULL
+	`, keyID, name, publicPEM)
+	if err != nil {
+		return fmt.Errorf("register bundle trust root: %w", err)
+	}
+	return nil
+}
+
+func runtimeTargetFromBundle(bundle Bundle) (domain.GameRuntimeTarget, error) {
+	var command domain.StartupCommand
+	var mounts []domain.RuntimeDataMount
+	var ports []domain.RuntimePort
+	var stop domain.RuntimeStop
+	var health domain.RuntimeHealth
+	var console *domain.RuntimeConsoleAdapter
+	for name, target := range map[string]any{
+		"command": &command, "dataMounts": &mounts, "ports": &ports, "stop": &stop, "health": &health, "console": &console,
+	} {
+		var source json.RawMessage
+		switch name {
+		case "command":
+			source = bundle.Command
+		case "dataMounts":
+			source = bundle.DataMounts
+		case "ports":
+			source = bundle.Ports
+		case "stop":
+			source = bundle.Stop
+		case "health":
+			source = bundle.Health
+		case "console":
+			source = bundle.Console
+		}
+		if len(source) == 0 && name == "console" {
+			continue
+		}
+		if err := json.Unmarshal(source, target); err != nil {
+			return domain.GameRuntimeTarget{}, fmt.Errorf("decode runtime %s: %w", name, err)
+		}
+	}
+	target := domain.GameRuntimeTarget{
+		Adapter: bundle.Adapter, Image: bundle.Image, User: bundle.User, WorkingDir: bundle.WorkingDir,
+		Command: command, Environment: bundle.Environment, DataMounts: mounts, Ports: ports, Stop: stop, Health: health, Console: console,
+	}
+	canonical, err := json.Marshal(target)
+	if err != nil {
+		return domain.GameRuntimeTarget{}, err
+	}
+	digest := sha256.Sum256(canonical)
+	target.Digest = "sha256:" + hex.EncodeToString(digest[:])
+	return target, nil
+}
+
 func bundleUsage() {
 	fmt.Println("gamectl bundle build <definition.json>")
-	fmt.Println("gamectl bundle publish <bundle.json>")
+	fmt.Println("gamectl bundle convert --out <definition.v1beta1.json> <definition.json>")
+	fmt.Println("gamectl bundle sign --key <private.pem> --out <signed.json> <bundle.json>")
+	fmt.Println("gamectl bundle verify --key <public.pem> <signed.json>")
+	fmt.Println("gamectl bundle publish --trust-root <public.pem> <signed.json>")
 }

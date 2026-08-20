@@ -332,7 +332,7 @@ describe("API response handling", () => {
       expect.objectContaining({ serverId, primary: true }),
     ]);
     await expect(offlineApi.startup(serverId)).resolves.toMatchObject({
-      command: { executable: "java" },
+      command: { executable: "/image/scripts/start" },
       variables: expect.arrayContaining([expect.objectContaining({ key: "memory_mb" })]),
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);

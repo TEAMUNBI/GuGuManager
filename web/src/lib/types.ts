@@ -79,6 +79,24 @@ export interface Session {
   environment: Environment;
 }
 
+export interface APIToken {
+  id: string;
+  name: string;
+  scopes: string[];
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+}
+
+export interface APITokenCredential extends APIToken {
+  token: string;
+}
+
+export interface ConsoleConnectionCredential {
+  token: string;
+  expiresAt: string;
+}
+
 export interface Metrics {
   cpuPercent: number;
   memoryBytes: number;

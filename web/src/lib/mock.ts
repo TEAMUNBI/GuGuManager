@@ -130,17 +130,17 @@ interface FixedBundleRecord {
 
 const fixedBundles: FixedBundleRecord[] = [
   {
-    digest: "sha256:412759ce8b7832b3762d1a6f34d076ecceebd4ecd7cd7d04f16ac0cff063285b",
+    digest: "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa",
     document: paperMCBundle as unknown as FixedBundleDocument,
     presentation: { summary: "高性能 Minecraft Java Dedicated Server", status: "approved", servers: 6, icon: "cube", defaultMemoryMb: 4096, defaultDiskGb: 25 },
   },
   {
-    digest: "sha256:d2e03e9dac2b301923b6ebe0e949ceea33420bfb44767c07376d5ffb34c5b62e",
+    digest: "sha256:9234f21256ca3fd1a0886a4ea57f75e30ac6e1f22d1fee7cc7fbe1dc5731b0d7",
     document: factorioBundle as unknown as FixedBundleDocument,
     presentation: { summary: "稳定的工厂协作存档服务器", status: "approved", servers: 3, icon: "factory", defaultMemoryMb: 4096, defaultDiskGb: 20 },
   },
   {
-    digest: "sha256:c2c2cdb82e9ba2cc69e17b9acc99ddd4e75a40dd091e39a19c987927273e7779",
+    digest: "sha256:f85cd736d3428f3ee81c3261a6ddb36e43df950915209f12659a44e53b9e768f",
     document: vintageStoryBundle as unknown as FixedBundleDocument,
     presentation: { summary: "强调探索与持久世界的独立服务器", status: "pending", servers: 1, icon: "mountain", defaultMemoryMb: 3072, defaultDiskGb: 18 },
   },

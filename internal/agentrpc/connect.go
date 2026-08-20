@@ -447,7 +447,7 @@ func healthConditionString(h agentv1.HealthCondition) string {
 // 电源类任务在 server_tasks 中类型为 start/stop/restart/kill，Agent 执行器
 // 只按 provision/power 分发，因此下发前归一化为 Type="power" 并填充 Power
 // 字段（含动作与优雅停机超时）。000009 起新任务输入位于 task_input 并只
-// 通过 typed arm 下发（provision/backup），不再创建新的 payload_json 任务；
+// 通过 typed arm 下发（provision/backup/reconcile），不再创建新的 payload_json 任务；
 // pre-000009 的旧行仍以 payload_json 兼容当前稳定 Agent。
 func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
 	proto := &agentv1.Task{
@@ -478,6 +478,21 @@ func claimedTaskToProto(task *store.ClaimedTask) *agentv1.Task {
 		}
 		s2 := *task
 		proto.Payload = &agentv1.Task_PayloadJson{PayloadJson: s2.PayloadJSON}
+		return proto
+	}
+	if task.TaskType == "reconcile" && len(task.TaskInputJSON) > 0 {
+		payload := &agentv1.ReconcileTaskPayload{}
+		if err := protojson.Unmarshal(task.TaskInputJSON, payload); err == nil {
+			if payload.GetDesired() != nil {
+				proto.BundleDigest = payload.GetDesired().GetBundleDigest()
+			}
+			proto.Payload = &agentv1.Task_Reconcile{Reconcile: payload}
+			return proto
+		}
+		// A corrupt current-format row must remain visible to the Agent as an
+		// invalid legacy payload so it fails deterministically instead of being
+		// mistaken for an empty desired spec.
+		proto.Payload = &agentv1.Task_PayloadJson{PayloadJson: task.TaskInputJSON}
 		return proto
 	}
 	if task.TaskType == "backup" || task.TaskType == "restore" || task.TaskType == "backup-delete" {

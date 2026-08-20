@@ -10,6 +10,7 @@ import (
 
 	"github.com/gugumanager/gugumanager/internal/domain"
 	serverfiles "github.com/gugumanager/gugumanager/internal/files"
+	"github.com/gugumanager/gugumanager/internal/objectstore"
 	_ "github.com/lib/pq"
 )
 
@@ -34,6 +35,17 @@ type FileDispatcher interface {
 	DownloadBackup(ctx context.Context, nodeID, serverID, backupID string) (domain.BackupContent, error)
 }
 
+type BackupUploader interface {
+	UploadBackup(ctx context.Context, nodeID, serverID, backupID string, content domain.BackupContent, expectedDigest, expectedManifestDigest string) error
+}
+
+// ConsoleBroadcaster publishes committed console facts to every control-plane
+// replica. Production injects a Redis Streams implementation; development and
+// isolated tests keep the process-local hub.
+type ConsoleBroadcaster interface {
+	PublishConsoleLines(ctx context.Context, serverID string, lines []domain.ConsoleLine) error
+}
+
 // Postgres implements the Store interface with PostgreSQL persistence.
 // It replaces the in-memory development adapter for production deployments.
 type Postgres struct {
@@ -52,10 +64,18 @@ type Postgres struct {
 	metricStates   map[string]*metricState
 	// 实时控制台日志订阅中心（WebSocket 推送）。
 	consoleHub *consoleHub
+	// consoleBroadcaster is optional so the Postgres store remains testable
+	// without Redis. When configured, the Redis consumer (including this
+	// replica) is the only component that publishes into consoleHub.
+	consoleBroadcaster ConsoleBroadcaster
 	// Secret 启动变量的静态加密器；未注入时加密禁用（明文存储）。
 	secretCipher *secretCipher
 	// secretKeyring is preferred for production writes and supports rotation.
 	secretKeyring *secretKeyring
+	// objectStore holds encrypted backup objects; objectKeyring wraps a random
+	// data key per object. Both are injected together before workers start.
+	objectStore   objectstore.Store
+	objectKeyring *objectstore.Keyring
 	// requiredMigrationVersions is the canonical migration plan loaded during
 	// startup. Readiness verifies that every version remains recorded in the DB.
 	requiredMigrationVersions []string
@@ -117,6 +137,19 @@ func (s *Postgres) SetFileDispatcher(fd FileDispatcher) {
 	s.fileDispatcher = fd
 }
 
+func (s *Postgres) SetConsoleBroadcaster(broadcaster ConsoleBroadcaster) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.consoleBroadcaster = broadcaster
+}
+
+// PublishConsoleBroadcast delivers a Redis-consumed fact to local WebSocket
+// subscribers. Sequence de-duplication remains a client and DB snapshot
+// responsibility, which also covers a publisher crash after XADD.
+func (s *Postgres) PublishConsoleBroadcast(serverID string, lines []domain.ConsoleLine) {
+	s.consoleHub.Publish(serverID, lines)
+}
+
 // SetSecretCipher 注入 Secret 启动变量的静态加密器。密钥来自
 // GUGU_ENCRYPTION_KEY_FILE（生产必填）；development 不注入则加密禁用。
 // 注入应在任何 Startup 读写之前完成；已落库的明文旧数据（无 enc:v1: 前缀）
@@ -146,6 +179,16 @@ func (s *Postgres) SetSecretKeyring(activeID string, keys map[string][]byte) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.secretKeyring = keyring
+	return nil
+}
+
+func (s *Postgres) SetObjectStore(storage objectstore.Store, keyring *objectstore.Keyring) error {
+	if storage == nil || keyring == nil {
+		return fmt.Errorf("object store and object keyring are both required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objectStore, s.objectKeyring = storage, keyring
 	return nil
 }
 

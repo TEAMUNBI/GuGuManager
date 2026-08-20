@@ -581,6 +581,30 @@ func (s *Postgres) CompleteTask(ctx context.Context, fence TaskLeaseFence, succe
 				if err := requireBackupTransition(transition, "deleting", "deleted"); err != nil {
 					return err
 				}
+				// Remote deletion is a separate recoverable convergence step. The
+				// object is tombstoned only when this was its final live backup
+				// reference; shared content-addressed objects remain available.
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE backups SET remote_status = CASE
+					  WHEN object_manifest_id IS NULL THEN 'deleted' ELSE 'delete_pending' END
+					WHERE id = $1 AND server_id = $2
+				`, payload.BackupID, serverID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法记录远程备份删除状态", true)
+				}
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO object_tombstones (object_manifest_id)
+					SELECT b.object_manifest_id FROM backups b
+					WHERE b.id = $1 AND b.object_manifest_id IS NOT NULL
+					  AND NOT EXISTS (
+					    SELECT 1 FROM backups live
+					    WHERE live.object_manifest_id = b.object_manifest_id AND live.status <> 'deleted'
+					  )
+					ON CONFLICT (object_manifest_id) DO UPDATE
+					SET status = CASE WHEN object_tombstones.status = 'completed' THEN 'pending' ELSE object_tombstones.status END,
+					    updated_at = now()
+				`, payload.BackupID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法创建远程对象 Tombstone", true)
+				}
 			}
 		}
 	} else if taskType == "backup" || taskType == "restore" || taskType == "backup-delete" {
@@ -590,6 +614,35 @@ func (s *Postgres) CompleteTask(ctx context.Context, fence TaskLeaseFence, succe
 		}
 		if err := compensateBackupTaskTx(ctx, tx, taskType, taskPayload, serverID, failureCode); err != nil {
 			return err
+		}
+	}
+
+	if taskType == "reconcile" {
+		var historyID, fromBundleID, fromGameVersion string
+		historyErr := tx.QueryRowContext(ctx, `
+			SELECT h.id::text,h.from_bundle_id::text,gb.game_version
+			FROM server_bundle_history h JOIN game_bundles gb ON gb.id=h.from_bundle_id
+			WHERE h.operation_id=$1 AND h.status='reconciling' FOR UPDATE OF h
+		`, fence.OperationID).Scan(&historyID, &fromBundleID, &fromGameVersion)
+		if historyErr != nil && historyErr != sql.ErrNoRows {
+			return domain.NewProblem("INTERNAL_ERROR", "无法读取 Bundle 升级历史", true)
+		}
+		if historyErr == nil {
+			if effectiveSucceeded {
+				if _, err := tx.ExecContext(ctx, `UPDATE server_bundle_history SET status='applied',completed_at=now() WHERE id=$1`, historyID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法完成 Bundle 升级历史", true)
+				}
+			} else {
+				// Agent reconcile already restored the previous container on a
+				// health/switch failure. Restore the desired revision in the same
+				// transaction so the API never advertises the failed revision.
+				if _, err := tx.ExecContext(ctx, `UPDATE servers SET game_bundle_id=$2,game_version=$3,updated_at=now() WHERE id=$1 AND generation=$4`, serverID, fromBundleID, fromGameVersion, taskGeneration); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法回滚 Bundle desired revision", true)
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE server_bundle_history SET status='rolled-back',completed_at=now() WHERE id=$1`, historyID); err != nil {
+					return domain.NewProblem("INTERNAL_ERROR", "无法记录 Bundle 自动回滚", true)
+				}
+			}
 		}
 	}
 

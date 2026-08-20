@@ -142,7 +142,7 @@ func lint(filename string) error {
 		return fmt.Errorf("invalid JSON: trailing data: %w", err)
 	}
 
-	if err := gamedefinition.ValidateV1Alpha1(document); err != nil {
+	if err := gamedefinition.ValidateJSON(content); err != nil {
 		return fmt.Errorf("schema validation failed: %w", err)
 	}
 

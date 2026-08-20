@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package gugumanager.extension.runner.v1;
+
+option go_package = "github.com/gugumanager/gugumanager/api/proto/gugumanager/extension/runner/v1;runnerv1";
+
+message Request {
+  string request_id = 1;
+  oneof payload {
+    Hello hello = 2;
+    Invoke invoke = 3;
+    Cancel cancel = 4;
+  }
+}
+
+message Response {
+  string request_id = 1;
+  oneof payload {
+    HelloAck hello = 2;
+    Progress progress = 3;
+    Result result = 4;
+  }
+}
+
+message Hello { repeated uint32 protocol_versions = 1; }
+
+message HelloAck {
+  uint32 protocol_version = 1;
+  string runner_version = 2;
+  repeated string capabilities = 3;
+}
+
+message Invoke {
+  string operation_id = 1;
+  string server_id = 2;
+  string bundle_digest = 3;
+  string extension_digest = 4;
+  bytes component = 5;
+  bytes input = 6;
+  string server_root = 7;
+  repeated string permissions = 8;
+  repeated string https_allowlist = 9;
+  map<string, bytes> secret_bindings = 10;
+  uint64 fuel = 11;
+  uint64 memory_bytes = 12;
+  uint32 timeout_ms = 13;
+  uint64 max_output_bytes = 14;
+}
+
+message Cancel { string operation_id = 1; }
+
+message Progress {
+  uint32 percent = 1;
+  string message = 2;
+}
+
+message Result {
+  bool succeeded = 1;
+  string error_code = 2;
+  bytes output = 3;
+  string detail = 4;
+}

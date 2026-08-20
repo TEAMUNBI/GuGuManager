@@ -87,7 +87,14 @@ func (s *Postgres) RecordConsoleLines(ctx context.Context, serverID string, line
 	}
 	buf.mu.Unlock()
 	// Rows rejected by ON CONFLICT are not DB-accepted facts and therefore are
-	// never exposed to subscribers.
+	// never exposed to subscribers. In production every replica receives the
+	// accepted facts through Redis Streams; local fallback is test/development.
+	s.mu.RLock()
+	broadcaster := s.consoleBroadcaster
+	s.mu.RUnlock()
+	if broadcaster != nil {
+		return broadcaster.PublishConsoleLines(ctx, serverID, inserted)
+	}
 	s.consoleHub.Publish(serverID, inserted)
 	return nil
 }

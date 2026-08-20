@@ -1,0 +1,35 @@
+{
+  "apiVersion": "gugumanager.io/catalog/v1",
+  "entries": [
+    {
+      "gameDefinitionId": "io.gugumanager.factorio",
+      "definitionVersion": "1.0.0",
+      "gameVersion": "2.0.55",
+      "digest": "sha256:252489dbb8e74213b629e2df015e0819fa7c33bba38d9b6235c8e0ff03acff9d",
+      "bundle": "factorio.bundle.signed.json",
+      "keyId": "sha256:15796db294a58f2b7314f4a45e037a77212d35db923654c7d59ca7ffda276b55"
+    },
+    {
+      "gameDefinitionId": "io.gugumanager.papermc",
+      "definitionVersion": "1.0.0",
+      "gameVersion": "1.21.8",
+      "digest": "sha256:cfc35ab46bc327a793ffed93eefb08e8fb82f61b5510f613e7dfcc6800e52544",
+      "bundle": "papermc.bundle.signed.json",
+      "keyId": "sha256:15796db294a58f2b7314f4a45e037a77212d35db923654c7d59ca7ffda276b55"
+    },
+    {
+      "gameDefinitionId": "io.gugumanager.vintagestory",
+      "definitionVersion": "0.4.0",
+      "gameVersion": "1.20.4",
+      "digest": "sha256:11086f3d751133e16ad6423fec491a72d8d15f52bd8e224677f02812a9bbd57a",
+      "bundle": "vintagestory.bundle.signed.json",
+      "keyId": "sha256:15796db294a58f2b7314f4a45e037a77212d35db923654c7d59ca7ffda276b55"
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519",
+    "keyId": "sha256:15796db294a58f2b7314f4a45e037a77212d35db923654c7d59ca7ffda276b55",
+    "payloadDigest": "sha256:db2b0b3ae941749804d4939735a2b3579870def92ff20a9cf94a795dbe0c3a81",
+    "value": "8XwI1TmJJ9A6syzWUlLzZO1UWQVD1AMhib3O1QIBvgqDsNYsR2AJR0I4GLiSvrcwWxhYQ6q3O6oisCRgSi4MCw"
+  }
+}

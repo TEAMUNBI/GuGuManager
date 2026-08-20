@@ -66,7 +66,16 @@ func (h *consoleHub) Publish(serverID string, lines []domain.ConsoleLine) {
 			select {
 			case sub <- line:
 			default:
-				// 订阅者消费慢：丢弃最旧行，保持实时性。
+				// 订阅者消费慢：丢弃最旧行，保持最新窗口。客户端从
+				// sequence 缺口触发 REST 补读，不会静默把缺口当连续流。
+				select {
+				case <-sub:
+				default:
+				}
+				select {
+				case sub <- line:
+				default:
+				}
 			}
 		}
 	}

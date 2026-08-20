@@ -1,5 +1,5 @@
 import { MockClient } from "./mock";
-import type { AgentEnrollmentToken, Allocation, AuditEvent, Backup, ConsoleLine, CreateAllocationInput, CreateServerInput, CreateUserInput, FileContent, FileEntry, GameDefinition, IssueAgentEnrollmentTokenInput, Node, Operation, Overview, PasswordResetToken, Server, ServerMembership, ServerPermission, ServerPermissions, Session, SetupAdminInput, SetupStatus, Startup, StartupValue, UpdateUserInput, User } from "./types";
+import type { AgentEnrollmentToken, Allocation, APIToken, APITokenCredential, AuditEvent, Backup, ConsoleConnectionCredential, ConsoleLine, CreateAllocationInput, CreateServerInput, CreateUserInput, FileContent, FileEntry, GameDefinition, IssueAgentEnrollmentTokenInput, Node, Operation, Overview, PasswordResetToken, Server, ServerMembership, ServerPermission, ServerPermissions, Session, SetupAdminInput, SetupStatus, Startup, StartupValue, UpdateUserInput, User } from "./types";
 import { getActiveLocale, type Locale } from "../i18n/I18n";
 
 const DEV_PROXY_ERROR_HEADER = "X-GuGuManager-Proxy-Error";
@@ -234,6 +234,12 @@ async function mockRequest<T>(path: string, init: RequestInit): Promise<T> {
   if (pathname === "/auth/logout") return mock.logout() as Promise<T>;
   if (pathname === "/users" && method === "GET") return mock.listUsers() as Promise<T>;
   if (pathname === "/users" && method === "POST") return mock.createUser(JSON.parse(String(init.body))) as Promise<T>;
+	if (pathname === "/api-tokens" && method === "GET") return Promise.resolve([] as APIToken[]) as Promise<T>;
+	if (pathname === "/api-tokens" && method === "POST") {
+		const input = JSON.parse(String(init.body)) as { name: string; scopes: string[]; expiresAt?: string };
+		return Promise.resolve({ id: crypto.randomUUID(), name: input.name, scopes: input.scopes, expiresAt: input.expiresAt ?? null, lastUsedAt: null, createdAt: new Date().toISOString(), token: crypto.randomUUID() } as APITokenCredential) as Promise<T>;
+	}
+	if (/^\/api-tokens\/[^/]+$/.test(pathname) && method === "DELETE") return Promise.resolve(undefined) as Promise<T>;
   if (/^\/users\/[^/]+\/password-reset-tokens$/.test(pathname) && method === "POST") return mock.issuePasswordResetToken(pathname.split("/")[2]) as Promise<T>;
   if (/^\/users\/[^/]+$/.test(pathname) && method === "PATCH") return mock.updateUser(pathname.split("/")[2], JSON.parse(String(init.body))) as Promise<T>;
   if (pathname === "/overview") return mock.getOverview() as Promise<T>;
@@ -241,6 +247,7 @@ async function mockRequest<T>(path: string, init: RequestInit): Promise<T> {
   if (pathname === "/servers" && method === "POST") return mock.createServer(JSON.parse(String(init.body)), String(init.headers && new Headers(init.headers).get("Idempotency-Key"))) as Promise<T>;
   if (pathname.startsWith("/servers/") && pathname.endsWith("/power")) return mock.requestPower(pathname.split("/")[2], JSON.parse(String(init.body)).action, String(init.headers && new Headers(init.headers).get("Idempotency-Key"))) as Promise<T>;
   if (pathname.startsWith("/servers/") && pathname.endsWith("/console")) return mock.getConsole(pathname.split("/")[2]) as Promise<T>;
+	if (pathname.startsWith("/servers/") && pathname.endsWith("/console-tokens") && method === "POST") return Promise.resolve({ token: crypto.randomUUID(), expiresAt: new Date(Date.now() + 60_000).toISOString() } as ConsoleConnectionCredential) as Promise<T>;
   if (pathname.startsWith("/servers/") && pathname.endsWith("/console/commands")) return mock.sendCommand(pathname.split("/")[2], JSON.parse(String(init.body)).command) as Promise<T>;
   if (pathname.startsWith("/servers/") && pathname.endsWith("/files/content") && method === "GET") return mock.getFileContent(pathname.split("/")[2], new URLSearchParams(queryString).get("path") ?? "") as Promise<T>;
   if (pathname.startsWith("/servers/") && pathname.endsWith("/files/content") && method === "PUT") return mock.writeFile(pathname.split("/")[2], JSON.parse(String(init.body))) as Promise<T>;
@@ -309,6 +316,9 @@ export const api = {
   createUser: (input: CreateUserInput, csrfToken: string) => request<User>("/users", csrfMutation(input, csrfToken)),
   updateUser: (userId: string, input: UpdateUserInput, csrfToken: string) => request<User>(`/users/${userId}`, { ...csrfMutation(input, csrfToken), method: "PATCH" }),
   issuePasswordResetToken: (userId: string, csrfToken: string) => request<PasswordResetToken>(`/users/${userId}/password-reset-tokens`, bodylessMutation(csrfToken)),
+	apiTokens: () => request<APIToken[]>("/api-tokens"),
+	createAPIToken: (input: { name: string; scopes: string[]; expiresAt?: string }, csrfToken: string) => request<APITokenCredential>("/api-tokens", csrfMutation(input, csrfToken)),
+	revokeAPIToken: (tokenId: string, csrfToken: string) => request<void>(`/api-tokens/${tokenId}`, csrfDelete(csrfToken)),
   overview: () => request<Overview>("/overview"),
   servers: (query = "") => listServers(query),
   server: (serverId: string) => request<Server>(`/servers/${serverId}`),
@@ -322,9 +332,10 @@ export const api = {
   games: () => request<GameDefinition[]>("/game-definitions"),
   audit: () => request<AuditEvent[]>("/audit-events"),
   console: (serverId: string) => request<ConsoleLine[]>(`/servers/${serverId}/console`),
+	consoleToken: (serverId: string, csrfToken: string) => request<ConsoleConnectionCredential>(`/servers/${serverId}/console-tokens`, bodylessMutation(csrfToken)),
   // consoleStreamPath 返回控制台实时 WebSocket 的路径（不含协议与 host），
   // 由调用方按 location.protocol 派生 ws/wss。
-  consoleStreamPath: (serverId: string) => `/servers/${serverId}/console/stream`,
+	consoleStreamPath: (serverId: string, token: string, after = 0) => `/api/v1/servers/${serverId}/console/stream?token=${encodeURIComponent(token)}&after=${after}`,
   command: (serverId: string, command: string, csrfToken: string) => request<void>(`/servers/${serverId}/console/commands`, csrfMutation({ command }, csrfToken)),
   files: (serverId: string, path = "") => request<FileEntry[]>(`/servers/${serverId}/files?path=${encodeURIComponent(path)}`),
   fileContent: (serverId: string, path: string) => request<FileContent>(`/servers/${serverId}/files/content?path=${encodeURIComponent(path)}`),

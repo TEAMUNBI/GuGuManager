@@ -81,6 +81,7 @@ type ContainerConfig struct {
 	WorkingDir    string            // Trusted container working directory
 	User          string            // Trusted container user
 	Env           map[string]string // Environment variables
+	Labels        map[string]string // Immutable GuGuManager ownership/spec labels
 	PortBindings  map[int]int       // Container port -> host port mapping
 	PortProtocols map[int]string    // Container port -> tcp/udp
 	PortBindIPs   map[int]string    // Container port -> host bind address
@@ -158,6 +159,7 @@ func (r *DockerRuntime) CreateContainer(ctx context.Context, cfg ContainerConfig
 		WorkingDir:   cfg.WorkingDir,
 		User:         cfg.User,
 		Healthcheck:  cfg.HealthCheck,
+		Labels:       cfg.Labels,
 	}
 
 	// Host configuration (resources and bindings)
@@ -258,6 +260,14 @@ func (r *DockerRuntime) RemoveContainer(ctx context.Context, containerID string,
 		Force:         force,
 		RemoveVolumes: true,
 	})
+	return err
+}
+
+// RenameContainer atomically changes only the Docker name. Reconcile uses it
+// after the candidate runtime has passed health checks so the canonical
+// gugu-server-<id> name always identifies the active generation.
+func (r *DockerRuntime) RenameContainer(ctx context.Context, containerID, newName string) error {
+	_, err := r.client.ContainerRename(ctx, containerID, client.ContainerRenameOptions{NewName: newName})
 	return err
 }
 

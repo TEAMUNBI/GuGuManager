@@ -123,6 +123,7 @@ func TestDefaultCapabilitiesDeclareOnlyImplementedRuntimeAndPlatform(t *testing.
 	capabilities := defaultCapabilities()
 	want := map[string]string{
 		"runtime.container": "1",
+		"server.reconcile":  "1",
 		"platform." + runtime.GOOS + "." + runtime.GOARCH: "1",
 	}
 	if len(capabilities) != len(want) {
@@ -135,9 +136,6 @@ func TestDefaultCapabilitiesDeclareOnlyImplementedRuntimeAndPlatform(t *testing.
 		version, ok := want[capability.GetName()]
 		if !ok || capability.GetVersion() != version {
 			t.Fatalf("unexpected capability %q version %q", capability.GetName(), capability.GetVersion())
-		}
-		if capability.GetName() == "server.reconcile" {
-			t.Fatal("Agent must not advertise reconcile before it implements it")
 		}
 	}
 }

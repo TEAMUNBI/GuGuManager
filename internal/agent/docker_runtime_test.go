@@ -32,6 +32,7 @@ type fakeDocker struct {
 	restarted []string
 	killed    []string
 	removed   []string
+	renamed   []string
 	inspected []string
 	status    runtime.ContainerStatus
 	statusErr error
@@ -213,6 +214,13 @@ func (f *fakeDocker) RemoveContainer(ctx context.Context, containerID string, fo
 	return f.actionErr
 }
 
+func (f *fakeDocker) RenameContainer(_ context.Context, containerID, newName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renamed = append(f.renamed, containerID+"->"+newName)
+	return f.actionErr
+}
+
 func (f *fakeDocker) InspectContainer(ctx context.Context, containerID string) (runtime.ContainerStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -284,6 +292,74 @@ func provisionPayload() *agentv1.ProvisionTaskPayload {
 			"memory_mb": "2048",
 		},
 		StartAfterProvision: true,
+	}
+}
+
+func reconcileTask(serverID string, generation uint64, desiredDigest string) *agentv1.Task {
+	provision := provisionPayload()
+	return &agentv1.Task{
+		OperationId: "op-reconcile", ServerId: serverID, Generation: generation, Type: "reconcile",
+		BundleDigest: provision.GetBundleDigest(),
+		Payload: &agentv1.Task_Reconcile{Reconcile: &agentv1.ReconcileTaskPayload{Desired: &agentv1.DesiredRuntimeSpec{
+			GameDefinitionId: provision.GetGameDefinitionId(), BundleDigest: provision.GetBundleDigest(),
+			RuntimeTargetJson: provision.GetRuntimeTargetJson(), ResourceLimits: provision.GetResourceLimits(),
+			Allocations: provision.GetAllocations(), Variables: provision.GetVariables(), DesiredRunning: true,
+			Digest: desiredDigest, Generation: generation,
+		}}},
+	}
+}
+
+func TestDockerExecutorReconcileNoOpForMatchingDigest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("d", 64)
+	fd := newFakeDocker()
+	fd.env["GUGU_DESIRED_DIGEST"] = digest
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+
+	outcome, err := exec.ExecuteTask(context.Background(), reconcileTask("server-noop", 7, digest))
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("reconcile no-op = %+v, %v", outcome, err)
+	}
+	if fd.createdCount() != 0 {
+		t.Fatalf("matching desired digest created %d candidates", fd.createdCount())
+	}
+	if outcome.Observed == nil || outcome.Observed.GetObservedGeneration() != 7 {
+		t.Fatalf("observed = %+v, want generation 7", outcome.Observed)
+	}
+	if !strings.Contains(string(outcome.ResultJSON), `"noOp":true`) {
+		t.Fatalf("result = %s, want noOp", outcome.ResultJSON)
+	}
+}
+
+func TestDockerExecutorReconcileHealthySwitch(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("e", 64)
+	fd := newFakeDocker()
+	fd.status.ID = "old-container"
+	fd.createID = "candidate-container"
+	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
+
+	outcome, err := exec.ExecuteTask(context.Background(), reconcileTask("server-switch", 8, digest))
+	if err != nil || !outcome.Succeeded {
+		t.Fatalf("reconcile switch = %+v, %v", outcome, err)
+	}
+	if fd.createdCount() != 1 {
+		t.Fatalf("created candidates = %d, want 1", fd.createdCount())
+	}
+	cfg := fd.lastCreated()
+	if cfg.StartOnCreate == nil || *cfg.StartOnCreate || cfg.Env["GUGU_DESIRED_DIGEST"] != digest {
+		t.Fatalf("candidate was not prepared stopped with desired identity: %+v", cfg)
+	}
+	fd.mu.Lock()
+	renamed := append([]string(nil), fd.renamed...)
+	removed := append([]string(nil), fd.removed...)
+	fd.mu.Unlock()
+	if len(renamed) != 2 || renamed[1] != "candidate-container->gugu-server-server-switch" {
+		t.Fatalf("rename sequence = %v", renamed)
+	}
+	if len(removed) != 1 || removed[0] != "old-container" {
+		t.Fatalf("removed = %v, want old generation", removed)
+	}
+	if outcome.Observed.GetObservedGeneration() != 8 || outcome.Observed.GetBundleDigest() != provisionPayload().GetBundleDigest() {
+		t.Fatalf("observed = %+v", outcome.Observed)
 	}
 }
 
@@ -577,7 +653,7 @@ func TestDockerExecutorPowerKill(t *testing.T) {
 	}
 }
 
-func TestDockerExecutorUnsupportedTask(t *testing.T) {
+func TestDockerExecutorExtensionRequiresConfiguredRunner(t *testing.T) {
 	fd := newFakeDocker()
 	exec := &DockerExecutor{dataRoot: t.TempDir(), rt: fd}
 
@@ -595,8 +671,8 @@ func TestDockerExecutorUnsupportedTask(t *testing.T) {
 	if outcome.Succeeded {
 		t.Error("unsupported task should not succeed")
 	}
-	if outcome.ErrorCode != "UNSUPPORTED_TASK" {
-		t.Errorf("error code = %q, want UNSUPPORTED_TASK", outcome.ErrorCode)
+	if outcome.ErrorCode != "EXTENSION_UNSUPPORTED" {
+		t.Errorf("error code = %q, want EXTENSION_UNSUPPORTED", outcome.ErrorCode)
 	}
 	if outcome.Retryable {
 		t.Error("unsupported task should not be retryable")

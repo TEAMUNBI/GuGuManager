@@ -37,6 +37,17 @@ type Config struct {
 	TLSTerminated         bool
 	LogLevel              string
 	LogFormat             string
+	ObjectStoreType       string
+	ObjectStoreRoot       string
+	S3Endpoint            string
+	S3Region              string
+	S3Bucket              string
+	S3AccessKey           string
+	S3SecretKey           string
+	S3SessionToken        string
+	S3Secure              bool
+	S3PathStyle           bool
+	S3CreateBucket        bool
 }
 
 type ValidationProblem struct {
@@ -85,9 +96,35 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		BootstrapTokenFile:    lookupTrimmed(lookup, "GUGU_BOOTSTRAP_TOKEN_FILE", ""),
 		LogLevel:              strings.ToLower(lookupTrimmed(lookup, "GUGU_LOG_LEVEL", "info")),
 		LogFormat:             strings.ToLower(lookupTrimmed(lookup, "GUGU_LOG_FORMAT", "json")),
+		ObjectStoreType:       strings.ToLower(lookupTrimmed(lookup, "GUGU_OBJECT_STORE_TYPE", "local")),
+		ObjectStoreRoot:       lookupTrimmed(lookup, "GUGU_OBJECT_STORE_ROOT", "var/objects"),
+		S3Endpoint:            lookupTrimmed(lookup, "GUGU_S3_ENDPOINT", ""),
+		S3Region:              lookupTrimmed(lookup, "GUGU_S3_REGION", "us-east-1"),
+		S3Bucket:              lookupTrimmed(lookup, "GUGU_S3_BUCKET", ""),
+		S3AccessKey:           lookupSecret(lookup, "GUGU_S3_ACCESS_KEY"),
+		S3SecretKey:           lookupSecret(lookup, "GUGU_S3_SECRET_KEY"),
+		S3SessionToken:        lookupSecret(lookup, "GUGU_S3_SESSION_TOKEN"),
+		S3Secure:              true,
 	}
 
 	problems := []ValidationProblem{}
+	for _, option := range []struct {
+		name   string
+		target *bool
+	}{
+		{name: "GUGU_S3_SECURE", target: &cfg.S3Secure},
+		{name: "GUGU_S3_PATH_STYLE", target: &cfg.S3PathStyle},
+		{name: "GUGU_S3_CREATE_BUCKET", target: &cfg.S3CreateBucket},
+	} {
+		if raw, ok := nonEmpty(lookup, option.name); ok {
+			parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+			if err != nil {
+				problems = appendProblem(problems, option.name, "must be true or false")
+			} else {
+				*option.target = parsed
+			}
+		}
+	}
 	if cfg.Environment == Development {
 		cfg.AdminEmail = strings.ToLower(lookupTrimmed(lookup, "GUGU_DEV_ADMIN_EMAIL", "admin@gugu.local"))
 		cfg.AdminPassword = lookupSecretDefault(lookup, "GUGU_DEV_ADMIN_PASSWORD", "gugu-dev-2026")
@@ -168,6 +205,22 @@ func (cfg Config) validationProblems() []ValidationProblem {
 	if !oneOf(cfg.LogFormat, "json", "text") {
 		problems = appendProblem(problems, "GUGU_LOG_FORMAT", "must be json or text")
 	}
+	if !oneOf(cfg.ObjectStoreType, "local", "s3") {
+		problems = appendProblem(problems, "GUGU_OBJECT_STORE_TYPE", "must be local or s3")
+	} else if cfg.ObjectStoreType == "local" {
+		if strings.TrimSpace(cfg.ObjectStoreRoot) == "" {
+			problems = appendProblem(problems, "GUGU_OBJECT_STORE_ROOT", "must not be empty for the local object store")
+		}
+	} else {
+		for _, required := range []struct{ field, value string }{
+			{"GUGU_S3_ENDPOINT", cfg.S3Endpoint}, {"GUGU_S3_BUCKET", cfg.S3Bucket},
+			{"GUGU_S3_ACCESS_KEY", cfg.S3AccessKey}, {"GUGU_S3_SECRET_KEY", cfg.S3SecretKey},
+		} {
+			if strings.TrimSpace(required.value) == "" {
+				problems = appendProblem(problems, required.field, "is required for the S3 object store")
+			}
+		}
+	}
 
 	switch cfg.Environment {
 	case Development:
@@ -213,8 +266,8 @@ func (cfg Config) validationProblems() []ValidationProblem {
 		if !validDatabaseURL(cfg.DatabaseURL) {
 			problems = appendProblem(problems, "GUGU_DATABASE_URL", "must be a PostgreSQL URL with a host and database name")
 		}
-		if cfg.RedisURL != "" && !validRedisURL(cfg.RedisURL) {
-			problems = appendProblem(problems, "GUGU_REDIS_URL", "must be a redis or rediss URL")
+		if !validRedisURL(cfg.RedisURL) {
+			problems = appendProblem(problems, "GUGU_REDIS_URL", "must be a redis or rediss URL and is required in production")
 		}
 		for _, secretFile := range []struct {
 			field string

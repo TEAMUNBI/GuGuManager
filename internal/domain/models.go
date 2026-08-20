@@ -69,6 +69,46 @@ type Session struct {
 	ExpiresAt time.Time
 }
 
+// APIToken is the public, non-secret metadata for a persistent bearer token.
+// The plaintext credential is returned only once in APITokenCredential.
+type APIToken struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Scopes     []string   `json:"scopes"`
+	ExpiresAt  *time.Time `json:"expiresAt"`
+	LastUsedAt *time.Time `json:"lastUsedAt"`
+	CreatedAt  time.Time  `json:"createdAt"`
+}
+
+type CreateAPITokenInput struct {
+	Name      string     `json:"name"`
+	Scopes    []string   `json:"scopes"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+}
+
+type APITokenCredential struct {
+	APIToken
+	Token string `json:"token"`
+}
+
+type APITokenPrincipal struct {
+	User        User
+	Scopes      []string
+	APITokenID  string
+	Environment string
+}
+
+type ConsoleConnectionCredential struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+type ConsoleConnectionPrincipal struct {
+	UserID    string
+	ServerID  string
+	ExpiresAt time.Time
+}
+
 type ResourceMetrics struct {
 	CPUPercent      float64 `json:"cpuPercent"`
 	MemoryBytes     int64   `json:"memoryBytes"`
@@ -137,6 +177,9 @@ type Node struct {
 	Condition            string    `json:"condition"`
 	Version              string    `json:"version"`
 	Region               string    `json:"region"`
+	Architecture         string    `json:"architecture"`
+	Draining             bool      `json:"draining"`
+	DrainReason          string    `json:"drainReason,omitempty"`
 	Address              string    `json:"address"`
 	LastHeartbeatAt      time.Time `json:"lastHeartbeatAt"`
 	CPUCores             int       `json:"cpuCores"`
@@ -230,6 +273,22 @@ type AuditEvent struct {
 	Result      string    `json:"result"`
 	OperationID string    `json:"operationId"`
 	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type AuditQuery struct {
+	Cursor     string
+	Limit      int
+	Actor      string
+	Action     string
+	TargetType string
+	Result     string
+	From       *time.Time
+	To         *time.Time
+}
+
+type AuditEventPage struct {
+	Items      []AuditEvent `json:"items"`
+	NextCursor string       `json:"nextCursor,omitempty"`
 }
 
 type ConsoleLine struct {

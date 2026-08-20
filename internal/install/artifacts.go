@@ -32,6 +32,7 @@ var (
 	ErrHostNotAllowed   = errors.New("artifact host is not in the network allowlist")
 	ErrPrivateAddress   = errors.New("artifact host resolves to a non-routable address")
 	ErrDigestMismatch   = errors.New("artifact content does not match the declared sha256")
+	ErrSizeMismatch     = errors.New("artifact content does not match the declared size")
 	ErrInvalidDigest    = errors.New("artifact sha256 must be 64 lowercase hex characters")
 	ErrDuplicateTarget  = errors.New("artifact destination duplicates another artifact")
 	ErrUnexpectedStatus = errors.New("artifact host returned an unexpected status")
@@ -43,6 +44,9 @@ type Artifact struct {
 	URL         string
 	Destination string
 	SHA256      string
+	// SizeBytes is the signed manifest size. A zero value preserves support
+	// for converted v1alpha1 definitions whose original manifest had no size.
+	SizeBytes int64
 }
 
 // Options bounds a single install run. A zero field takes the documented
@@ -173,15 +177,19 @@ func installOne(ctx context.Context, destination *serverfiles.ServerFS, artifact
 	if response.ContentLength > 0 && response.ContentLength > options.MaxArtifactBytes {
 		return Result{}, fmt.Errorf("fetch %q: %w", artifact.URL, serverfiles.ErrSizeLimit)
 	}
+	if artifact.SizeBytes > 0 && response.ContentLength >= 0 && response.ContentLength != artifact.SizeBytes {
+		return Result{}, fmt.Errorf("fetch %q: %w: got %d, want %d", artifact.URL, ErrSizeMismatch, response.ContentLength, artifact.SizeBytes)
+	}
 
 	// The digest is checked inside the reader so a mismatch surfaces as a copy
 	// failure. WriteStream then discards its temporary file and the declared
 	// destination is never replaced with unverified bytes.
 	verifier := &digestVerifier{
-		reader:   response.Body,
-		digest:   sha256.New(),
-		expected: artifact.SHA256,
-		limit:    options.MaxArtifactBytes,
+		reader:       response.Body,
+		digest:       sha256.New(),
+		expected:     artifact.SHA256,
+		limit:        options.MaxArtifactBytes,
+		expectedSize: artifact.SizeBytes,
 	}
 	written, err := destination.WriteStream(target, verifier)
 	if err != nil {
@@ -219,6 +227,9 @@ func validateArtifacts(artifacts []Artifact) error {
 		field := fmt.Sprintf("install.artifacts[%d]", index)
 		if !isFullHexDigest(artifact.SHA256) {
 			return fmt.Errorf("%s.sha256 %q: %w", field, artifact.SHA256, ErrInvalidDigest)
+		}
+		if artifact.SizeBytes < 0 {
+			return fmt.Errorf("%s.sizeBytes %d: %w", field, artifact.SizeBytes, ErrSizeMismatch)
 		}
 		parsed, err := url.Parse(artifact.URL)
 		if err != nil {
@@ -315,12 +326,13 @@ func isFullHexDigest(value string) bool {
 // limit, and the content hashes to expected. Both surface as read errors so the
 // caller's atomic write discards its staging file instead of committing.
 type digestVerifier struct {
-	reader   io.Reader
-	digest   hash.Hash
-	expected string
-	limit    int64
-	read     int64
-	verified bool
+	reader       io.Reader
+	digest       hash.Hash
+	expected     string
+	limit        int64
+	expectedSize int64
+	read         int64
+	verified     bool
 }
 
 func (d *digestVerifier) Read(buffer []byte) (int, error) {
@@ -337,6 +349,9 @@ func (d *digestVerifier) Read(buffer []byte) (int, error) {
 		}
 	}
 	if errors.Is(err, io.EOF) && !d.verified {
+		if d.expectedSize > 0 && d.read != d.expectedSize {
+			return read, fmt.Errorf("%w: got %d, want %d", ErrSizeMismatch, d.read, d.expectedSize)
+		}
 		actual := hex.EncodeToString(d.digest.Sum(nil))
 		if actual != d.expected {
 			return read, fmt.Errorf("%w: got %s, want %s", ErrDigestMismatch, actual, d.expected)

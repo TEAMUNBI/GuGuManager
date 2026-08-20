@@ -42,6 +42,29 @@ func (s *Postgres) RegisterNode(ctx context.Context, node domain.Node) (string, 
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	quota, quotaErr := s.Quota()
+	if quotaErr != nil {
+		return "", domain.NewProblem("INTERNAL_ERROR", "无法读取节点配额", true)
+	}
+	var nodeCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE revoked_at IS NULL`).Scan(&nodeCount); err != nil {
+		return "", domain.NewProblem("INTERNAL_ERROR", "无法统计节点配额", true)
+	}
+	if nodeCount >= quota.MaxNodes {
+		return "", domain.NewProblem("QUOTA_EXCEEDED", "节点数量已达到 workspace 配额", false)
+	}
+	architecture := strings.TrimSpace(node.Architecture)
+	if architecture == "" {
+		for _, capability := range node.Capabilities {
+			if strings.HasPrefix(capability, "platform.") && strings.HasSuffix(capability, "/v1") {
+				architecture = strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(capability, "platform."), "/v1"), ".", "/")
+				break
+			}
+		}
+	}
+	if architecture == "" {
+		architecture = "linux/amd64"
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -62,11 +85,11 @@ func (s *Postgres) RegisterNode(ctx context.Context, node domain.Node) (string, 
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO nodes (
 			name, agent_version, protocol_version, condition, region, address,
-			cpu_cores, memory_bytes, disk_bytes, last_heartbeat_at, created_at, updated_at
+			cpu_cores, memory_bytes, disk_bytes, last_heartbeat_at, architecture, created_at, updated_at
 		)
-		VALUES ($1, $2, 'v1', $3, $4, $5, $6, $7, $8, $9, now(), now())
+		VALUES ($1, $2, 'v1', $3, $4, $5, $6, $7, $8, $9, $10, now(), now())
 		RETURNING id::text
-	`, name, agentVersion, condition, region, address, node.CPUCores, node.MemoryBytes, node.DiskBytes, lastHeartbeat).Scan(&nodeID)
+	`, name, agentVersion, condition, region, address, node.CPUCores, node.MemoryBytes, node.DiskBytes, lastHeartbeat, architecture).Scan(&nodeID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return "", domain.NewProblem("NODE_NAME_CONFLICT", "节点名称已被占用", false)
@@ -106,6 +129,7 @@ func (s *Postgres) NodeByID(ctx context.Context, nodeID string) (domain.Node, er
 	var capabilities []string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT n.id::text, n.name, n.condition, n.agent_version, n.region,
+		       n.architecture, n.drain_mode, n.drain_reason,
 		       host(n.address), n.cpu_cores, n.memory_bytes, n.disk_bytes, n.last_heartbeat_at,
 		       COALESCE(array_agg(nc.capability_key || '/v' || nc.capability_version) FILTER (WHERE nc.capability_key IS NOT NULL), '{}') AS capabilities
 		FROM nodes n
@@ -113,6 +137,7 @@ func (s *Postgres) NodeByID(ctx context.Context, nodeID string) (domain.Node, er
 		WHERE n.id = $1 AND n.revoked_at IS NULL
 		GROUP BY n.id
 	`, nodeID).Scan(&node.ID, &node.Name, &node.Condition, &node.Version, &node.Region,
+		&node.Architecture, &node.Draining, &node.DrainReason,
 		&address, &node.CPUCores, &node.MemoryBytes, &node.DiskBytes, &lastHeartbeat,
 		pq.Array(&capabilities))
 	if err == sql.ErrNoRows {
@@ -139,6 +164,7 @@ func (s *Postgres) Nodes() []domain.Node {
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT n.id::text, n.name, n.condition, n.agent_version, n.region,
+		       n.architecture, n.drain_mode, n.drain_reason,
 		       host(n.address), n.cpu_cores, n.memory_bytes, n.disk_bytes, n.last_heartbeat_at,
 		       COALESCE(sa.running_servers, 0), COALESCE(sa.total_servers, 0),
 		       COALESCE(sa.allocated_memory, 0), COALESCE(sa.allocated_disk, 0),
@@ -172,6 +198,7 @@ func (s *Postgres) Nodes() []domain.Node {
 		var lastHeartbeat sql.NullTime
 		var capabilities []string
 		if err := rows.Scan(&node.ID, &node.Name, &node.Condition, &node.Version, &node.Region,
+			&node.Architecture, &node.Draining, &node.DrainReason,
 			&address, &node.CPUCores, &node.MemoryBytes, &node.DiskBytes, &lastHeartbeat,
 			&node.RunningServers, &node.TotalServers, &node.AllocatedMemoryBytes, &node.AllocatedDiskBytes,
 			pq.Array(&capabilities)); err != nil {
@@ -324,6 +351,21 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	if input.MemoryMB < 512 || input.MemoryMB > 131072 || input.DiskGB < 1 || input.DiskGB > 2048 {
 		return domain.Operation{}, domain.NewProblem("VALIDATION_FAILED", "资源配额超出允许范围", false)
 	}
+	if err := s.enforceCreateQuota(ctx, input); err != nil {
+		return domain.Operation{}, err
+	}
+	if strings.TrimSpace(input.NodeID) == "" {
+		placed, reasons, err := s.placeServer(ctx, int64(input.MemoryMB)*1024*1024, int64(input.DiskGB)*1024*1024*1024)
+		if err != nil {
+			return domain.Operation{}, err
+		}
+		if placed == "" {
+			problem := domain.NewProblem("INSUFFICIENT_RESOURCE", "没有节点满足自动放置要求", false)
+			problem.Details["rejections"] = reasons
+			return domain.Operation{}, problem
+		}
+		input.NodeID = placed
+	}
 
 	digest := requestDigest(input)
 	scope := taskIdempotencyScope("provision", actor.ID, idempotencyKey)
@@ -336,18 +378,19 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 
 	// The node must exist, not be revoked, and be able to accept work.
 	var nodeCondition, nodeAddress string
+	var nodeDraining bool
 	var nodeMemory, nodeDisk int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT condition, COALESCE(host(address), ''), memory_bytes, disk_bytes
+		SELECT condition, COALESCE(host(address), ''), memory_bytes, disk_bytes, drain_mode
 		FROM nodes WHERE id = $1 AND revoked_at IS NULL
-	`, input.NodeID).Scan(&nodeCondition, &nodeAddress, &nodeMemory, &nodeDisk)
+	`, input.NodeID).Scan(&nodeCondition, &nodeAddress, &nodeMemory, &nodeDisk, &nodeDraining)
 	if err == sql.ErrNoRows {
 		return domain.Operation{}, domain.NewProblem("VALIDATION_FAILED", "节点或游戏包不存在", false)
 	}
 	if err != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法查询节点", true)
 	}
-	if nodeCondition != "available" {
+	if nodeCondition != "available" || nodeDraining {
 		return domain.Operation{}, domain.NewProblem("NODE_OFFLINE", "节点当前不可接收新任务", true)
 	}
 
@@ -370,14 +413,11 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		return domain.Operation{}, domain.NewProblem("GAME_DEFINITION_NOT_APPROVED", "游戏包尚未通过审核", false)
 	}
 
-	catalogGame := domain.GameDefinition{
-		ID: input.GameDefinitionID, BundleDigest: input.GameBundleDigest, Name: gameName,
-		Version: bundleDefinitionVersion, GameVersion: bundleGameVersion, Status: reviewStatus,
+	revision, catalogErr := s.trustedCatalogRevision(ctx, s.db, input.GameDefinitionID, input.GameBundleDigest)
+	if catalogErr != nil {
+		return domain.Operation{}, catalogErr
 	}
-	markCatalogBundleUntrusted(&catalogGame, gameSourceDatabaseMetadata)
-	if fixed, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil && fixed.BundleDigest == input.GameBundleDigest {
-		catalogGame = fixed
-	}
+	catalogGame := revision.Game
 	if !catalogGame.Runnable {
 		return domain.Operation{}, packageRuntimeTargetUnavailable(catalogGame)
 	}
@@ -447,7 +487,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	// PACKAGE_INCOMPATIBLE.
 	var startupValues map[string]any
 	var startupDefinitions []domain.StartupVariable
-	if game, catalogErr := fixedCatalogGame(input.GameDefinitionID); catalogErr == nil && game.BundleDocument != "" {
+	if game := catalogGame; game.BundleDocument != "" {
 		serverForStartup := domain.Server{
 			ID: serverID, GameID: input.GameDefinitionID, GameBundleDigest: input.GameBundleDigest,
 			GameDefinitionVersion: bundleDefinitionVersion, NodeID: input.NodeID, Generation: 1,
@@ -493,7 +533,7 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	if marshalErr != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法编码运行时目标", true)
 	}
-	payloadJSON, marshalErr := json.Marshal(provisionTaskPayload{
+	provisionPayload := provisionTaskPayload{
 		GameDefinitionID:    input.GameDefinitionID,
 		BundleDigest:        input.GameBundleDigest,
 		RuntimeTarget:       string(runtimeTargetJSON),
@@ -502,7 +542,15 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 		Variables:           stringifiedNonSecretStartupValues(startupDefinitions, startupValues),
 		SecretKeys:          secretStartupKeys(startupDefinitions),
 		StartAfterProvision: false,
-	})
+		Generation:          1,
+		BundleRevisionJSON:  revision.Document,
+		TrustRootPEM:        revision.TrustRoot,
+	}
+	provisionPayload.DesiredDigest, marshalErr = provisionDesiredDigest(provisionPayload, 1)
+	if marshalErr != nil {
+		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法计算运行时规范摘要", true)
+	}
+	payloadJSON, marshalErr := json.Marshal(provisionPayload)
 	if marshalErr != nil {
 		return domain.Operation{}, domain.NewProblem("INTERNAL_ERROR", "无法生成任务负载", true)
 	}
@@ -570,6 +618,89 @@ func (s *Postgres) CreateServer(input domain.CreateServerInput, idempotencyKey s
 	operation := domain.NewQueuedOperation(operationID, serverID, input.NodeID, domain.PowerAction("provision"), 1, idempotencyKey, now)
 	operation.MaxAttempts = 3
 	return operation, nil
+}
+
+func (s *Postgres) enforceCreateQuota(ctx context.Context, input domain.CreateServerInput) error {
+	quota, err := s.Quota()
+	if err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法读取 workspace 配额", true)
+	}
+	var servers, activeCreates int
+	var memoryBytes, diskBytes int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*), COALESCE(sum(memory_limit_bytes),0), COALESCE(sum(disk_limit_bytes),0),
+		       count(*) FILTER (WHERE lifecycle_state = 'provisioning')
+		FROM servers WHERE deleted_at IS NULL
+	`).Scan(&servers, &memoryBytes, &diskBytes, &activeCreates); err != nil {
+		return domain.NewProblem("INTERNAL_ERROR", "无法统计 workspace 配额", true)
+	}
+	requestedMemory := int64(input.MemoryMB) * 1024 * 1024
+	requestedDisk := int64(input.DiskGB) * 1024 * 1024 * 1024
+	violations := []string{}
+	if servers+1 > quota.MaxServers {
+		violations = append(violations, "maxServers")
+	}
+	if memoryBytes+requestedMemory > quota.MaxMemoryBytes {
+		violations = append(violations, "maxMemoryBytes")
+	}
+	if diskBytes+requestedDisk > quota.MaxDiskBytes {
+		violations = append(violations, "maxDiskBytes")
+	}
+	if activeCreates >= quota.MaxConcurrentCreates {
+		violations = append(violations, "maxConcurrentCreates")
+	}
+	if len(violations) > 0 {
+		problem := domain.NewProblem("QUOTA_EXCEEDED", "workspace 配额不足", false)
+		problem.Details["violations"] = violations
+		return problem
+	}
+	return nil
+}
+
+func (s *Postgres) placeServer(ctx context.Context, memoryBytes, diskBytes int64) (string, map[string][]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT n.id::text, n.name, n.condition, n.drain_mode, n.memory_bytes, n.disk_bytes,
+		       COALESCE(sum(s.memory_limit_bytes) FILTER (WHERE s.deleted_at IS NULL),0),
+		       COALESCE(sum(s.disk_limit_bytes) FILTER (WHERE s.deleted_at IS NULL),0),
+		       EXISTS(SELECT 1 FROM node_capabilities nc WHERE nc.node_id=n.id AND nc.capability_key='runtime.container' AND nc.capability_version='1')
+		FROM nodes n LEFT JOIN servers s ON s.node_id=n.id
+		WHERE n.revoked_at IS NULL
+		GROUP BY n.id ORDER BY COALESCE(sum(s.memory_limit_bytes) FILTER (WHERE s.deleted_at IS NULL),0) DESC, n.id
+	`)
+	if err != nil {
+		return "", nil, domain.NewProblem("INTERNAL_ERROR", "无法执行自动放置", true)
+	}
+	defer rows.Close()
+	rejections := map[string][]string{}
+	for rows.Next() {
+		var nodeID, name, condition string
+		var draining, capability bool
+		var totalMemory, totalDisk, allocatedMemory, allocatedDisk int64
+		if err := rows.Scan(&nodeID, &name, &condition, &draining, &totalMemory, &totalDisk, &allocatedMemory, &allocatedDisk, &capability); err != nil {
+			return "", nil, err
+		}
+		reasons := []string{}
+		if condition != "available" {
+			reasons = append(reasons, "NODE_NOT_AVAILABLE")
+		}
+		if draining {
+			reasons = append(reasons, "NODE_DRAINING")
+		}
+		if !capability {
+			reasons = append(reasons, "CAPABILITY_MISSING")
+		}
+		if totalMemory-allocatedMemory < memoryBytes {
+			reasons = append(reasons, "MEMORY_INSUFFICIENT")
+		}
+		if totalDisk-allocatedDisk < diskBytes {
+			reasons = append(reasons, "DISK_INSUFFICIENT")
+		}
+		if len(reasons) == 0 {
+			return nodeID, rejections, nil
+		}
+		rejections[name] = reasons
+	}
+	return "", rejections, rows.Err()
 }
 
 // UpdateServerObserved applies an agent-reported server state snapshot.
@@ -700,6 +831,10 @@ type provisionTaskPayload struct {
 	Variables           map[string]string         `json:"variables,omitempty"`
 	SecretKeys          []string                  `json:"secretKeys,omitempty"`
 	StartAfterProvision bool                      `json:"startAfterProvision"`
+	DesiredDigest       string                    `json:"desiredDigest,omitempty"`
+	Generation          uint64                    `json:"generation,omitempty"`
+	BundleRevisionJSON  []byte                    `json:"bundleRevisionJson,omitempty"`
+	TrustRootPEM        []byte                    `json:"trustRootPem,omitempty"`
 }
 
 type provisionResourceLimits struct {

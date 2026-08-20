@@ -170,6 +170,57 @@ paths:
         '415': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
         '429': {$ref: '#/components/responses/RateLimited'}
+  /api-tokens:
+    get:
+      tags: [Auth]
+      operationId: listApiTokens
+      summary: List the current user's active API tokens
+      responses:
+        '200':
+          description: Token metadata; plaintext credentials are never listed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/APITokenListResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Auth]
+      operationId: createApiToken
+      summary: Create a scoped API token and return its plaintext once
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAPITokenRequest'}
+      responses:
+        '201':
+          description: One-time API token credential
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/APITokenCredentialResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /api-tokens/{tokenId}:
+    parameters:
+      - name: tokenId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/Uuid'}
+    delete:
+      tags: [Auth]
+      operationId: revokeApiToken
+      summary: Revoke one of the current user's API tokens
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': {description: Token revoked}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /users:
     get:
       tags: [Users]
@@ -620,6 +671,24 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+  /servers/{serverId}/console-tokens:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      tags: [Servers]
+      operationId: issueConsoleConnectionToken
+      summary: Issue a one-minute, single-use console WebSocket token
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '201':
+          description: One-time console connection credential
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConsoleConnectionCredentialResponse'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /servers/{serverId}/console/commands:
     parameters:
       - $ref: '#/components/parameters/ServerId'
@@ -1067,6 +1136,10 @@ components:
       type: apiKey
       in: cookie
       name: gugu_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
   parameters:
     ServerId:
       name: serverId
@@ -1239,6 +1312,65 @@ components:
       required: [data]
       properties:
         data: {$ref: '#/components/schemas/PasswordResetToken'}
+    APITokenScope:
+      type: string
+      enum: [platform.admin, audit.read, nodes.manage, catalog.manage, automation.manage, notifications.manage, storage.manage, quotas.manage, servers.read, servers.power, servers.console, servers.files.read, servers.files.write, servers.backups.read, servers.backups.create, servers.backups.restore, servers.backups.delete, servers.network.read, servers.network.write, servers.startup.read, servers.startup.write]
+    APIToken:
+      type: object
+      additionalProperties: false
+      required: [id, name, scopes, expiresAt, lastUsedAt, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 64}
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/APITokenScope'}
+        expiresAt: {type: [string, 'null'], format: date-time}
+        lastUsedAt: {type: [string, 'null'], format: date-time}
+        createdAt: {type: string, format: date-time}
+    CreateAPITokenRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scopes]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/APITokenScope'}
+        expiresAt: {type: string, format: date-time}
+    APITokenListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/APIToken'}
+    APITokenCredentialResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          allOf:
+            - $ref: '#/components/schemas/APIToken'
+            - type: object
+              required: [token]
+              properties:
+                token: {type: string, minLength: 32, maxLength: 256}
+    ConsoleConnectionCredentialResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [token, expiresAt]
+          properties:
+            token: {type: string, minLength: 32, maxLength: 256}
+            expiresAt: {type: string, format: date-time}
     ServerPermission:
       type: string
       enum:
@@ -1803,3 +1935,4 @@ components:
             details: {type: object, additionalProperties: true}
 security:
   - cookieAuth: []
+  - bearerAuth: []

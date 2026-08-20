@@ -146,6 +146,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the current user's active API tokens */
+        get: operations["listApiTokens"];
+        put?: never;
+        /** Create a scoped API token and return its plaintext once */
+        post: operations["createApiToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api-tokens/{tokenId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tokenId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one of the current user's API tokens */
+        delete: operations["revokeApiToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -391,6 +428,25 @@ export interface paths {
         get: operations["getConsoleSnapshot"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/servers/{serverId}/console-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue a one-minute, single-use console WebSocket token */
+        post: operations["issueConsoleConnectionToken"];
         delete?: never;
         options?: never;
         head?: never;
@@ -773,6 +829,40 @@ export interface components {
         };
         PasswordResetTokenResponse: {
             data: components["schemas"]["PasswordResetToken"];
+        };
+        /** @enum {string} */
+        APITokenScope: "platform.admin" | "audit.read" | "nodes.manage" | "catalog.manage" | "automation.manage" | "notifications.manage" | "storage.manage" | "quotas.manage" | "servers.read" | "servers.power" | "servers.console" | "servers.files.read" | "servers.files.write" | "servers.backups.read" | "servers.backups.create" | "servers.backups.restore" | "servers.backups.delete" | "servers.network.read" | "servers.network.write" | "servers.startup.read" | "servers.startup.write";
+        APIToken: {
+            id: components["schemas"]["Uuid"];
+            name: string;
+            scopes: components["schemas"]["APITokenScope"][];
+            /** Format: date-time */
+            expiresAt: string | null;
+            /** Format: date-time */
+            lastUsedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        CreateAPITokenRequest: {
+            name: string;
+            scopes: components["schemas"]["APITokenScope"][];
+            /** Format: date-time */
+            expiresAt?: string;
+        };
+        APITokenListResponse: {
+            data: components["schemas"]["APIToken"][];
+        };
+        APITokenCredentialResponse: {
+            data: components["schemas"]["APIToken"] & {
+                token: string;
+            };
+        };
+        ConsoleConnectionCredentialResponse: {
+            data: {
+                token: string;
+                /** Format: date-time */
+                expiresAt: string;
+            };
         };
         /** @enum {string} */
         ServerPermission: "servers.read" | "servers.power" | "servers.console" | "servers.files.read" | "servers.files.write" | "servers.backups.read" | "servers.backups.create" | "servers.backups.restore" | "servers.backups.delete" | "servers.network.read" | "servers.network.write" | "servers.startup.read" | "servers.startup.write";
@@ -1427,6 +1517,83 @@ export interface operations {
             429: components["responses"]["RateLimited"];
         };
     };
+    listApiTokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token metadata; plaintext credentials are never listed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APITokenListResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    createApiToken: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAPITokenRequest"];
+            };
+        };
+        responses: {
+            /** @description One-time API token credential */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APITokenCredentialResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            415: components["responses"]["Error"];
+            422: components["responses"]["Error"];
+        };
+    };
+    revokeApiToken: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                tokenId: components["schemas"]["Uuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
     listUsers: {
         parameters: {
             query?: never;
@@ -2055,6 +2222,33 @@ export interface operations {
                     "application/json": {
                         data: components["schemas"]["ConsoleLine"][];
                     };
+                };
+            };
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    issueConsoleConnectionToken: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path: {
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One-time console connection credential */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsoleConnectionCredentialResponse"];
                 };
             };
             401: components["responses"]["Error"];

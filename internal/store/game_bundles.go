@@ -210,7 +210,7 @@ func loadFixedGameCatalog() ([]domain.GameDefinition, error) {
 }
 
 func decodeFixedBundle(content []byte) (fixedBundleDocument, error) {
-	if err := gamedefinition.ValidateV1Alpha1JSON(content); err != nil {
+	if err := gamedefinition.ValidateJSON(content); err != nil {
 		return fixedBundleDocument{}, fmt.Errorf("canonical GameDefinition validation failed: %w", err)
 	}
 	if err := rejectCaseVariantVariablesContainer(content); err != nil {
@@ -229,7 +229,7 @@ func decodeFixedBundle(content []byte) (fixedBundleDocument, error) {
 		}
 		return fixedBundleDocument{}, fmt.Errorf("trailing JSON data: %w", err)
 	}
-	if document.APIVersion != "gugumanager.io/games/v1alpha1" || document.Kind != "GameDefinition" {
+	if (document.APIVersion != gamedefinition.APIVersionV1Alpha1 && document.APIVersion != gamedefinition.APIVersionV1Beta1) || document.Kind != "GameDefinition" {
 		return fixedBundleDocument{}, fmt.Errorf("unsupported GameDefinition identity")
 	}
 	if document.Metadata.ID == "" || document.Metadata.Version == "" || document.Spec.Release.Version == "" {

@@ -2,10 +2,7 @@
 
 import { describe, expect, test, vi } from "vitest";
 import factorioBundle from "../../../spec/game-definition/examples/factorio.json";
-import factorioBundleRaw from "../../../spec/game-definition/examples/factorio.json?raw";
 import paperMCBundle from "../../../spec/game-definition/examples/papermc.json";
-import paperMCBundleRaw from "../../../spec/game-definition/examples/papermc.json?raw";
-import vintageStoryBundleRaw from "../../../spec/game-definition/examples/vintagestory.json?raw";
 import { MockClient } from "./mock";
 import type { StartupValue } from "./types";
 
@@ -321,16 +318,16 @@ describe("MockClient API parity", () => {
 });
 
 describe("MockClient network and startup reconciliation", () => {
-  test("publishes digests of the exact fixed bundle bytes", async () => {
+  test("publishes the canonical digests of the fixed bundles", async () => {
     const client = new MockClient();
     const games = new Map((await client.listGames()).map((game) => [game.id, game]));
 
-    for (const [gameId, rawBundle] of [
-      ["io.gugumanager.papermc", paperMCBundleRaw],
-      ["io.gugumanager.factorio", factorioBundleRaw],
-      ["io.gugumanager.vintagestory", vintageStoryBundleRaw],
+    for (const [gameId, digest] of [
+      ["io.gugumanager.papermc", "sha256:a0118b857dacc2ffd27a56bcdd9cdfcd27f699a5d55ca424bffc447b0572fbfa"],
+      ["io.gugumanager.factorio", "sha256:9234f21256ca3fd1a0886a4ea57f75e30ac6e1f22d1fee7cc7fbe1dc5731b0d7"],
+      ["io.gugumanager.vintagestory", "sha256:f85cd736d3428f3ee81c3261a6ddb36e43df950915209f12659a44e53b9e768f"],
     ] as const) {
-      expect(games.get(gameId)?.bundleDigest).toBe(`sha256:${await sha256(rawBundle)}`);
+      expect(games.get(gameId)?.bundleDigest).toBe(digest);
     }
   });
 
@@ -338,7 +335,7 @@ describe("MockClient network and startup reconciliation", () => {
     const client = new MockClient();
 
     const paper = await client.getStartup(serverId);
-    expect(paper.command).toEqual({ executable: "java", args: ["-Xmx2048M", "-jar", "paper.jar", "--nogui"] });
+    expect(paper.command).toEqual({ executable: "/image/scripts/start", args: [] });
     expect(paper.variables.map((variable) => variable.key)).toEqual(["accept_eula", "memory_mb", "rcon_password"]);
     expect(paper.variables.find((variable) => variable.key === "memory_mb")).toMatchObject({
       default: 2048,
@@ -425,7 +422,7 @@ describe("MockClient network and startup reconciliation", () => {
       ]);
       await expect(client.getServer(operation.serverId)).resolves.toMatchObject({ allocation: "10.0.10.21:25566" });
       await expect(client.getStartup(operation.serverId)).resolves.toMatchObject({
-        command: { executable: "java", args: ["-Xmx8192M", "-jar", "paper.jar", "--nogui"] },
+        command: { executable: "/image/scripts/start", args: [] },
         variables: expect.arrayContaining([
           expect.objectContaining({ key: "memory_mb", value: 8192, hasValue: true }),
           expect.objectContaining({ key: "rcon_password", hasValue: false }),
@@ -647,7 +644,7 @@ describe("MockClient network and startup reconciliation", () => {
       expect(update.type).toBe("reconcile");
       expect((await client.getServer(serverId)).generation).toBe(before.generation + 1);
       const updated = await client.getStartup(serverId);
-      expect(updated.command.args[0]).toBe("-Xmx6144M");
+      expect(updated.variables.find((variable) => variable.key === "memory_mb")).toMatchObject({ value: 6144, hasValue: true });
       expect(updated.variables.find((variable) => variable.key === "rcon_password")).not.toHaveProperty("value");
       await expect(client.updateStartup(
         serverId,

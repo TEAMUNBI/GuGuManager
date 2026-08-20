@@ -1,0 +1,97 @@
+{
+  "apiVersion": "gugumanager.io/games/v1beta1",
+  "kind": "GameDefinition",
+  "metadata": {
+    "id": "io.gugumanager.vintagestory",
+    "license": "Apache-2.0",
+    "name": "Vintage Story",
+    "version": "0.4.0"
+  },
+  "spec": {
+    "bundle": {
+      "artifacts": []
+    },
+    "capabilities": [
+      "console",
+      "backup"
+    ],
+    "compatibility": {
+      "agent": "\u003e=0.1 \u003c1.0",
+      "panel": "\u003e=0.1 \u003c1.0",
+      "platforms": [
+        "linux/amd64"
+      ]
+    },
+    "install": {},
+    "lifecycle": {
+      "configure": "builtin.bindings",
+      "install": "builtin.artifacts"
+    },
+    "release": {
+      "version": "1.20.4"
+    },
+    "runtime": {
+      "adapter": "container/v1",
+      "command": {
+        "args": [
+          "--dataPath",
+          "/data"
+        ],
+        "executable": "/opt/vintagestory/VintagestoryServer"
+      },
+      "dataMounts": [
+        {
+          "backup": true,
+          "name": "server-data",
+          "target": "/data"
+        }
+      ],
+      "health": {
+        "failureThreshold": 4,
+        "intervalSeconds": 15,
+        "portRef": "game",
+        "timeoutSeconds": 5,
+        "type": "tcp"
+      },
+      "image": "registry.invalid/gugumanager/vintagestory@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "ports": [
+        {
+          "containerPort": 42420,
+          "name": "game",
+          "protocol": "tcp",
+          "role": "primary"
+        }
+      ],
+      "stop": {
+        "method": "console",
+        "timeoutSeconds": 30,
+        "value": "/stop"
+      },
+      "user": "1000:1000",
+      "workingDir": "/data"
+    },
+    "variables": {
+      "schema": {
+        "properties": {
+          "max_clients": {
+            "default": 8,
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "world_name": {
+            "default": "Aurora Isles",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "world_name",
+          "max_clients"
+        ],
+        "type": "object"
+      }
+    }
+  }
+}

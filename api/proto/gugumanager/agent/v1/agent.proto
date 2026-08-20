@@ -114,7 +114,7 @@ message Task {
   string server_id = 2;
   uint64 generation = 3;
   // Legacy task name. For typed payloads this MUST match the selected arm
-  // (provision, power, backup, or extension); receivers reject mismatches.
+  // (provision, power, backup, reconcile, or extension); receivers reject mismatches.
   string type = 4;
   google.protobuf.Timestamp deadline = 6;
   string idempotency_key = 7;
@@ -136,6 +136,7 @@ message Task {
     PowerTaskPayload power = 12;
     BackupTaskPayload backup = 13;
     ExtensionTaskPayload extension = 14;
+    ReconcileTaskPayload reconcile = 17;
   }
 }
 
@@ -152,6 +153,33 @@ message ProvisionTaskPayload {
   bool start_after_provision = 5;
   string runtime_target_json = 6;
   string bundle_digest = 7;
+  // Digest of the complete immutable desired runtime input. Older agents may
+  // ignore it; reconcile-capable agents persist it on the container.
+  string desired_digest = 8;
+  uint64 generation = 9;
+  bytes bundle_revision_json = 10;
+  bytes trust_root_pem = 11;
+}
+
+// DesiredRuntimeSpec is the single immutable runtime contract shared by
+// startup, network, resource-limit and bundle changes. Servers remain pinned
+// to bundle_digest; resolving a moving "latest" tag is never an Agent concern.
+message DesiredRuntimeSpec {
+  string game_definition_id = 1;
+  string bundle_digest = 2;
+  string runtime_target_json = 3;
+  ResourceLimits resource_limits = 4;
+  repeated PortAllocation allocations = 5;
+  map<string, string> variables = 6;
+  bool desired_running = 7;
+  string digest = 8;
+  uint64 generation = 9;
+  bytes bundle_revision_json = 10;
+  bytes trust_root_pem = 11;
+}
+
+message ReconcileTaskPayload {
+  DesiredRuntimeSpec desired = 1;
 }
 
 message ResourceLimits {
@@ -384,6 +412,7 @@ message FileOperationRequest {
     MoveFileInput move = 7;
     RemoveFileInput remove = 8;
     DownloadBackupInput download_backup = 9;
+    UploadBackupInput upload_backup = 10;
   }
 
   message ListFilesInput {
@@ -412,6 +441,14 @@ message FileOperationRequest {
   message DownloadBackupInput {
     string backup_id = 1;
   }
+  message UploadBackupInput {
+    string backup_id = 1;
+    bytes content = 2;
+    bool base64 = 3;
+    uint64 size_bytes = 4;
+    string expected_content_digest = 5;
+    string expected_manifest_digest = 6;
+  }
 }
 
 // 文件操作响应（Agent → Control Plane）。request_id 与请求对应。
@@ -428,6 +465,7 @@ message FileOperationResponse {
     MoveFileResult move = 8;
     RemoveFileResult remove = 9;
     DownloadBackupResult download_backup = 10;
+    UploadBackupResult upload_backup = 11;
   }
 
   message FileEntry {
@@ -456,4 +494,5 @@ message FileOperationResponse {
     uint64 size_bytes = 3;
     string filename = 4;
   }
+  message UploadBackupResult {}
 }

@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -71,13 +73,17 @@ func (e *DockerExecutor) ExecuteFileOperation(ctx context.Context, req *agentv1.
 			return resp
 		}
 	} else if _, isDownloadBackup := req.GetOperation().(*agentv1.FileOperationRequest_DownloadBackup); !isDownloadBackup {
-		wasRunning, err := e.ensureContainerRunning(ctx, rt, containerName)
-		if err != nil {
-			resp.Succeeded = false
-			resp.ErrorCode = "FILE_OPERATION_FAILED"
-			return resp
+		if _, isUploadBackup := req.GetOperation().(*agentv1.FileOperationRequest_UploadBackup); isUploadBackup {
+			// UploadBackup writes only the node-local immutable archive.
+		} else {
+			wasRunning, err := e.ensureContainerRunning(ctx, rt, containerName)
+			if err != nil {
+				resp.Succeeded = false
+				resp.ErrorCode = "FILE_OPERATION_FAILED"
+				return resp
+			}
+			defer e.restoreContainerState(ctx, rt, containerName, wasRunning)
 		}
-		defer e.restoreContainerState(ctx, rt, containerName, wasRunning)
 	}
 
 	switch v := req.GetOperation().(type) {
@@ -150,10 +156,76 @@ func (e *DockerExecutor) ExecuteFileOperation(ctx context.Context, req *agentv1.
 			Filename:  result.Filename,
 		}}
 
+	case *agentv1.FileOperationRequest_UploadBackup:
+		if err := e.uploadBackup(ctx, v.UploadBackup); err != nil {
+			resp.ErrorCode = fileErrorCode(err)
+			return resp
+		}
+		resp.Succeeded = true
+		resp.Result = &agentv1.FileOperationResponse_UploadBackup{UploadBackup: &agentv1.FileOperationResponse_UploadBackupResult{}}
+
 	default:
 		resp.ErrorCode = "VALIDATION_FAILED"
 	}
 	return resp
+}
+
+func (e *DockerExecutor) uploadBackup(ctx context.Context, request *agentv1.FileOperationRequest_UploadBackupInput) error {
+	if request == nil || !validSHA256Digest(request.GetExpectedContentDigest()) || !validSHA256Digest(request.GetExpectedManifestDigest()) {
+		return fmt.Errorf("invalid backup identity: %w", os.ErrInvalid)
+	}
+	archive, err := resolveBackupArchive(e.dataRoot, request.GetBackupId(), "")
+	if err != nil {
+		return fmt.Errorf("resolve backup archive: %w", os.ErrInvalid)
+	}
+	content := request.GetContent()
+	if request.GetBase64() {
+		content, err = base64.StdEncoding.DecodeString(string(content))
+		if err != nil {
+			return fmt.Errorf("decode backup: %w", os.ErrInvalid)
+		}
+	}
+	if uint64(len(content)) != request.GetSizeBytes() {
+		return fmt.Errorf("backup size mismatch: %w", errBackupIntegrity)
+	}
+	digest := sha256.Sum256(content)
+	if "sha256:"+hex.EncodeToString(digest[:]) != request.GetExpectedContentDigest() {
+		return fmt.Errorf("backup digest mismatch: %w", errBackupIntegrity)
+	}
+	if existing, err := inspectBackupArchive(archive); err == nil {
+		if existing.Checksum == request.GetExpectedContentDigest() && existing.ManifestDigest == request.GetExpectedManifestDigest() && existing.SizeBytes == int64(len(content)) {
+			return nil
+		}
+		return fmt.Errorf("immutable backup id already contains different content: %w", errBackupIntegrity)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(archive), ".remote-backup-*.partial")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := ctx.Err(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(content); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	metadata, err := inspectBackupArchive(temporaryPath)
+	if err != nil || metadata.ManifestDigest != request.GetExpectedManifestDigest() {
+		return fmt.Errorf("backup manifest mismatch: %w", errBackupIntegrity)
+	}
+	return publishBackupArchive(temporaryPath, archive)
 }
 
 // downloadBackup reads a backup archive from the node-local backup directory

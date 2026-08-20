@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/gugumanager/gugumanager/internal/domain"
 )
 
-// taskEventPayload 是写入 outbox_events 的任务生命周期事件负载。
-// 业务状态、任务与 Outbox 在同一事务内提交，保证事件不丢、不前置。
+const outboxMaxPublishAttempts = 10
+
 type taskEventPayload struct {
 	OperationID string `json:"operationId"`
 	ServerID    string `json:"serverId"`
@@ -23,84 +25,150 @@ type taskEventPayload struct {
 	ErrorCode   string `json:"errorCode,omitempty"`
 }
 
-// sqlExecer 抽象 *sql.DB 与 *sql.Tx 共有的执行能力：事务内调用传 *sql.Tx
-// 保证与业务写入原子提交；无事务的便捷路径（如 gRPC EnqueueTask）传 *sql.DB。
+type OutboxEvent struct {
+	ID            string
+	AggregateType string
+	AggregateID   string
+	EventType     string
+	EventVersion  int
+	BusinessAt    time.Time
+	Payload       json.RawMessage
+}
+
+type OutboxPublisher func(context.Context, OutboxEvent) error
+
 type sqlExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// recordTaskOutboxEventTx 写入一条 server_task 生命周期事件
-// （task.created / task.completed）。事务内调用时与业务写入原子提交，
-// 事务回滚则事件一并回滚，从根源杜绝"业务已写、事件缺失"的半成功状态。
 func (s *Postgres) recordTaskOutboxEvent(ctx context.Context, exec sqlExecer, eventType string, payload taskEventPayload) error {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	_, err = exec.ExecContext(ctx, `
-		INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
-		VALUES ('server_task', $1, $2, $3::jsonb)
+		INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, event_version, business_at, payload)
+		VALUES ('server_task', $1, $2, 1, now(), $3::jsonb)
 	`, payload.ServerID, eventType, string(encoded))
 	return err
 }
 
-// PublishOutboxEvents 消费一批未发布事件：把它们标记为已发布
-// （published_at），返回本次发布的事件数。
-//
-// 多副本语义：多个控制面副本可以各自运行发布器，SELECT ... FOR UPDATE
-// SKIP LOCKED 保证每条事件恰好被一个发布者处理；标记动作幂等，重复执行
-// 无副作用。当前 Agent 以 pull 模式经 ClaimTask 领取任务，事件发布器负责
-// 确认事件已送达并回收未发布积压，为后续 WebSocket / webhook 等实时推送
-// 保留统一扩展点。
+// PublishOutboxEvents keeps the existing administrative/test drain contract.
+// Production uses PublishOutboxEventsTo so broker acknowledgement gates the
+// published timestamp.
 func (s *Postgres) PublishOutboxEvents(ctx context.Context, limit int) (int, error) {
+	return s.PublishOutboxEventsTo(ctx, limit, func(context.Context, OutboxEvent) error { return nil })
+}
+
+// PublishOutboxEventsTo provides at-least-once delivery. A crash after broker
+// acknowledgement but before commit intentionally causes a duplicate; every
+// consumer uses the immutable event ID as its idempotency key.
+func (s *Postgres) PublishOutboxEventsTo(ctx context.Context, limit int, publish OutboxPublisher) (int, error) {
+	if publish == nil {
+		return 0, domain.NewProblem("INTERNAL_ERROR", "Outbox publisher 未配置", false)
+	}
 	if limit <= 0 {
 		limit = 50
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	published := 0
+	for published < limit {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return published, domain.NewProblem("INTERNAL_ERROR", "无法开始 Outbox 事务", true)
+		}
+		var event OutboxEvent
+		err = tx.QueryRowContext(ctx, `
+			SELECT id::text, aggregate_type, aggregate_id, event_type, event_version, business_at, payload
+			FROM outbox_events
+			WHERE published_at IS NULL AND dead_lettered_at IS NULL AND next_attempt_at <= now()
+			ORDER BY created_at
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		`).Scan(&event.ID, &event.AggregateType, &event.AggregateID, &event.EventType, &event.EventVersion, &event.BusinessAt, &event.Payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			_ = tx.Rollback()
+			break
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return published, domain.NewProblem("INTERNAL_ERROR", "无法查询待发布事件", true)
+		}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, domain.NewProblem("INTERNAL_ERROR", "无法开始事务", true)
+		if err = publish(ctx, event); err != nil {
+			message := strings.TrimSpace(err.Error())
+			if len(message) > 1024 {
+				message = message[:1024]
+			}
+			_, updateErr := tx.ExecContext(ctx, `
+				UPDATE outbox_events
+				SET publish_attempts = publish_attempts + 1,
+				    last_error = $2,
+				    next_attempt_at = now() + make_interval(secs => LEAST(300, (1::bigint << LEAST(8, publish_attempts + 1)))::integer),
+				    dead_lettered_at = CASE WHEN publish_attempts + 1 >= $3 THEN now() ELSE NULL END
+				WHERE id = $1
+			`, event.ID, message, outboxMaxPublishAttempts)
+			if updateErr != nil || tx.Commit() != nil {
+				return published, domain.NewProblem("INTERNAL_ERROR", "无法记录 Outbox 发布失败", true)
+			}
+			return published, err
+		}
+
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE outbox_events
+			SET published_at = now(), publish_attempts = publish_attempts + 1,
+			    last_error = NULL, next_attempt_at = now()
+			WHERE id = $1
+		`, event.ID); err != nil {
+			_ = tx.Rollback()
+			return published, domain.NewProblem("INTERNAL_ERROR", "无法标记事件已发布", true)
+		}
+		if err = tx.Commit(); err != nil {
+			return published, domain.NewProblem("INTERNAL_ERROR", "无法提交 Outbox 事务", true)
+		}
+		published++
 	}
-	defer tx.Rollback()
+	return published, nil
+}
 
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM outbox_events
-		WHERE published_at IS NULL
-		ORDER BY created_at
-		LIMIT $1
-		FOR UPDATE SKIP LOCKED
-	`, limit)
+func (s *Postgres) ReplayDeadLetter(ctx context.Context, eventID string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE outbox_events
+		SET dead_lettered_at=NULL, publish_attempts=0, last_error=NULL, next_attempt_at=now()
+		WHERE id=$1 AND published_at IS NULL AND dead_lettered_at IS NOT NULL
+	`, eventID)
 	if err != nil {
-		return 0, domain.NewProblem("INTERNAL_ERROR", "无法查询待发布事件", true)
+		return domain.NewProblem("INTERNAL_ERROR", "无法重放 Outbox 事件", true)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return domain.NewProblem("NOT_FOUND", "死信事件不存在", false)
+	}
+	return nil
+}
+
+func (s *Postgres) OutboxDeadLetters(ctx context.Context) ([]domain.OutboxDeadLetter, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id::text, aggregate_type, aggregate_id, event_type, event_version,
+		       payload, publish_attempts, COALESCE(last_error, ''), business_at, dead_lettered_at
+		FROM outbox_events WHERE published_at IS NULL AND dead_lettered_at IS NOT NULL
+		ORDER BY dead_lettered_at DESC, id LIMIT 200
+	`)
+	if err != nil {
+		return nil, domain.NewProblem("INTERNAL_ERROR", "无法读取 Outbox 死信", true)
 	}
 	defer rows.Close()
-
-	var ids []string
+	result := []domain.OutboxDeadLetter{}
 	for rows.Next() {
-		var eventID string
-		if err := rows.Scan(&eventID); err != nil {
-			return 0, domain.NewProblem("INTERNAL_ERROR", "无法读取待发布事件", true)
+		var item domain.OutboxDeadLetter
+		var payload []byte
+		if err := rows.Scan(&item.ID, &item.AggregateType, &item.AggregateID, &item.EventType,
+			&item.EventVersion, &payload, &item.PublishAttempts, &item.LastError, &item.BusinessAt, &item.DeadLetteredAt); err != nil {
+			return nil, err
 		}
-		ids = append(ids, eventID)
+		if err := json.Unmarshal(payload, &item.Payload); err != nil {
+			item.Payload = map[string]any{"invalid": true}
+		}
+		result = append(result, item)
 	}
-	if err := rows.Err(); err != nil {
-		return 0, domain.NewProblem("INTERNAL_ERROR", "无法读取待发布事件", true)
-	}
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE outbox_events
-		SET published_at = now()
-		WHERE id = ANY($1::uuid[])
-	`, ids); err != nil {
-		return 0, domain.NewProblem("INTERNAL_ERROR", "无法标记事件已发布", true)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, domain.NewProblem("INTERNAL_ERROR", "无法提交事务", true)
-	}
-	return len(ids), nil
+	return result, rows.Err()
 }

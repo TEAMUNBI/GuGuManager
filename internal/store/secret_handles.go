@@ -54,21 +54,45 @@ func secretHandleSnapshot(values map[string]any, key string) (string, bool, erro
 }
 
 func (s *Postgres) materializeSecretHandlesTx(ctx context.Context, tx *sql.Tx, task *ClaimedTask) error {
-	if task == nil || task.TaskType != "provision" || len(task.InputJSON()) == 0 {
+	if task == nil || len(task.InputJSON()) == 0 || (task.TaskType != "provision" && task.TaskType != "reconcile") {
 		return nil
 	}
-	var payload provisionTaskPayload
-	if err := json.Unmarshal(task.InputJSON(), &payload); err != nil {
-		return fmt.Errorf("decode provision task input: %w", err)
+	var variables map[string]string
+	var secretKeys []string
+	var encode func() ([]byte, error)
+	if task.TaskType == "provision" {
+		var payload provisionTaskPayload
+		if err := json.Unmarshal(task.InputJSON(), &payload); err != nil {
+			return fmt.Errorf("decode provision task input: %w", err)
+		}
+		variables = payload.Variables
+		secretKeys = payload.SecretKeys
+		encode = func() ([]byte, error) {
+			payload.Variables = variables
+			payload.SecretKeys = nil
+			return json.Marshal(payload)
+		}
+	} else {
+		var payload reconcileTaskPayloadStorage
+		if err := json.Unmarshal(task.InputJSON(), &payload); err != nil {
+			return fmt.Errorf("decode reconcile task input: %w", err)
+		}
+		variables = payload.Desired.Variables
+		secretKeys = payload.Desired.SecretKeys
+		encode = func() ([]byte, error) {
+			payload.Desired.Variables = variables
+			payload.Desired.SecretKeys = nil
+			return json.Marshal(payload)
+		}
 	}
-	if len(payload.SecretKeys) == 0 {
+	if len(secretKeys) == 0 {
 		return nil
 	}
 	values, err := s.startupValuesTx(ctx, tx, task.ServerID)
 	if err != nil {
 		return err
 	}
-	for _, key := range payload.SecretKeys {
+	for _, key := range secretKeys {
 		ciphertext, ok, err := secretHandleSnapshot(values, key)
 		if err != nil {
 			return fmt.Errorf("snapshot startup secret %q: %w", key, err)
@@ -85,19 +109,18 @@ func (s *Postgres) materializeSecretHandlesTx(ctx context.Context, tx *sql.Tx, t
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO secret_handles (token_digest, operation_id, server_id, node_id, variable_key, encrypted_value, attempt, expires_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, digest[:], task.OperationID, task.ServerID, task.NodeID, key, ciphertext, task.Attempt, expiresAt); err != nil {
+		`, digest[:], task.OperationID, task.ServerID, task.NodeID, key, ciphertext, task.Attempt+1, expiresAt); err != nil {
 			return fmt.Errorf("persist secret handle: %w", err)
 		}
 		// The raw value is intentionally replaced with an opaque reference in
 		// the leased payload; only the resolver can exchange it for plaintext.
-		if payload.Variables == nil {
-			payload.Variables = make(map[string]string)
+		if variables == nil {
+			variables = make(map[string]string)
 		}
-		payload.Variables[key] = secretHandleValue(token[:])
+		variables[key] = secretHandleValue(token[:])
 	}
-	// SecretKeys is a storage-only field and must never be sent to protojson.
-	payload.SecretKeys = nil
-	encoded, err := json.Marshal(payload)
+	// SecretKeys is storage-only metadata and must never be sent to protojson.
+	encoded, err := encode()
 	if err != nil {
 		return fmt.Errorf("encode leased provision payload: %w", err)
 	}

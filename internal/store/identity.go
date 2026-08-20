@@ -550,6 +550,22 @@ func (m *Memory) revokeUserSessionsLocked(userID string) {
 			delete(m.sessions, digest)
 		}
 	}
+	for tokenID, record := range m.apiTokens {
+		if record.UserID != userID {
+			continue
+		}
+		delete(m.apiTokens, tokenID)
+		for digest, candidateID := range m.apiTokenByDigest {
+			if candidateID == tokenID {
+				delete(m.apiTokenByDigest, digest)
+			}
+		}
+	}
+	for digest, connection := range m.consoleTokens {
+		if connection.UserID == userID {
+			delete(m.consoleTokens, digest)
+		}
+	}
 }
 
 func (m *Memory) revokePasswordResetTokensLocked(userID string) {

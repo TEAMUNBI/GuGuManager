@@ -460,41 +460,95 @@ function ConsoleTab({ server }: { server: Server }) {
   }).catch(() => undefined), [server.id]);
 
   useEffect(() => {
-    load();
-    // 轮询作为 WebSocket 不可用时的兜底：WS 建立后停表，断开后恢复。
+    void load();
+    let disposed = false;
+    let revoked = false;
+    let reconnectAttempt = 0;
+    let reconnectTimer: number | undefined;
+    let socket: WebSocket | undefined;
+    let lastSequence = 0;
+    // Polling remains the continuity path while a connection token is being
+    // issued, a socket is reconnecting, or the real-time service is degraded.
     let timer: number | undefined;
     const startPolling = () => { if (timer === undefined) timer = window.setInterval(load, 1800); };
     const stopPolling = () => { if (timer !== undefined) { window.clearInterval(timer); timer = undefined; } };
     startPolling();
 
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${proto}//${window.location.host}${api.consoleStreamPath(server.id)}`);
-    socket.onopen = () => stopPolling();
-    socket.onmessage = (event) => {
-      let frame: { type?: string; lines?: ConsoleLine[]; line?: ConsoleLine };
+    const scheduleReconnect = () => {
+      if (disposed || revoked || reconnectTimer !== undefined) return;
+      startPolling();
+      const base = Math.min(30_000, 500 * (2 ** reconnectAttempt));
+      const delay = base + Math.floor(Math.random() * Math.max(1, base / 3));
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined;
+        void connect();
+      }, delay);
+    };
+
+    const connect = async () => {
       try {
-        frame = JSON.parse(String(event.data));
+        const credential = await api.consoleToken(server.id, session.csrfToken);
+        if (disposed || revoked) return;
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        socket = new WebSocket(`${proto}//${window.location.host}${api.consoleStreamPath(server.id, credential.token, lastSequence)}`);
+        socket.onopen = () => {
+          reconnectAttempt = 0;
+          stopPolling();
+        };
+        socket.onmessage = (event) => {
+          let frame: { version?: number; type?: string; lines?: ConsoleLine[]; line?: ConsoleLine; reason?: string };
+          try {
+            frame = JSON.parse(String(event.data));
+          } catch {
+            return;
+          }
+          if (frame.version !== 1) return;
+          if ((frame.type === "snapshot" || frame.type === "reset") && Array.isArray(frame.lines)) {
+            const receivedAt = new Date().toISOString();
+            const received = frame.lines.map((line) => ({ ...line, receivedAt }));
+            lastSequence = received.at(-1)?.sequence ?? lastSequence;
+            setLines(frame.type === "reset" ? received : (previous) => {
+              const bySequence = new Map(previous.map((line) => [line.sequence, line]));
+              for (const line of received) bySequence.set(line.sequence, line);
+              return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence).slice(-500);
+            });
+          } else if (frame.type === "line" && frame.line) {
+            const receivedAt = new Date().toISOString();
+            const { sequence, timestamp, stream, message } = frame.line;
+			if (lastSequence > 0 && sequence > lastSequence + 1) {
+			  // A bounded server-side subscriber dropped old lines. Reconnect with
+			  // the last contiguous sequence so snapshot/reset explicitly repairs
+			  // the gap; REST polling remains active during the repair.
+			  startPolling();
+			  socket?.close();
+			  return;
+			}
+            lastSequence = Math.max(lastSequence, sequence);
+            setLines((previous) => previous.some((line) => line.sequence === sequence)
+              ? previous
+              : [...previous.slice(-499), { sequence, timestamp, stream, message, receivedAt }]);
+          } else if (frame.type === "revoked") {
+            revoked = true;
+            startPolling();
+            socket?.close();
+          }
+        };
+        socket.onclose = scheduleReconnect;
+        socket.onerror = () => socket?.close();
       } catch {
-        return;
-      }
-      if (frame.type === "history" && Array.isArray(frame.lines)) {
-        const receivedAt = new Date().toISOString();
-        setLines(frame.lines.map((line) => ({ ...line, receivedAt })));
-      } else if (frame.type === "line" && frame.line) {
-        const receivedAt = new Date().toISOString();
-        const { sequence, timestamp, stream, message } = frame.line;
-        setLines((prev) => [...prev.slice(-499), { sequence, timestamp, stream, message, receivedAt }]);
+        scheduleReconnect();
       }
     };
-    const fallbackToPolling = () => startPolling();
-    socket.onclose = fallbackToPolling;
-    socket.onerror = fallbackToPolling;
+    void connect();
 
     return () => {
+      disposed = true;
       stopPolling();
-      socket.close();
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      socket?.close();
     };
-  }, [load, server.id]);
+  }, [load, server.id, session.csrfToken]);
 
   useEffect(() => {
     if (autoScroll) {

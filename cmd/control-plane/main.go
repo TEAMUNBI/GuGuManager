@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,8 +27,10 @@ import (
 	"github.com/gugumanager/gugumanager/internal/agentca"
 	"github.com/gugumanager/gugumanager/internal/agentrpc"
 	"github.com/gugumanager/gugumanager/internal/config"
+	"github.com/gugumanager/gugumanager/internal/domain"
 	"github.com/gugumanager/gugumanager/internal/httpapi"
 	"github.com/gugumanager/gugumanager/internal/migrations"
+	"github.com/gugumanager/gugumanager/internal/objectstore"
 	"github.com/gugumanager/gugumanager/internal/store"
 )
 
@@ -102,7 +105,15 @@ func main() {
 		outboxCtx, stopOutbox := context.WithCancel(context.Background())
 		defer stopOutbox()
 		go reconcileTaskLeases(outboxCtx, pg, logger)
-		go publishOutboxEvents(outboxCtx, pg, logger)
+		if readiness == nil || readiness.redis == nil {
+			logger.Error("production outbox requires Redis")
+			os.Exit(1)
+		}
+		pg.SetConsoleBroadcaster(redisConsoleBroadcaster{client: readiness.redis})
+		go consumeConsoleBroadcasts(outboxCtx, readiness.redis, pg, logger)
+		go publishOutboxEvents(outboxCtx, pg, readiness.redis, logger)
+		go reconcileRemoteBackups(outboxCtx, pg, logger)
+		go reconcileAutomation(outboxCtx, pg, logger)
 	}
 
 	apiOptions := controlPlaneHTTPOptions(cfg.Environment, agentServer, readiness)
@@ -127,6 +138,66 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown", "error", err)
+	}
+}
+
+const consoleRedisStream = "gugumanager:console:v1"
+
+type redisConsoleBroadcaster struct {
+	client *redis.Client
+}
+
+func (b redisConsoleBroadcaster) PublishConsoleLines(ctx context.Context, serverID string, lines []domain.ConsoleLine) error {
+	if len(lines) == 0 {
+		return nil
+	}
+	pipe := b.client.Pipeline()
+	for _, line := range lines {
+		pipe.XAdd(ctx, &redis.XAddArgs{
+			Stream: consoleRedisStream, MaxLen: 10000, Approx: true,
+			Values: map[string]any{
+				"serverId": serverID, "sequence": line.Sequence, "timestamp": line.Timestamp.UTC().Format(time.RFC3339Nano),
+				"source": line.Stream, "message": line.Message,
+			},
+		})
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// consumeConsoleBroadcasts uses XREAD rather than a consumer group because
+// every control-plane replica must see every line. The initial "$" cursor is
+// intentional: a new replica sends the durable PostgreSQL snapshot first and
+// then follows only newly committed stream entries.
+func consumeConsoleBroadcasts(ctx context.Context, client *redis.Client, pg *store.Postgres, logger *slog.Logger) {
+	cursor := "$"
+	for ctx.Err() == nil {
+		streams, err := client.XRead(ctx, &redis.XReadArgs{
+			Streams: []string{consoleRedisStream, cursor}, Count: 256, Block: 5 * time.Second,
+		}).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) || ctx.Err() != nil {
+				continue
+			}
+			logger.Warn("consume console broadcast", "error", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		for _, stream := range streams {
+			for _, message := range stream.Messages {
+				cursor = message.ID
+				serverID := fmt.Sprint(message.Values["serverId"])
+				sequence, parseErr := strconv.ParseInt(fmt.Sprint(message.Values["sequence"]), 10, 64)
+				timestamp, timeErr := time.Parse(time.RFC3339Nano, fmt.Sprint(message.Values["timestamp"]))
+				if serverID == "" || parseErr != nil || timeErr != nil {
+					logger.Warn("discard malformed console broadcast", "stream_id", message.ID)
+					continue
+				}
+				pg.PublishConsoleBroadcast(serverID, []domain.ConsoleLine{{
+					Sequence: sequence, Timestamp: timestamp, Stream: fmt.Sprint(message.Values["source"]), Message: fmt.Sprint(message.Values["message"]),
+				}})
+			}
+		}
 	}
 }
 
@@ -273,6 +344,9 @@ func buildProductionService(ctx context.Context, cfg config.Config, logger *slog
 	if err := configureSecretCipher(pg, cfg); err != nil {
 		return nil, err
 	}
+	if err := configureObjectStore(ctx, pg, cfg); err != nil {
+		return nil, err
+	}
 	// 恢复上次运行期间持久化的控制台日志与指标（启动一次）。
 	pg.RestoreTelemetry(ctx)
 	logger.Info("production service ready", "file_root", fileRoot, "adapter", "postgres")
@@ -285,32 +359,112 @@ type secretKeyringFile struct {
 }
 
 func configureSecretCipher(pg *store.Postgres, cfg config.Config) error {
+	active, keys, err := loadEncryptionKeys(cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.EncryptionKeyringFile != "" {
+		if err := pg.SetSecretKeyring(active, keys); err != nil {
+			return fmt.Errorf("initialize secret keyring: %w", err)
+		}
+		return nil
+	}
+	if err := pg.SetSecretCipher(keys[active]); err != nil {
+		return fmt.Errorf("initialize secret cipher: %w", err)
+	}
+	return nil
+}
+
+func reconcileRemoteBackups(ctx context.Context, pg *store.Postgres, logger *slog.Logger) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		if archived, err := pg.ArchivePendingBackups(ctx, 4); err != nil && ctx.Err() == nil {
+			logger.Warn("archive backup objects", "error", err)
+		} else if archived > 0 {
+			logger.Info("archived backup objects", "count", archived)
+		}
+		if deleted, err := pg.ReconcileObjectTombstones(ctx, 8); err != nil && ctx.Err() == nil {
+			logger.Warn("reconcile object tombstones", "error", err)
+		} else if deleted > 0 {
+			logger.Info("deleted orphaned backup objects", "count", deleted)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func reconcileAutomation(ctx context.Context, pg *store.Postgres, logger *slog.Logger) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		if count, err := pg.RunDueSchedules(ctx, time.Now().UTC(), 16); err != nil && ctx.Err() == nil {
+			logger.Warn("run due schedules", "error", err)
+		} else if count > 0 {
+			logger.Info("processed due schedules", "count", count)
+		}
+		if count, err := pg.DeliverNotifications(ctx, 16); err != nil && ctx.Err() == nil {
+			logger.Warn("deliver notifications", "error", err)
+		} else if count > 0 {
+			logger.Info("delivered notifications", "count", count)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func loadEncryptionKeys(cfg config.Config) (string, map[string][]byte, error) {
 	if cfg.EncryptionKeyringFile != "" {
 		contents, err := os.ReadFile(cfg.EncryptionKeyringFile)
 		if err != nil {
-			return fmt.Errorf("read encryption keyring file: %w", err)
+			return "", nil, fmt.Errorf("read encryption keyring file: %w", err)
 		}
 		var file secretKeyringFile
 		if err := json.Unmarshal(contents, &file); err != nil {
-			return fmt.Errorf("parse encryption keyring file: %w", err)
+			return "", nil, fmt.Errorf("parse encryption keyring file: %w", err)
 		}
 		keys := make(map[string][]byte, len(file.Keys))
 		for keyID, material := range file.Keys {
 			keys[keyID] = []byte(material)
 		}
-		if err := pg.SetSecretKeyring(file.Active, keys); err != nil {
-			return fmt.Errorf("initialize secret keyring: %w", err)
-		}
-		return nil
+		return file.Active, keys, nil
 	}
-	encryptionKey, err := os.ReadFile(cfg.EncryptionKeyFile)
+	content, err := os.ReadFile(cfg.EncryptionKeyFile)
 	if err != nil {
-		return fmt.Errorf("read encryption key file: %w", err)
+		return "", nil, fmt.Errorf("read encryption key file: %w", err)
 	}
-	if err := pg.SetSecretCipher(bytes.TrimSpace(encryptionKey)); err != nil {
-		return fmt.Errorf("initialize secret cipher: %w", err)
+	return "legacy", map[string][]byte{"legacy": bytes.TrimSpace(content)}, nil
+}
+
+func configureObjectStore(ctx context.Context, pg *store.Postgres, cfg config.Config) error {
+	active, keys, err := loadEncryptionKeys(cfg)
+	if err != nil {
+		return err
 	}
-	return nil
+	keyring, err := objectstore.NewKeyring(active, keys)
+	if err != nil {
+		return fmt.Errorf("initialize object keyring: %w", err)
+	}
+	var storage objectstore.Store
+	if cfg.ObjectStoreType == "s3" {
+		storage, err = objectstore.NewS3(ctx, objectstore.S3Config{
+			Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+			AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey, SessionToken: cfg.S3SessionToken,
+			Secure: cfg.S3Secure, PathStyle: cfg.S3PathStyle, CreateBucket: cfg.S3CreateBucket,
+		})
+	} else {
+		storage, err = objectstore.NewLocal(cfg.ObjectStoreRoot)
+	}
+	if err != nil {
+		return fmt.Errorf("initialize %s object store: %w", cfg.ObjectStoreType, err)
+	}
+	return pg.SetObjectStore(storage, keyring)
 }
 
 // buildAgentGRPCServer 构造 Agent 的 mTLS gRPC 服务器（仅 production）。
@@ -443,7 +597,7 @@ func reconcileTaskLeases(ctx context.Context, pg *store.Postgres, logger *slog.L
 
 // publishOutboxEvents 周期消费 outbox_events 中未发布的任务事件并标记
 // published_at，防止未发布积压无限增长；SKIP LOCKED 保证多副本只消费一次。
-func publishOutboxEvents(ctx context.Context, pg *store.Postgres, logger *slog.Logger) {
+func publishOutboxEvents(ctx context.Context, pg *store.Postgres, redisClient *redis.Client, logger *slog.Logger) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -451,7 +605,17 @@ func publishOutboxEvents(ctx context.Context, pg *store.Postgres, logger *slog.L
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			published, err := pg.PublishOutboxEvents(ctx, 50)
+			published, err := pg.PublishOutboxEventsTo(ctx, 50, func(publishCtx context.Context, event store.OutboxEvent) error {
+				return redisClient.XAdd(publishCtx, &redis.XAddArgs{
+					Stream: "gugumanager:events:v1", MaxLen: 100000, Approx: true,
+					Values: map[string]any{
+						"eventId": event.ID, "aggregateType": event.AggregateType,
+						"aggregateId": event.AggregateID, "eventType": event.EventType,
+						"eventVersion": event.EventVersion, "businessAt": event.BusinessAt.Format(time.RFC3339Nano),
+						"payload": string(event.Payload),
+					},
+				}).Err()
+			})
 			if err != nil {
 				logger.Warn("publish outbox events", "error", err)
 				continue
